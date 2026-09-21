@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/hybrid-ai-backup.timer
+# PURPOSE (plain English):
+#   Decides WHEN the nightly backup runs. The .service file decides how.
+#
+#   Enable it with:
+#     systemctl --user enable --now hybrid-ai-backup.timer
+#   Check the next run:
+#     systemctl --user list-timers hybrid-ai-backup.timer
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Nightly hybrid-ai backup to Cloudflare R2
+Documentation=file://%h/hybrid-ai/backup/README.md
+
+[Timer]
+# 03:15 local time every day -- late enough to be quiet, not on the hour where
+# it would collide with every other cron job on the planet.
+OnCalendar=*-*-* 03:15:00
+
+# AVAILABILITY: if the Pi was powered off at 03:15, run the backup shortly
+# after it next boots instead of silently skipping a day. This is the single
+# most valuable line in the file for a home server.
+Persistent=true
+
+# Spread the actual start over a 15-minute window. Avoids a thundering herd
+# against R2 if you ever run more than one of these.
+RandomizedDelaySec=15min
+
+# Timers are cheap; missing backups are not. Wake the system if it supports it.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

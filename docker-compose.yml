@@ -1,0 +1,312 @@
+# ---------------------------------------------------------------------------
+# FILE: docker-compose.yml
+# PURPOSE (plain English):
+#   This file is the blueprint for the two programs that run on your Raspberry
+#   Pi. Docker Compose reads it and starts both of them as "containers" --
+#   isolated mini-environments that bundle an app with everything it needs.
+#
+#   The two containers are:
+#     - ollama      : runs small AI models directly on the Pi
+#     - open-webui  : the chat website you actually open in your browser
+#
+# HOW IT IS RUN:
+#   Never run this by hand. The install.sh script runs it for you, because it
+#   first has to generate the .env file that fills in all the ${VARIABLES}
+#   below. If you run it manually you will get "variable is not set" warnings.
+#
+#   install.sh effectively calls:  docker compose --env-file .env up -d
+#
+# THE PERSISTENCE CONTRACT (important -- read this):
+#   ./ollama_data  -> downloaded AI model files
+#   ./webui_data   -> your chat history, uploaded documents, and vector database
+#
+#   These are "bind mounts": real folders on the Pi's SD card that get mapped
+#   into the containers. We deliberately did NOT use Docker "named volumes",
+#   because named volumes are hidden away in Docker's internals and are easy to
+#   delete by accident. With bind mounts, you can see your data, back it up
+#   with a normal file copy, and destroy/rebuild containers as often as you
+#   like without ever losing it.
+#
+#   Back up these two folders. Everything else in this repo is disposable.
+# ---------------------------------------------------------------------------
+
+services:
+
+  # -------------------------------------------------------------------------
+  # OLLAMA :: the local, lightweight AI engine
+  #
+  # Handles the cheap, fast, private work: routing decisions, short summaries,
+  # and turning your documents into embeddings (the numeric representations
+  # that make document search work). Anything it can answer never leaves the Pi.
+  # -------------------------------------------------------------------------
+  ollama:
+    # SECURITY: pin to an explicit version, not :latest. A mutable tag means
+    # `docker compose pull` can silently swap the image underneath you, which
+    # is both a supply-chain risk and an unreproducible-deploy problem.
+    # Bump deliberately after reading the release notes.
+    image: ollama/ollama:0.5.7
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      # "127.0.0.1:" at the front means ONLY this Pi can reach this port.
+      # Without that prefix, the port would be open to your whole network.
+      # Open WebUI still reaches it privately via the Docker network.
+      - "127.0.0.1:11434:11434"
+    volumes:
+      # Format is  <folder on the Pi>:<folder inside the container>
+      - ./ollama_data:/root/.ollama
+    # A REAL, kernel-enforced memory cap. This is what actually stops a model
+    # from taking the whole machine down -- unlike OLLAMA_MAX_VRAM, which was
+    # never honoured by Ollama and has been removed upstream.
+    mem_limit: ${OLLAMA_MEM_LIMIT:-8g}
+    mem_reservation: 512m
+    # Leave one core for the OS, the UI, and the proxy. Without this, a busy
+    # inference run makes the whole Pi feel unresponsive, including the web UI
+    # you are waiting on.
+    cpus: ${OLLAMA_CPUS:-3.5}
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      # How long a model stays resident. Reloading a 2 GB model from disk is
+      # slow; on a 16 GB Pi there is room to keep it warm much longer, which
+      # makes follow-up questions feel far faster than the first one.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      # One request at a time. On a bandwidth-bound machine, concurrency does
+      # not raise total throughput -- it just makes every request slower and
+      # multiplies KV cache memory.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      # Ollama silently caps EVERY model at 4096 tokens unless told otherwise,
+      # which quietly truncates long chats and RAG context.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+      # Halves KV cache memory for negligible quality loss, which is what makes
+      # the larger context above affordable.
+      OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-1}
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-q8_0}
+      # --- Privacy: switch off every telemetry/analytics phone-home ---------
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+      OTEL_SDK_DISABLED: "true"
+    healthcheck:
+      # Docker runs this command periodically. If it fails repeatedly, Docker
+      # marks the container unhealthy -- which is how open-webui knows to wait.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      # Cap log size. An unbounded log file will eventually fill the SD card.
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # OPEN WEBUI :: the chat interface and the brain of the control plane
+  #
+  # This is the website you visit at http://<pi-address>:3000. It stores your
+  # conversations, holds your uploaded documents, runs the vector database, and
+  # hosts the "pipe" function that reaches out to the cloud GPU when you pick
+  # the big model.
+  # -------------------------------------------------------------------------
+  open-webui:
+    # SECURITY: pinned for the same reason as Ollama above. ":main" tracks
+    # the development branch and can change on any push upstream.
+    image: ghcr.io/open-webui/open-webui:v0.5.20
+    container_name: open-webui
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        # Do not start until Ollama's healthcheck is passing, otherwise
+        # Open WebUI boots with an empty model list and confuses you.
+        condition: service_healthy
+    # Embedding documents is Open WebUI's most memory-hungry operation by far;
+    # this cap keeps a large upload from destabilising the whole machine.
+    mem_limit: ${WEBUI_MEM_LIMIT:-3g}
+    mem_reservation: 256m
+    cpus: ${WEBUI_CPUS:-2.0}
+    ports:
+      # Reachable from your whole network (and tailnet) on port 3000.
+      - "3000:8080"
+    volumes:
+      - ./webui_data:/app/backend/data
+      # Mounted read-only (":ro"). This just makes the pipe source visible
+      # inside the container for reference; you still import it through the UI.
+      - ./openwebui:/app/backend/data/functions_src:ro
+    environment:
+      # --- Where to find the local model engine ----------------------------
+      # "ollama" resolves to the other container by name on the Docker network.
+      OLLAMA_BASE_URL: http://ollama:11434
+
+      # --- Login session encryption ----------------------------------------
+      # Generated once by install.sh and then reused forever. If this value
+      # changes, everyone gets logged out.
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      WEBUI_AUTH: ${WEBUI_AUTH:-true}
+
+      # --- Cloud GPU settings, read by openwebui/runpod_pipe.py ------------
+      TAILSCALE_IP: ${TAILSCALE_IP}
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY}
+      RUNPOD_POD_ID: ${RUNPOD_POD_ID}
+      VLLM_PORT: ${VLLM_PORT:-8000}
+      VLLM_MODEL_NAME: ${VLLM_MODEL_NAME:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}
+      POD_WARMUP_TIMEOUT: ${POD_WARMUP_TIMEOUT:-600}
+
+      # --- Privacy / zero-trace enforcement --------------------------------
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+      OTEL_SDK_DISABLED: "true"
+      # Stop the app calling out to community servers to share or rate chats.
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_MESSAGE_RATING: "false"
+      ENABLE_OPENAI_API: ${ENABLE_OPENAI_API:-false}
+      # Document search stays local: embeddings are computed inside this
+      # container and stored in Chroma on your SD card. Nothing is shipped out.
+      RAG_EMBEDDING_ENGINE: ""
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      VECTOR_DB: chroma
+      CHROMA_TELEMETRY_DISABLED: "true"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    extra_hosts:
+      # Lets the container reach services running on the Pi itself.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # Tries curl, then wget, then Python. Open WebUI images have shipped
+      # different toolsets over time, and a healthcheck that fails only
+      # because a binary is missing produces a container marked "unhealthy"
+      # while it is actually serving perfectly -- a confusing false alarm.
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -fsS http://localhost:8080/health >/dev/null 2>&1 ||
+          wget -qO- http://localhost:8080/health >/dev/null 2>&1 ||
+          python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health',timeout=5).status==200 else 1)" ||
+          exit 1
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # STATUS PAGE :: at-a-glance health, log tails, and one-click diagnostics
+  #
+  # Reached at http://<your-pi>/status via the proxy below.
+  #
+  # SECURITY POSTURE -- this container is deliberately starved of privilege:
+  #   - It is given NO credentials. Not .env, not an API key, nothing. It
+  #     cannot leak what it was never given.
+  #   - Its filesystem is read-only, it drops every Linux capability, and it
+  #     runs as an unprivileged user.
+  #   - It mounts only what it measures: webui_data and two log files, all
+  #     read-only.
+  #   - Docker socket access is read-only AND the app only ever issues GET
+  #     requests. See status/README.md for the important caveat about what
+  #     socket access really means.
+  # -------------------------------------------------------------------------
+  status:
+    image: python:3.12-slim
+    container_name: hybrid-ai-status
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    # No published ports. The proxy is the only way in, which is what keeps
+    # the IP allowlist in the Caddyfile from being trivially bypassed.
+    expose:
+      - "8088"
+    # Tiny by design; capped so it can never crowd out inference.
+    mem_limit: 256m
+    cpus: "0.5"
+    command: ["python", "-u", "/app/app.py"]
+    volumes:
+      - ./status/app.py:/app/app.py:ro
+      # Read-only Docker socket: needed for container state and log tails.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Measured, never read for content.
+      - ./webui_data:/data/webui_data:ro
+      - ./backup.log:/data/backup.log:ro
+      - ./install.log:/data/install.log:ro
+    environment:
+      STATUS_PORT: "8088"
+      OLLAMA_URL: http://ollama:11434
+      WEBUI_URL: http://open-webui:8080
+      WEBUI_DATA_PATH: /data/webui_data
+      BACKUP_LOG_PATH: /data/backup.log
+      INSTALL_LOG_PATH: /data/install.log
+      # Not a secret: a private mesh address, and it is masked in all output.
+      TAILSCALE_IP: ${TAILSCALE_IP}
+      VLLM_PORT: ${VLLM_PORT:-8000}
+      PYTHONDONTWRITEBYTECODE: "1"
+      DO_NOT_TRACK: "true"
+    user: "${STATUS_UID:-1000}:${DOCKER_GID:-999}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8088/status/healthz',timeout=5)\" || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # -------------------------------------------------------------------------
+  # REVERSE PROXY :: one address for everything
+  #
+  #   http://<your-pi>/status  -> status page (restricted to LAN + tailnet)
+  #   http://<your-pi>/        -> Open WebUI
+  #
+  # Port 3000 remains published on open-webui so existing bookmarks and the
+  # health checks in install.sh keep working unchanged.
+  # -------------------------------------------------------------------------
+  proxy:
+    image: caddy:2.8-alpine
+    container_name: hybrid-ai-proxy
+    restart: unless-stopped
+    depends_on:
+      - open-webui
+      - status
+    mem_limit: 128m
+    cpus: "0.5"
+    ports:
+      - "80:80"
+    volumes:
+      - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy validates its config at boot; a syntax error here stops the
+      # proxy only, leaving Open WebUI reachable on :3000.
+      - ./webui_data/caddy:/data
+    environment:
+      DO_NOT_TRACK: "true"
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/status/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# There is deliberately NO top-level "volumes:" block here. See the persistence
+# contract note at the top of this file for why.
+networks:
+  default:
+    name: hybrid-ai

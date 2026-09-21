@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/hybrid-ai-backup.service
+# PURPOSE (plain English):
+#   Tells systemd HOW to run the nightly backup. Paired with the .timer file,
+#   which decides WHEN.
+#
+#   Installed by ./install.sh into ~/.config/systemd/user/ as a *user* service,
+#   so it runs as you -- with access to your credentials in ~/.config -- rather
+#   than as root. Least privilege: a backup job has no need for root.
+#
+#   Manage it with:
+#     systemctl --user status  hybrid-ai-backup.service
+#     systemctl --user start   hybrid-ai-backup.service   # run now
+#     journalctl --user -u hybrid-ai-backup.service -n 50 # recent output
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai encrypted backup to Cloudflare R2
+Documentation=file://%h/hybrid-ai/backup/README.md
+# Do not start a backup while the network is still coming up after a reboot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# REPLACED AT INSTALL TIME with the real repository path.
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/backup/backup.sh
+
+# AVAILABILITY: a backup that fails because R2 had a five-minute blip should
+# retry, not wait until tomorrow night.
+Restart=on-failure
+RestartSec=15min
+
+# Give up rather than run forever. A hung upload holding the SQLite staging
+# directory open is worse than a missed night.
+TimeoutStartSec=4h
+
+# --- Resource limits -------------------------------------------------------
+# A Pi still has to serve the UI while this runs. Backups are not urgent, so
+# they yield to anything interactive.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+
+# --- Hardening -------------------------------------------------------------
+# Least privilege for a process that reads your entire chat history and holds
+# cloud credentials.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Explicitly re-grant write access to exactly what the backup needs:
+#   the repo (staging dir, backup.log) and the restic cache.
+ReadWritePaths=__REPO_DIR__
+ReadWritePaths=%h/.cache/restic
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# Outbound HTTPS to R2 and a local Docker socket connection are all it needs.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=default.target

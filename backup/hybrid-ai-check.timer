@@ -1,0 +1,15 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/hybrid-ai-check.timer
+# PURPOSE: Schedules the monthly repository integrity check.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Monthly hybrid-ai backup integrity verification
+
+[Timer]
+# First Sunday of each month at 04:30 -- well clear of the nightly backup.
+OnCalendar=Sun *-*-01..07 04:30:00
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

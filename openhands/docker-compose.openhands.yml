@@ -1,0 +1,29 @@
+# OpenHands maintenance agent overlay for hybrid-ai.
+# Run with the root compose file so the existing stack and OpenHands share lifecycle.
+services:
+  openhands:
+    image: ${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
+    container_name: hybrid-ai-openhands
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OPENHANDS_PORT:-3001}:3000"
+    environment:
+      AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
+      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}
+      LOG_ALL_EVENTS: ${OPENHANDS_LOG_ALL_EVENTS:-false}
+      OH_PERSISTENCE_DIR: /.openhands
+      SANDBOX_USER_ID: ${STATUS_UID:-1000}
+      SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:-/workspace}:/workspace:rw
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${OPENHANDS_STATE_DIR:-${HOME}/.openhands}:/.openhands
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
