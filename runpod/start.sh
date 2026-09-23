@@ -29,7 +29,7 @@
 #     IDLE_MINUTES     15
 #     MAX_MODEL_LEN    16384
 #     GPU_MEM_UTIL     0.92
-#     TS_HOSTNAME      runpod-vllm   <-- must match PEER_HOSTNAME in install.sh
+#     TS_HOSTNAME      runpod-worker   <-- must match PEER_HOSTNAMES in install.sh
 #
 # PRIVACY POSTURE:
 #   - vLLM's request and statistics logging are switched off. Your prompt text
@@ -46,7 +46,11 @@ VLLM_PORT="${VLLM_PORT:-8000}"
 IDLE_MINUTES="${IDLE_MINUTES:-15}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
-TS_HOSTNAME="${TS_HOSTNAME:-runpod-vllm}"
+# Role-based, not software-based: a second pod would also run vLLM, so
+# "vllm" would stop distinguishing anything. install.sh still discovers
+# the legacy "runpod-vllm" name, so an existing pod keeps working until
+# you restart it.
+TS_HOSTNAME="${TS_HOSTNAME:-runpod-worker}"
 RUNTIME_ENV="/etc/runtime.env"
 TS_SOCK="/var/run/tailscale/tailscaled.sock"
 TS_STATE="/var/lib/tailscale/tailscaled.state"

@@ -1,29 +1,101 @@
-# OpenHands maintenance agent overlay for hybrid-ai.
-# Run with the root compose file so the existing stack and OpenHands share lifecycle.
+# ---------------------------------------------------------------------------
+# FILE: openhands/docker-compose.openhands.yml
+# PURPOSE (plain English):
+#   Runs OpenHands, the agent that maintains this project's code for you.
+#   It is an OVERLAY: it adds one service to the main docker-compose.yml rather
+#   than replacing it. Always pass BOTH files together:
+#
+#       docker compose -f docker-compose.yml \
+#                      -f openhands/docker-compose.openhands.yml \
+#                      --env-file .env <command>
+#
+#   WHY THAT MATTERS: "up -d --remove-orphans" WITHOUT this file treats the
+#   OpenHands container as an orphan and DELETES it. install.sh uses
+#   --remove-orphans on every run. Prefer openhands/scripts/openhands-control.sh,
+#   which always passes both files.
+#
+# SECURITY -- read before changing anything here:
+#
+#   1. DOCKER SOCKET. OpenHands creates sandbox containers, so it needs
+#      /var/run/docker.sock. Socket access is effectively root on this host.
+#      That is why the port below binds to 127.0.0.1 ONLY, and why there is no
+#      Caddy route. Reach it over an SSH tunnel across Tailscale:
+#
+#          ssh -L 3001:127.0.0.1:3001 <user>@<pi-tailnet-name>
+#
+#   2. WORKSPACE ISOLATION (the important one). OPENHANDS_WORKSPACE points at
+#      a SEPARATE CLONE of the repository -- never at this deployment
+#      directory, which holds .env, install.log and backup.log. The sandbox
+#      runs as your uid, so file permissions would NOT stop it reading them.
+#
+#      The sandbox is the component that processes untrusted repository text.
+#      It is precisely the component that must not have your credentials in
+#      reach. scripts/setup-agent-workspace.sh creates and guards that clone.
+#
+#      The variable is REQUIRED -- no default. If unset, compose fails loudly
+#      rather than silently falling back to something unsafe.
+#
+#   3. no-new-privileges is set, but be honest about what it buys: it limits
+#      setuid escalation inside a container that already holds a socket
+#      capable of creating privileged containers. Keep it; do not rely on it.
+# ---------------------------------------------------------------------------
 services:
   openhands:
     image: ${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
     container_name: hybrid-ai-openhands
     restart: unless-stopped
+
+    # 127.0.0.1 is deliberate and load-bearing. Changing this to 0.0.0.0 would
+    # publish arbitrary code execution as root to your LAN.
     ports:
       - "127.0.0.1:${OPENHANDS_PORT:-3001}:3000"
+
     environment:
       AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
       AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}
+
+      # Off by default: event logs are verbose and can echo file contents from
+      # the workspace. Turn on temporarily when debugging, then turn it back off.
       LOG_ALL_EVENTS: ${OPENHANDS_LOG_ALL_EVENTS:-false}
+
       OH_PERSISTENCE_DIR: /.openhands
       SANDBOX_USER_ID: ${STATUS_UID:-1000}
-      SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:-/workspace}:/workspace:rw
+
+      # The isolated clone -- NOT this directory. See note 2 above.
+      # No default: fail loudly rather than fall back to something unsafe.
+      SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:rw
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Holds LLM provider credentials. Lives outside the repo so it is never
+      # committed and never visible to the sandbox. Mode 0700.
       - ${OPENHANDS_STATE_DIR:-${HOME}/.openhands}:/.openhands
+
     extra_hosts:
       - host.docker.internal:host-gateway
+
     security_opt:
       - no-new-privileges:true
+
+    # A Pi 5 with 16 GB runs Ollama and Open WebUI alongside this. Without a
+    # ceiling, a long agent session can starve the serving path -- and what you
+    # would notice is chat getting slow, not OpenHands misbehaving.
+    deploy:
+      resources:
+        limits:
+          memory: ${OPENHANDS_MEM_LIMIT:-2g}
+          cpus: "${OPENHANDS_CPUS:-1.5}"
+
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000', timeout=5)\""]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      # Generous: the first start pulls a large image on modest hardware.
+      start_period: 120s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

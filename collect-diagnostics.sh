@@ -17,8 +17,8 @@
 #       only, never values. Knowing a key is *present and 64 characters* is
 #       usually all you need to diagnose; the actual value never is.
 #     - Logs are passed through a redaction filter that catches RunPod keys,
-#       Tailscale keys, AWS-style keys, bearer tokens, JWTs, passwords in
-#       URLs, and private key blocks.
+#       Tailscale keys, AWS-style keys, GitHub tokens, LLM provider keys,
+#       bearer tokens, JWTs, passwords in URLs, and private key blocks.
 #     - Tailscale IPs are masked to 100.x.x.N, preserving the shape you need
 #       to reason about without publishing your network layout.
 #     - CHAT CONTENT AND DOCUMENTS ARE NEVER READ. Not the databases, not
@@ -71,6 +71,14 @@ else
   C_RST=""; C_OK=""; C_WRN=""; C_INF=""; C_ERR=""
 fi
 
+# Both compose files. Omitting the overlay makes `ps` and `logs` silently skip
+# OpenHands -- and a diagnostic bundle that omits a running service is worse
+# than one that says nothing about it, because it looks complete.
+COMPOSE=(docker compose
+         -f docker-compose.yml
+         -f openhands/docker-compose.openhands.yml
+         --env-file .env)
+
 # ---------------------------------------------------------------------------
 # THE REDACTION FILTER
 #
@@ -87,7 +95,9 @@ redact() {
     -e 's/(tskey-auth|tskey-client|tskey-api)[A-Za-z0-9_-]*/<REDACTED:tailscale-key>/g' \
     -e 's/\b(AKIA|ASIA)[A-Z0-9]{16}\b/<REDACTED:aws-key-id>/g' \
     -e 's/\bghp_[A-Za-z0-9]{20,}/<REDACTED:github-token>/g' \
+    -e 's/\bgho_[A-Za-z0-9]{20,}/<REDACTED:github-token>/g' \
     -e 's/\bgithub_pat_[A-Za-z0-9_]{20,}/<REDACTED:github-token>/g' \
+    -e 's/\bsk-[A-Za-z0-9_-]{20,}/<REDACTED:llm-api-key>/g' \
     -e 's/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/<REDACTED:jwt>/g' \
     -e 's/([Bb]earer)[[:space:]]+[A-Za-z0-9._~+\/=-]{12,}/\1 <REDACTED:token>/g' \
     -e 's/([Aa]uthorization:[[:space:]]*)[^[:space:]]+/\1<REDACTED:auth-header>/g' \
@@ -143,7 +153,8 @@ ABOUT THIS FILE
 ---------------
 This is a diagnostic bundle for a self-hosted AI stack: Open WebUI + Ollama
 running in Docker on a Raspberry Pi, which reaches an on-demand vLLM server
-on a rented RunPod GPU over a Tailscale private network.
+on a rented RunPod GPU over a Tailscale private network. An optional OpenHands
+container provides natural-language code maintenance.
 
 Secrets have been replaced with <REDACTED:...> markers. Where a value was a
 credential, only its NAME and LENGTH are reported.
@@ -164,6 +175,7 @@ context on how the pieces fit together:
   - webui_data/ holds ALL user state: chats, documents, vectors, and every
     UI-made setting (connections, functions/pipes and their valve values).
   - The Pi has no GPU. Local models run on CPU and are slow by nature.
+  - OpenHands is OPTIONAL and loopback-only. Its absence is not a fault.
   - ./doctor.sh is a health checker; its output is included below.
 EOF
 
@@ -174,8 +186,14 @@ printf '  %s[1/9]%s Health check...\n' "$C_INF" "$C_RST"
 sec "1. HEALTH CHECK (doctor.sh)"
 if [[ -x ./doctor.sh ]]; then
   { ./doctor.sh --no-cloud 2>&1 || true; } | redact >> "$OUTFILE"
+elif [[ -f ./doctor.sh ]]; then
+  # A missing executable bit is common after a clone from Windows, and it
+  # would otherwise silently blank out the single most useful section here.
+  note "doctor.sh is present but not executable -- running it via bash."
+  note "Fix this permanently with: chmod +x doctor.sh"
+  { bash ./doctor.sh --no-cloud 2>&1 || true; } | redact >> "$OUTFILE"
 else
-  note "doctor.sh not found or not executable."
+  note "doctor.sh not found."
 fi
 
 # ---------------------------------------------------------------------------
@@ -218,6 +236,27 @@ sec "3. TOOLING"
   printf '  %-12s %s\n' "compose" "$(docker compose version --short 2>/dev/null || echo 'NOT AVAILABLE')"
 } 2>&1 | redact >> "$OUTFILE"
 
+# --- Executable bits on our own scripts ------------------------------------
+# A missing +x is a real, silent failure mode on a clone made from Windows,
+# and it is exactly what stops you running these tools when you need them.
+sub "Script permissions"
+{
+  for s in install.sh doctor.sh collect-diagnostics.sh \
+           backup/backup.sh backup/restore.sh runpod/start.sh \
+           scripts/setup-agent-workspace.sh \
+           openhands/scripts/openhands-control.sh; do
+    if [[ -f "$s" ]]; then
+      if [[ -x "$s" ]]; then
+        printf '  %-42s executable\n' "$s"
+      else
+        printf '  %-42s NOT EXECUTABLE  <-- chmod +x %s\n' "$s" "$s"
+      fi
+    else
+      printf '  %-42s missing\n' "$s"
+    fi
+  done
+} 2>&1 | redact >> "$OUTFILE"
+
 # ---------------------------------------------------------------------------
 # 4. Configuration -- NAMES AND LENGTHS ONLY, NEVER VALUES
 # ---------------------------------------------------------------------------
@@ -226,6 +265,7 @@ sec "4. CONFIGURATION"
 note ""
 note "Values are NEVER shown. Each entry reports whether the key is set and"
 note "how long the value is, which is what actually matters for diagnosis."
+
 sub ".env"
 # NOTE: this whole block is wrapped in { ... } >> "$OUTFILE" so that every
 # printf lands in the report. Without the wrapper the output goes to the
@@ -234,27 +274,37 @@ sub ".env"
 {
 if [[ -f .env ]]; then
   printf 'permissions: %s (expected 600)\n\n' "$(stat -c '%a' .env 2>/dev/null)"
+
   # Keys whose values are safe and useful to show verbatim.
-  SAFE_KEYS="OLLAMA_NUM_PARALLEL|OLLAMA_MAX_LOADED_MODELS|OLLAMA_KEEP_ALIVE|OLLAMA_MAX_VRAM|WEBUI_AUTH|VLLM_PORT|VLLM_MODEL_NAME|POD_WARMUP_TIMEOUT|RAG_EMBEDDING_MODEL|ENABLE_OPENAI_API|SCARF_NO_ANALYTICS|DO_NOT_TRACK|ANONYMIZED_TELEMETRY"
+  SAFE_KEYS="OLLAMA_NUM_PARALLEL|OLLAMA_MAX_LOADED_MODELS|OLLAMA_KEEP_ALIVE|OLLAMA_CONTEXT_LENGTH|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MEM_LIMIT|WEBUI_MEM_LIMIT|OLLAMA_CPUS|WEBUI_CPUS|WEBUI_AUTH|VLLM_PORT|VLLM_MODEL_NAME|POD_WARMUP_TIMEOUT|RAG_EMBEDDING_MODEL|ENABLE_OPENAI_API|SCARF_NO_ANALYTICS|DO_NOT_TRACK|ANONYMIZED_TELEMETRY|PEER_HOSTNAME|PEER_HOSTNAMES|OPENHANDS_PORT|OPENHANDS_IMAGE|OPENHANDS_AGENT_IMAGE_REPOSITORY|OPENHANDS_AGENT_IMAGE_TAG|OPENHANDS_LOG_ALL_EVENTS|OPENHANDS_MEM_LIMIT|OPENHANDS_CPUS|STATUS_UID|DOCKER_GID"
+
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
     if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
       k="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
       if [[ -z "$v" ]]; then
-        printf '  %-28s <EMPTY>\n' "$k"
+        printf '  %-32s <EMPTY>\n' "$k"
       elif [[ "$k" =~ ^(${SAFE_KEYS})$ ]]; then
-        printf '  %-28s %s\n' "$k" "$v"
+        printf '  %-32s %s\n' "$k" "$v"
       elif [[ "$k" == "TAILSCALE_IP" ]]; then
         # The SHAPE matters for diagnosis (is it inside the mesh range?);
         # the exact host does not.
         if [[ "$v" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]]; then
-          printf '  %-28s 100.x.x.x  (VALID mesh range)\n' "$k"
+          printf '  %-32s 100.x.x.x  (VALID mesh range)\n' "$k"
         else
-          printf '  %-28s <set>  <-- OUTSIDE 100.64.0.0/10, pipe will refuse to send\n' "$k"
+          printf '  %-32s <set>  <-- OUTSIDE 100.64.0.0/10, pipe will refuse to send\n' "$k"
+        fi
+      elif [[ "$k" =~ ^(OPENHANDS_WORKSPACE|OPENHANDS_STATE_DIR)$ ]]; then
+        # Path shape matters a great deal here: if the workspace IS the
+        # deployment directory, the agent sandbox can read .env.
+        if [[ "$(readlink -f "$v" 2>/dev/null)" == "$(readlink -f "$SCRIPT_DIR")" ]]; then
+          printf '  %-32s <deployment dir>  <-- ISOLATION BROKEN, sandbox can read .env\n' "$k"
+        else
+          printf '  %-32s <set, outside the repo>\n' "$k"
         fi
       else
-        printf '  %-28s <REDACTED:length=%s>\n' "$k" "${#v}"
+        printf '  %-32s <REDACTED:length=%s>\n' "$k" "${#v}"
       fi
     fi
   done < .env
@@ -284,7 +334,18 @@ else
   note "  Not configured (${BC} does not exist)"
 fi
 
-run "docker-compose.yml images in use" bash -c "grep -E '^\s+image:' docker-compose.yml 2>/dev/null || echo 'not found'"
+sub "OpenHands credential store"
+{
+  if [[ -d "${HOME}/.openhands" ]]; then
+    printf '  ~/.openhands      present, permissions %s (expected 700)\n' "$(stat -c '%a' "${HOME}/.openhands" 2>/dev/null)"
+    printf '  contents          %s file(s) -- NOT read, only counted\n' \
+      "$(find "${HOME}/.openhands" -type f 2>/dev/null | wc -l | tr -d ' ')"
+  else
+    printf '  ~/.openhands      not present (OpenHands not configured yet)\n'
+  fi
+} 2>&1 | redact >> "$OUTFILE"
+
+run "docker-compose.yml images in use" bash -c "grep -E '^\s+image:' docker-compose.yml openhands/docker-compose.openhands.yml 2>/dev/null || echo 'not found'"
 run "Git state" bash -c "git rev-parse --short HEAD 2>/dev/null && git status --porcelain 2>/dev/null | head -20 || echo 'not a git checkout'"
 
 # ---------------------------------------------------------------------------
@@ -292,11 +353,11 @@ run "Git state" bash -c "git rev-parse --short HEAD 2>/dev/null && git status --
 # ---------------------------------------------------------------------------
 printf '  %s[5/9]%s Container status...\n' "$C_INF" "$C_RST"
 sec "5. CONTAINERS"
-run "Compose services"    docker compose --env-file .env ps
+run "Compose services"    "${COMPOSE[@]}" ps
 run "All containers"      docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 run "Resource usage"      docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}'
 
-for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy; do
+for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy hybrid-ai-openhands; do
   sub "${svc}: state detail"
   {
     docker inspect "$svc" --format '
@@ -323,19 +384,20 @@ done
 # ---------------------------------------------------------------------------
 printf '  %s[6/9]%s Logs (last %s lines each)...\n' "$C_INF" "$C_RST" "$LOG_LINES"
 sec "6. LOGS"
-run "open-webui (last ${LOG_LINES})" docker compose --env-file .env logs --tail "$LOG_LINES" --no-color open-webui
-run "ollama (last ${LOG_LINES})"     docker compose --env-file .env logs --tail "$LOG_LINES" --no-color ollama
-run "status page (last 40)"         docker compose --env-file .env logs --tail 40 --no-color status
-run "proxy (last 40)"               docker compose --env-file .env logs --tail 40 --no-color proxy
+run "open-webui (last ${LOG_LINES})" "${COMPOSE[@]}" logs --tail "$LOG_LINES" --no-color open-webui
+run "ollama (last ${LOG_LINES})"     "${COMPOSE[@]}" logs --tail "$LOG_LINES" --no-color ollama
+run "status page (last 40)"          "${COMPOSE[@]}" logs --tail 40 --no-color status
+run "proxy (last 40)"                "${COMPOSE[@]}" logs --tail 40 --no-color proxy
+run "openhands (last 40)"            "${COMPOSE[@]}" logs --tail 40 --no-color openhands
 
 # The pipe's own structured records: one line per request outcome.
 sub "RunPod pipe events (structured)"
-{ docker compose --env-file .env logs --tail 400 --no-color open-webui 2>/dev/null \
-    | grep -E 'runpod_pipe|event=(request_|pod_ready|runpod_api)' | tail -60 \
+{ "${COMPOSE[@]}" logs --tail 400 --no-color open-webui 2>/dev/null \
+    | grep -E 'runpod_pipe|runpod_core|event=(request_|pod_ready|runpod_api)' | tail -60 \
     || printf '(none found)\n'; } | redact >> "$OUTFILE"
 
-sub "Errors and exceptions across both containers"
-{ docker compose --env-file .env logs --tail 500 --no-color 2>/dev/null \
+sub "Errors and exceptions across all containers"
+{ "${COMPOSE[@]}" logs --tail 500 --no-color 2>/dev/null \
     | grep -iE 'error|exception|traceback|critical|fatal|refused|timeout|denied' \
     | tail -60 || printf '(none found)\n'; } | redact >> "$OUTFILE"
 
@@ -362,6 +424,7 @@ printf '  %s[7/9]%s Network...\n' "$C_INF" "$C_RST"
 sec "7. NETWORK"
 run "Listening ports"  bash -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || echo 'unavailable'"
 run "Tailscale status" bash -c "tailscale status 2>&1 || echo 'unavailable'"
+
 sub "Tailscale detail"
 {
   tailscale status --json 2>/dev/null | jq '{
@@ -396,11 +459,13 @@ run "Local service probes" bash -c '
   printf "ollama     : "; curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING"
   printf "open-webui : "; curl -fsS --max-time 5 http://127.0.0.1:3000/health >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING"
   printf "status page: "; curl -fsS --max-time 5 http://127.0.0.1:80/status/healthz >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING (optional)"
+  printf "openhands  : "; curl -fsS --max-time 5 http://127.0.0.1:3001 >/dev/null 2>&1 && echo "responding (loopback only, by design)" || echo "NOT RESPONDING (optional)"
   for p in /hub /status /app/ /openwebui /health /ollama/api/tags; do
     printf "route %-16s " "$p"
     curl -s -o /dev/null -w "HTTP %{http_code}\n" --max-time 6 "http://127.0.0.1:80${p}" 2>/dev/null || echo "unreachable"
   done
   printf "NOTE: /openwebui returns 302 by design; /health returns 503 when degraded.\n"
+  printf "NOTE: OpenHands is deliberately NOT routed through the proxy.\n"
   printf "internet   : "; curl -fsS --max-time 5 https://api.runpod.io >/dev/null 2>&1 && echo "reachable" || echo "NOT REACHABLE"
   printf "dns        : "; getent hosts api.runpod.io >/dev/null 2>&1 && echo "resolving" || echo "NOT RESOLVING"'
 
@@ -465,6 +530,7 @@ SUSPECT=0
       ["Tailscale key"]='tskey-[A-Za-z0-9_-]{8,}'
       ["AWS key id"]='(AKIA|ASIA)[A-Z0-9]{16}'
       ["GitHub token"]='gh[pousr]_[A-Za-z0-9]{20,}'
+      ["LLM API key"]='sk-[A-Za-z0-9_-]{20,}'
       ["JWT"]='ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.'
       ["Private key block"]='BEGIN [A-Z ]*PRIVATE KEY'
       ["Credentials in URL"]='https?://[^:@[:space:]/]+:[^@[:space:]]+@'
@@ -502,8 +568,8 @@ SUSPECT=0
 } >> "$OUTFILE"
 
 printf '\n\n===============================================================\n  END OF REPORT\n===============================================================\n' >> "$OUTFILE"
-
 chmod 600 "$OUTFILE"
+
 SIZE="$(du -h "$OUTFILE" | cut -f1)"
 LINES="$(wc -l < "$OUTFILE" | tr -d ' ')"
 

@@ -1,26 +1,37 @@
 # ---------------------------------------------------------------------------
 # FILE: docker-compose.yml
 # PURPOSE (plain English):
-#   This file is the blueprint for the two programs that run on your Raspberry
-#   Pi. Docker Compose reads it and starts both of them as "containers" --
-#   isolated mini-environments that bundle an app with everything it needs.
+#   This file is the blueprint for the programs that run on your Raspberry Pi.
+#   Docker Compose reads it and starts each one as a "container" -- an isolated
+#   mini-environment that bundles an app with everything it needs.
 #
-#   The two containers are:
+#   The containers are:
 #     - ollama      : runs small AI models directly on the Pi
 #     - open-webui  : the chat website you actually open in your browser
+#     - status      : the health/diagnostics page
+#     - proxy       : Caddy, giving you one address for everything
+#
+#   A fifth, OpenHands, lives in openhands/docker-compose.openhands.yml and is
+#   layered on top as an overlay. See the note below.
 #
 # HOW IT IS RUN:
 #   Never run this by hand. The install.sh script runs it for you, because it
 #   first has to generate the .env file that fills in all the ${VARIABLES}
 #   below. If you run it manually you will get "variable is not set" warnings.
 #
-#   install.sh effectively calls:  docker compose --env-file .env up -d
+#   install.sh effectively calls:
+#     docker compose -f docker-compose.yml \
+#                    -f openhands/docker-compose.openhands.yml \
+#                    --env-file .env up -d --remove-orphans
+#
+#   ALWAYS PASS BOTH FILES. A "up -d --remove-orphans" without the overlay
+#   treats the OpenHands container as an orphan and DELETES it.
 #
 # THE PERSISTENCE CONTRACT (important -- read this):
 #   ./ollama_data  -> downloaded AI model files
 #   ./webui_data   -> your chat history, uploaded documents, and vector database
 #
-#   These are "bind mounts": real folders on the Pi's SD card that get mapped
+#   These are "bind mounts": real folders on the Pi's disk that get mapped
 #   into the containers. We deliberately did NOT use Docker "named volumes",
 #   because named volumes are hidden away in Docker's internals and are easy to
 #   delete by accident. With bind mounts, you can see your data, back it up
@@ -60,9 +71,10 @@ services:
     # never honoured by Ollama and has been removed upstream.
     mem_limit: ${OLLAMA_MEM_LIMIT:-8g}
     mem_reservation: 512m
-    # Leave one core for the OS, the UI, and the proxy. Without this, a busy
-    # inference run makes the whole Pi feel unresponsive, including the web UI
-    # you are waiting on.
+    # Leave roughly half a core for the OS, the UI, and the proxy. Without
+    # this, a busy inference run makes the whole Pi feel unresponsive,
+    # including the web UI you are waiting on. install.sh computes this from
+    # your actual core count and writes it to .env.
     cpus: ${OLLAMA_CPUS:-3.5}
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
@@ -96,7 +108,7 @@ services:
       retries: 5
       start_period: 60s
     logging:
-      # Cap log size. An unbounded log file will eventually fill the SD card.
+      # Cap log size. An unbounded log file will eventually fill the disk.
       driver: "json-file"
       options:
         max-size: "10m"
@@ -133,6 +145,9 @@ services:
       - ./webui_data:/app/backend/data
       # Mounted read-only (":ro"). This just makes the pipe source visible
       # inside the container for reference; you still import it through the UI.
+      #
+      # NOTE: because the pasted function lives in webui_data/webui.db, editing
+      # the file here does NOT change what Open WebUI executes. Re-paste it.
       - ./openwebui:/app/backend/data/functions_src:ro
     environment:
       # --- Where to find the local model engine ----------------------------
@@ -147,6 +162,9 @@ services:
 
       # --- Cloud GPU settings, read by openwebui/runpod_pipe.py ------------
       TAILSCALE_IP: ${TAILSCALE_IP}
+      # So the pipe's connection-error message names the right peer instead of
+      # a hardcoded string that may not match what you called the pod.
+      PEER_HOSTNAME: ${PEER_HOSTNAME:-runpod-worker}
       RUNPOD_API_KEY: ${RUNPOD_API_KEY}
       RUNPOD_POD_ID: ${RUNPOD_POD_ID}
       VLLM_PORT: ${VLLM_PORT:-8000}
@@ -163,7 +181,7 @@ services:
       ENABLE_MESSAGE_RATING: "false"
       ENABLE_OPENAI_API: ${ENABLE_OPENAI_API:-false}
       # Document search stays local: embeddings are computed inside this
-      # container and stored in Chroma on your SD card. Nothing is shipped out.
+      # container and stored in Chroma on your disk. Nothing is shipped out.
       RAG_EMBEDDING_ENGINE: ""
       RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       VECTOR_DB: chroma
@@ -272,6 +290,9 @@ services:
   #
   # Port 3000 remains published on open-webui so existing bookmarks and the
   # health checks in install.sh keep working unchanged.
+  #
+  # OpenHands is DELIBERATELY not proxied. See the note at the end of
+  # status/Caddyfile for why.
   # -------------------------------------------------------------------------
   proxy:
     image: caddy:2.8-alpine
@@ -307,6 +328,7 @@ services:
 
 # There is deliberately NO top-level "volumes:" block here. See the persistence
 # contract note at the top of this file for why.
+
 networks:
   default:
     name: hybrid-ai

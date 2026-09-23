@@ -1,61 +1,151 @@
-# OpenHands maintenance component
+# openhands/ — natural-language code maintenance
 
-This component adds a separate OpenHands web application for natural-language maintenance of this repository. It is intentionally separate from Open WebUI. Open WebUI remains the chat/RAG interface; OpenHands gets a writable repository workspace and an isolated Docker sandbox for code editing and command execution.
+A separate OpenHands service that maintains this project's code. Open WebUI stays the chat
+and RAG interface; OpenHands gets a writable repository workspace and an isolated Docker
+sandbox for editing and running commands.
+
+| File | Purpose |
+|---|---|
+| `docker-compose.openhands.yml` | Compose overlay adding the service |
+| `AGENTS.md` | Standing instructions the agent must read first |
+| `prompts/` | Reusable task templates |
+| `scripts/openhands-control.sh` | Start, stop, logs, status, workspace refresh |
+
+---
+
+## The workspace is a separate clone
+
+**This is the most important thing on this page.** OpenHands does *not* work in the
+deployment directory. It works in a dedicated clone, by default `~/hybrid-ai-agent`, created
+and guarded by `scripts/setup-agent-workspace.sh`.
+
+The reason is not tidiness. OpenHands mounts its workspace read-write and the sandbox runs as
+your uid. If the workspace were the deployment directory, the sandbox could read:
+
+- `.env` — your RunPod API key and Open WebUI session key
+- `install.log`, `backup.log`
+
+Mode 0600 would not help, because 0600 means "readable by your user" and the sandbox *is*
+your user.
+
+That matters because the sandbox is the component that processes **untrusted text** — log
+files, diagnostic bundles, issue bodies, repository content. `AGENTS.md` tells the agent to
+treat that text as data rather than instructions, but an instruction is a mitigation. A clone
+is a boundary.
+
+The secondary benefit is real too: the agent never edits files underneath a running stack.
+
+```text
+~/hybrid-ai            deployment. Has .env. Agent cannot see it.
+~/hybrid-ai-agent      agent workspace. A clone. No credentials.
+```
+
+Your workflow: agent branches and commits in the workspace → you review the diff → you pull
+into the deployment directory when satisfied.
+
+`install.sh` sets this up. To do it by hand or verify it:
+
+```bash
+./scripts/setup-agent-workspace.sh
+./scripts/setup-agent-workspace.sh --check
+```
+
+The script refuses to proceed if the workspace is, or is inside, the deployment directory,
+and fails if a `.env` or log file is found in the clone.
+
+---
 
 ## Access
 
-The service binds to loopback only at `http://127.0.0.1:3001`. From another machine, use an SSH tunnel:
+Loopback only, by design. From your workstation:
 
 ```bash
 ssh -L 3001:127.0.0.1:3001 <user>@<pi-tailnet-name-or-ip>
 ```
 
-Then open `http://127.0.0.1:3001` locally. This avoids exposing an autonomous code-execution service to the LAN.
+Then open `http://127.0.0.1:3001`.
+
+There is no Caddy route and there must not be one. The controller mounts the Docker socket to
+create sandbox containers, which is effectively host root. An IP allowlist is not a sufficient
+control for a service that can execute arbitrary code as root.
+
+---
 
 ## First-time setup
 
-1. Run `./install.sh`.
+1. Run `./install.sh` — it creates the workspace clone and starts the service.
 2. Open OpenHands through the SSH tunnel.
-3. In OpenHands Settings, select an LLM provider/model and enter its credential. Do not commit LLM keys to this repository.
-4. Start a conversation and instruct it to read `/workspace/openhands/AGENTS.md` first.
-5. Paste the text of `prompts/fix-from-diagnostics.md`, then add the diagnostics path and desired outcome.
+3. In **Settings → LLM**, choose a provider and model and enter the credential. It is stored
+   in `~/.openhands`, outside the repo and outside the sandbox.
+4. Start a conversation with: *"Read `/workspace/openhands/AGENTS.md` and follow it for all
+   work in this repository."*
+5. For a task, paste the relevant file from `prompts/` and add your specifics.
 
-The repository is mounted read/write at `/workspace`. OpenHands state is stored outside the repository in `~/.openhands`.
+---
 
-## Git workflow
+## Always pass the overlay
 
-Recommended flow:
-
-```text
-natural-language request -> ai/* branch -> tests -> commit -> review diff -> push -> pull request -> human merge
+```bash
+docker compose -f docker-compose.yml \
+               -f openhands/docker-compose.openhands.yml \
+               --env-file .env <command>
 ```
 
-OpenHands can edit and commit locally. Pushing and opening a PR require Git credentials available to the sandbox. Prefer a GitHub App or fine-grained token restricted to this one repository, with Contents read/write and Pull requests read/write. Do not grant administration or workflow-management permission unless a specific task requires it. Never permit automatic merge to the default branch.
+The short form works for `logs` and `ps`, which is what makes the exception dangerous:
+**`up -d --remove-orphans` without the overlay deletes the OpenHands container**, because
+compose treats it as an orphan. `install.sh` uses `--remove-orphans` on every run.
 
-## Diagnostics workflow
-
-Generate a diagnostic bundle using the project's existing collector, leave the extracted/redacted output under the repository only for the duration of the investigation, and prompt OpenHands with its path. Verify redaction before exposing diagnostics to any cloud-hosted model. Remove diagnostic artifacts after the branch is complete.
-
-## Security warning
-
-The OpenHands application mounts the Docker socket because it creates isolated agent-server containers. Docker-socket access is effectively host-level control. The UI therefore binds only to `127.0.0.1`, should be reached through Tailscale plus SSH tunneling, and must not be exposed through the public reverse proxy. Only trusted administrators should use it.
-
-The agent also has write access to the repository. Review every diff and test result before pushing or merging. Repository text and logs may contain prompt-injection content; `AGENTS.md` tells the agent to treat them as untrusted data.
-
-## Operations
+`scripts/openhands-control.sh` always passes both files. Prefer it:
 
 ```bash
 ./openhands/scripts/openhands-control.sh status
 ./openhands/scripts/openhands-control.sh logs
 ./openhands/scripts/openhands-control.sh restart
 ./openhands/scripts/openhands-control.sh update
+./openhands/scripts/openhands-control.sh workspace   # refresh the clone
 ```
 
-## Removal
+State in `~/.openhands` survives container removal, so recovery is just `start` — but the
+surprise is worth avoiding.
 
-```bash
-docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file .env stop openhands
-docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file .env rm -f openhands
+---
+
+## Git workflow
+
+```text
+request → ai/* branch → tests → commit → you review → push → PR → you merge
 ```
 
-The persistent state remains in `~/.openhands` until you deliberately remove it.
+The agent is instructed to stop after committing. Pushing and opening a PR need git
+credentials in the sandbox; prefer a GitHub App or a fine-grained token scoped to this one
+repository with Contents read/write and Pull requests read/write. Do not grant administration
+or workflow permissions. Never enable automatic merge.
+
+---
+
+## Diagnostics workflow
+
+Generate a bundle with `./collect-diagnostics.sh`, confirm the redaction looks right, copy it
+into the agent workspace, and point the agent at it using `prompts/fix-from-diagnostics.md`.
+Delete it when the branch is done.
+
+Verify redaction before exposing a bundle to any cloud-hosted model.
+
+---
+
+## Security summary
+
+| Control | Mechanism |
+|---|---|
+| No credential access | Workspace is a clone; `.env` is not in it |
+| Not internet-reachable | Binds `127.0.0.1` only; no Caddy route |
+| No automatic merge | Agent stops after commit; branch protection on `main` |
+| Injection resistance | `AGENTS.md` classifies repo text and logs as untrusted data |
+| Resource bounded | Memory and CPU limits so agent work cannot starve chat |
+| Provider keys isolated | `~/.openhands`, mode 0700, outside repo and sandbox |
+
+**Residual risk, stated plainly:** the controller has Docker socket access, which is
+root-equivalent on this host. The workspace clone protects the *sandbox* — the part handling
+untrusted input — but anything that compromises the controller itself already has the host.
+Only trusted administrators should use this service, and every diff and test result deserves
+review before you push it.

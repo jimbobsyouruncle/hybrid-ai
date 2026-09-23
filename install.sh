@@ -39,7 +39,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 ENV_FILE="${SCRIPT_DIR}/.env"
-# This must match TS_HOSTNAME in runpod/start.sh, or discovery will fail.
+
+# Peer hostnames to search for, in priority order. The first is the name this
+# project uses going forward; the rest are legacy names kept so an existing pod
+# keeps being discovered until you rename it.
+#
+# WHY A ROLE-BASED NAME: "runpod-vllm" describes the software on the pod rather
+# than the job it does. If you ever add a second pod they will both run vLLM,
+# so the name stops distinguishing anything. Naming by ROLE makes adding a
+# second pod additive rather than a rename across start.sh, install.sh and .env.
+#
+# Each name here must match TS_HOSTNAME in the corresponding runpod/start.sh.
 PEER_HOSTNAMES="${PEER_HOSTNAMES:-runpod-worker runpod-vllm}"
 PEER_HOSTNAME="${PEER_HOSTNAME:-${PEER_HOSTNAMES%% *}}"
 NON_INTERACTIVE=0
@@ -140,9 +150,12 @@ ok "tailscale $(tailscale version 2>/dev/null | head -n1 || echo '?')"
 # --- Make our own helper scripts executable --------------------------------
 # A git checkout, an unzip, or a copy from Windows can all drop the executable
 # bit. Without it the workspace setup below fails, the `|| warn` swallows it,
-# and Docker then CREATES ~/hybrid-ai-agent as an empty directory when it
+# and Docker then CREATES the workspace path as an empty directory when it
 # mounts it -- so OpenHands comes up with an empty workspace and no clone.
 # Nothing fails loudly, which makes it unpleasant to diagnose. Fix it here.
+#
+# This also protects doctor.sh and collect-diagnostics.sh, which are exactly
+# what you need working when something else is broken.
 for _s in scripts/setup-agent-workspace.sh openhands/scripts/openhands-control.sh \
           doctor.sh collect-diagnostics.sh backup/backup.sh backup/restore.sh \
           runpod/start.sh; do
@@ -158,8 +171,6 @@ unset _s _f
 
 # ---------------------------------------------------------------------------
 # STEP 2. Load existing .env
-# "source" runs the file, turning each KEY=value line into a shell variable.
-# "set -a" marks them for export so docker compose can see them too.
 # ---------------------------------------------------------------------------
 if [[ -f "$ENV_FILE" ]]; then
   log "Existing .env found -- preserving current values."
@@ -282,8 +293,30 @@ fi
 OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
 OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
 
+# --- CPU shares -------------------------------------------------------------
+# docker-compose.yml references OLLAMA_CPUS and WEBUI_CPUS, and .env.example
+# documents them, but until now nothing computed or wrote them. The compose
+# file carries :- defaults so this was never fatal -- but it meant the values
+# you saw documented were not the values in use, which is its own problem.
+#
+# Leave roughly half a core for the OS, the proxy and the status page. Without
+# that headroom a busy inference run makes the whole Pi feel unresponsive,
+# including the web UI you are sitting there waiting on -- which reads as
+# "the whole thing is broken" rather than "inference is slow".
+if (( CPU_CORES >= 4 )); then
+  OLLAMA_CPUS="${OLLAMA_CPUS:-$(awk "BEGIN{printf \"%.1f\", ${CPU_CORES} - 0.5}")}"
+  WEBUI_CPUS="${WEBUI_CPUS:-2.0}"
+elif (( CPU_CORES >= 2 )); then
+  OLLAMA_CPUS="${OLLAMA_CPUS:-$(awk "BEGIN{printf \"%.1f\", ${CPU_CORES} - 0.5}")}"
+  WEBUI_CPUS="${WEBUI_CPUS:-1.0}"
+else
+  OLLAMA_CPUS="${OLLAMA_CPUS:-1.0}"
+  WEBUI_CPUS="${WEBUI_CPUS:-1.0}"
+fi
+
 ok "host: ${ARCH}, ${CPU_CORES} cores, ${TOTAL_MB} MiB RAM"
 ok "ollama: limit ${OLLAMA_MEM_LIMIT}, context ${OLLAMA_CONTEXT_LENGTH}, keep-alive ${OLLAMA_KEEP_ALIVE}"
+ok "cpu shares: ollama ${OLLAMA_CPUS}, open-webui ${WEBUI_CPUS}"
 ok "open-webui: limit ${WEBUI_MEM_LIMIT}"
 
 # --- Storage check: the single biggest performance factor after model size --
@@ -484,6 +517,9 @@ done
 # Caddy keeps its own small state here, inside the directory we already back up.
 mkdir -p webui_data/caddy
 
+# OpenHands stores LLM provider credentials here. Outside the repo so it is
+# never committed, and never visible to the agent sandbox. 0700 so no other
+# local account can read it.
 mkdir -p "${HOME}/.openhands"
 chmod 700 "${HOME}/.openhands"
 
@@ -520,6 +556,8 @@ cat > "$TMP_ENV" <<EOF
 # real, kernel-enforced Docker limit.
 OLLAMA_MEM_LIMIT=${OLLAMA_MEM_LIMIT}
 WEBUI_MEM_LIMIT=${WEBUI_MEM_LIMIT}
+OLLAMA_CPUS=${OLLAMA_CPUS}
+WEBUI_CPUS=${WEBUI_CPUS}
 OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}
 OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL}
 OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS}
@@ -539,6 +577,11 @@ ENABLE_OPENAI_API=${ENABLE_OPENAI_API:-false}
 
 # --- Cloud inference plane -------------------------------------------------
 TAILSCALE_IP=${TAILSCALE_IP:-}
+# Role-based peer name. Adding a second pod later means adding a name to
+# PEER_HOSTNAMES, not renaming this one. doctor.sh and the pipe read
+# PEER_HOSTNAME so their error messages name the right machine.
+PEER_HOSTNAME=${PEER_HOSTNAME}
+PEER_HOSTNAMES=${PEER_HOSTNAMES}
 RUNPOD_API_KEY=${RUNPOD_API_KEY}
 RUNPOD_POD_ID=${RUNPOD_POD_ID}
 VLLM_PORT=${VLLM_PORT:-8000}
@@ -547,6 +590,10 @@ POD_WARMUP_TIMEOUT=${POD_WARMUP_TIMEOUT:-600}
 
 # --- OpenHands maintenance agent -------------------------------------------
 # Loopback-only UI; access through an SSH tunnel over Tailscale.
+#
+# OPENHANDS_WORKSPACE must NOT be this directory. The agent sandbox runs as
+# your uid, so file permissions would not stop it reading .env and the log
+# files. scripts/setup-agent-workspace.sh creates and guards a separate clone.
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
 OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR:-${HOME}/.openhands}
@@ -554,6 +601,8 @@ OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
 OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
 OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}
 OPENHANDS_LOG_ALL_EVENTS=${OPENHANDS_LOG_ALL_EVENTS:-false}
+OPENHANDS_MEM_LIMIT=${OPENHANDS_MEM_LIMIT:-2g}
+OPENHANDS_CPUS=${OPENHANDS_CPUS:-1.5}
 
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true
@@ -569,9 +618,12 @@ ok ".env written (0600)."
 # STEP 9. Launch
 # ---------------------------------------------------------------------------
 
-# --- Agent workspace (Option A: isolated clone) ----------------------------
+# --- Agent workspace (isolated clone) --------------------------------------
 # OpenHands must NOT see this directory: it holds .env and the log files, and
 # the sandbox runs as our uid, so permissions would not stop it reading them.
+#
+# Runs BEFORE the --no-start exit, because preparing the clone is preparation,
+# not a Docker operation.
 hr
 log "Preparing the OpenHands workspace..."
 if (( NON_INTERACTIVE )); then
@@ -587,16 +639,23 @@ if (( NO_START )); then
   exit 0
 fi
 
+# Both compose files, every time. Omitting the overlay on an "up
+# --remove-orphans" would DELETE the OpenHands container as an orphan.
+COMPOSE=(docker compose
+         -f docker-compose.yml
+         -f openhands/docker-compose.openhands.yml
+         --env-file "$ENV_FILE")
+
 log "Pulling images (no-op if already current)..."
-docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file "$ENV_FILE" pull --quiet || warn "Image pull failed; using cached images."
+"${COMPOSE[@]}" pull --quiet || warn "Image pull failed; using cached images."
 
 log "Starting control plane..."
 # "up -d" starts in the background. "--remove-orphans" cleans up containers
 # from services that no longer exist in the compose file.
-if ! docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file "$ENV_FILE" up -d --remove-orphans; then
+if ! "${COMPOSE[@]}" up -d --remove-orphans; then
   event "stack_start_failed"
   warn "docker compose up failed. Recent logs:"
-  docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file "$ENV_FILE" logs --tail 40 2>/dev/null || true
+  "${COMPOSE[@]}" logs --tail 40 2>/dev/null || true
   die "Control plane did not start."
 fi
 event "stack_started"
@@ -610,7 +669,7 @@ event "stack_started"
 # success message over a dead service, and you would not find out until you
 # opened the browser. We poll the real health endpoints and report honestly.
 # ---------------------------------------------------------------------------
-log "Verifying service health (up to 180s)..."
+log "Verifying service health..."
 
 wait_for() {          # wait_for <label> <url> <max_seconds>
   local label="$1" url="$2" max="$3" waited=0
@@ -633,14 +692,14 @@ wait_for() {          # wait_for <label> <url> <max_seconds>
 HEALTH_FAILED=0
 wait_for "ollama"     "http://127.0.0.1:11434/api/tags" 60  || HEALTH_FAILED=1
 wait_for "open-webui" "http://127.0.0.1:3000/health"    180 || HEALTH_FAILED=1
+
 # OpenHands is a maintenance convenience, not part of the serving path. Chat and
 # the cloud pipe work without it, and its image is large enough that a first pull
 # on a Pi can exceed this window. A warning, never a failed install -- and never
 # a failed CI deploy, which runs this script under script_stop: true.
 wait_for "openhands"  "http://127.0.0.1:${OPENHANDS_PORT:-3001}" 240 || \
   warn "OpenHands not reachable yet. Optional; everything else is unaffected. Check: ./openhands/scripts/openhands-control.sh logs"
-# The status page and proxy are convenience features: if they fail the stack
-# is still fully usable, so they warn rather than failing the install.
+
 # The proxy and status page are conveniences: if they fail the stack is still
 # fully usable on :3000, so these warn rather than failing the install.
 wait_for "status page" "http://127.0.0.1:80/status/healthz" 60 || \
@@ -650,14 +709,14 @@ if ! curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:80/app/" 2>/dev/null;
 fi
 
 hr
-docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file "$ENV_FILE" ps
+"${COMPOSE[@]}" ps
 hr
 
 if (( HEALTH_FAILED )); then
   event "install_failed" "reason=healthcheck"
   warn "One or more services are unhealthy. Diagnostic logs below."
   hr
-  docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml --env-file "$ENV_FILE" logs --tail 40 2>/dev/null || true
+  "${COMPOSE[@]}" logs --tail 40 2>/dev/null || true
   hr
   warn "The stack is running but not serving."
   warn "Run ./doctor.sh for a full diagnosis, or see docs/TROUBLESHOOTING.md"
@@ -863,9 +922,10 @@ printf '    1. Open http://%s/openwebui and create your admin account\n' "${PI_I
 printf '    2. Pull a local model:  docker exec -it ollama ollama pull llama3.2:3b\n'
 printf '    3. Add the cloud model: Open WebUI -> Workspace -> Functions -> +\n'
 printf '       then paste openwebui/runpod_pipe.py and enable it\n'
+printf '    4. OpenHands (optional): ssh -L 3001:127.0.0.1:3001 %s@%s\n' "${USER:-user}" "${PI_IP:-localhost}"
 printf '\n  Check everything at any time:\n'
 printf '    in a browser : http://%s/status\n' "${PI_IP:-localhost}"
-printf '    on the CLI   : ./doctor.sh\n' 
+printf '    on the CLI   : ./doctor.sh\n'
 if [[ -f "${HOME}/.config/hybrid-ai-backup/r2.env" ]]; then
   printf '%s  Backups: nightly at 03:15 -> Cloudflare R2. Rehearse with ./backup/restore.sh --test%s\n\n' "$C_DIM" "$C_RST"
 else

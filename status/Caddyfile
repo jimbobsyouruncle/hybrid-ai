@@ -202,3 +202,16 @@
 # NOTE: this file is backed up by ./backup/backup.sh, so any customisation you
 # make here survives a rebuild onto new hardware.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# DELIBERATELY NOT ROUTED: OpenHands (127.0.0.1:3001).
+#
+# The OpenHands controller mounts the Docker socket in order to create sandbox
+# containers. Socket access is effectively root on this host. It is therefore
+# bound to loopback only and reached via an SSH tunnel over Tailscale:
+#
+#     ssh -L 3001:127.0.0.1:3001 <user>@<pi-tailnet-name>
+#
+# Do not add a handle block for it. An IP allowlist is not a sufficient control
+# for a service that can execute arbitrary code as root.
+# ---------------------------------------------------------------------------

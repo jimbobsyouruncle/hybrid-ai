@@ -137,7 +137,7 @@ curl -fsS http://localhost:3000/health && echo " OK"
 curl -fsS http://127.0.0.1:11434/api/tags | jq '.models[].name'
 
 # 4. Is the tailnet up, and is the pod known?
-tailscale status | grep -E 'runpod-vllm|^100\.'
+tailscale status | grep -E 'runpod-|^100\.'
 
 # 5. Is the GPU pod awake and serving?
 source .env && curl -fsS --max-time 5 "http://${TAILSCALE_IP}:8000/v1/models" | jq .

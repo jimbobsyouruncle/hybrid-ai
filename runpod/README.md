@@ -16,7 +16,7 @@ The problem with rented GPUs is that they bill continuously whether you are usin
 
 The three jobs `start.sh` performs, in order:
 
-1. **Join the private network.** Connects to your Tailscale mesh as `runpod-vllm`, giving it a `100.x.x.x` address reachable only by your own devices. No public ports are opened.
+1. **Join the private network.** Connects to your Tailscale mesh as `runpod-worker`, giving it a `100.x.x.x` address reachable only by your own devices. No public ports are opened.
 2. **Arm the watchdog.** A background loop samples GPU utilisation once a minute and calls RunPod's shutdown API after 15 consecutive idle readings.
 3. **Serve the model.** Launches vLLM with an OpenAI-compatible API, with all request and statistics logging disabled.
 
@@ -73,7 +73,7 @@ In the pod template's **Environment Variables** section:
 | `IDLE_MINUTES` | `15` | No — lower it to `10` to be more aggressive about cost |
 | `MAX_MODEL_LEN` | `16384` | No — raise for longer conversations, at the cost of GPU memory |
 | `GPU_MEM_UTIL` | `0.92` | No — lower to `0.85` if you hit out-of-memory errors |
-| `TS_HOSTNAME` | `runpod-vllm` | No — **if you change it, change `PEER_HOSTNAME` in `install.sh` to match** |
+| `TS_HOSTNAME` | `runpod-worker` | No — **if you change it, add it to `PEER_HOSTNAMES` in `install.sh` to match** |
 
 > If `RUNPOD_API_KEY` is missing, `start.sh` prints a warning and runs without a watchdog. The pod will then bill continuously until you stop it by hand. Do not skip this variable.
 

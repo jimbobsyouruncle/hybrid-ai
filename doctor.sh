@@ -113,7 +113,7 @@ else
 fi
 
 # --- Disk -------------------------------------------------------------------
-# A full SD card is behind a surprising share of 'it just stopped working'.
+# A full disk is behind a surprising share of 'it just stopped working'.
 DISK_PCT="$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9')"
 if [[ -n "$DISK_PCT" ]]; then
   if (( DISK_PCT >= 90 )); then
@@ -148,8 +148,8 @@ case "$ROOT_SRC" in
     ;;
   *mmcblk*)
     # Catching this specific case is worth the extra check: an NVMe drive
-    # present but not booted from means the user paid for speed they are not
-    # getting, and nothing else would ever tell them.
+    # present but not booted from means you paid for speed you are not
+    # getting, and nothing else would ever tell you.
     if lsblk -dno NAME 2>/dev/null | grep -q '^nvme'; then
       fail "Booted from SD card even though an NVMe drive is installed" \
            "The SSD is idle while everything runs at SD speed. Fix the boot order: sudo raspi-config -> Advanced Options -> Boot Order -> NVMe/USB Boot"
@@ -169,6 +169,7 @@ if [[ -n "$TOTAL_MB" ]]; then
   else
     pass "RAM: ${TOTAL_MB} MiB"
   fi
+
   # Capacity is rarely the real limit on a Pi -- memory BANDWIDTH is. A 16 GB
   # board can load an 8B model but will still only manage 1-3 tokens/sec,
   # because every token requires reading every weight. Flag oversized models
@@ -194,7 +195,7 @@ if command -v vcgencmd >/dev/null 2>&1; then
   fi
 fi
 
-# --- SD card health ---------------------------------------------------------
+# --- Storage health ---------------------------------------------------------
 if dmesg 2>/dev/null | grep -qiE 'mmcblk.*(i/o error|failed)'; then
   fail "Storage I/O errors found in the kernel log" \
        "Your SD card may be failing. Back up now and replace it, ideally with an SSD."
@@ -213,7 +214,8 @@ if [[ -f .env ]]; then
   else
     fail ".env permissions are ${PERMS}, expected 600" "Fix: chmod 600 .env"
   fi
-  for key in WEBUI_SECRET_KEY RUNPOD_API_KEY RUNPOD_POD_ID TAILSCALE_IP; do
+
+  for key in WEBUI_SECRET_KEY RUNPOD_API_KEY RUNPOD_POD_ID TAILSCALE_IP PEER_HOSTNAME; do
     val="$(grep -E "^${key}=" .env 2>/dev/null | head -1 | cut -d= -f2-)"
     if [[ -n "$val" ]]; then
       pass "${key} is set"
@@ -221,6 +223,7 @@ if [[ -f .env ]]; then
       warn "${key} is empty" "Re-run ./install.sh to populate it."
     fi
   done
+
   TS_IP="$(grep -E '^TAILSCALE_IP=' .env 2>/dev/null | cut -d= -f2-)"
   if [[ -n "$TS_IP" ]]; then
     # Mesh addresses are 100.64.x.x - 100.127.x.x. Anything else means the
@@ -232,6 +235,41 @@ if [[ -f .env ]]; then
            "The pipe will refuse to send prompts. Re-run ./install.sh to rediscover the pod."
     fi
   fi
+
+  # --- OpenHands credential store -----------------------------------------
+  # Holds the LLM provider key you enter in the OpenHands UI. Outside the repo
+  # so it is never committed and never visible to the agent sandbox.
+  if [[ -d "${HOME}/.openhands" ]]; then
+    OH_PERMS="$(stat -c '%a' "${HOME}/.openhands" 2>/dev/null)"
+    if [[ "$OH_PERMS" == "700" ]]; then
+      pass "~/.openhands permissions correct (700)"
+    else
+      fail "~/.openhands is ${OH_PERMS}, expected 700" \
+           "Fix: chmod 700 ${HOME}/.openhands"
+    fi
+  fi
+
+  # --- Agent workspace isolation ------------------------------------------
+  # THE control that keeps the OpenHands sandbox away from .env. The sandbox
+  # runs as your uid, so file permissions would not stop it reading the file;
+  # what stops it is the workspace being a separate clone entirely.
+  OH_WS="$(grep -E '^OPENHANDS_WORKSPACE=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+  if [[ -n "$OH_WS" ]]; then
+    OH_WS_REAL="$(readlink -f "$OH_WS" 2>/dev/null || echo "$OH_WS")"
+    DEPLOY_REAL="$(readlink -f "$SCRIPT_DIR")"
+    if [[ "$OH_WS_REAL" == "$DEPLOY_REAL" ]]; then
+      fail "OPENHANDS_WORKSPACE is the deployment directory" \
+           "The agent sandbox could read .env and the log files. Fix: ./scripts/setup-agent-workspace.sh"
+    elif [[ -e "${OH_WS}/.env" ]]; then
+      fail "A .env exists inside the agent workspace" \
+           "That defeats the isolation. Remove it: rm ${OH_WS}/.env"
+    elif [[ -d "${OH_WS}/.git" ]]; then
+      pass "Agent workspace isolated from the deployment directory"
+    else
+      warn "Agent workspace ${OH_WS} is not a git clone" \
+           "OpenHands will start with an empty workspace. Fix: ./scripts/setup-agent-workspace.sh"
+    fi
+  fi
 else
   fail ".env is missing" "Run ./install.sh to create it."
 fi
@@ -241,7 +279,7 @@ fi
 # ---------------------------------------------------------------------------
 section "Containers"
 
-for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy; do
+for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy hybrid-ai-openhands; do
   STATE="$(docker inspect -f '{{.State.Status}}' "$svc" 2>/dev/null)"
   case "$STATE" in
     running)
@@ -265,10 +303,10 @@ for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy; do
            "A backup may have been interrupted. Resume with: docker unpause ${svc}"
       ;;
     "")
-      # The status page and proxy are optional conveniences; chat works
-      # perfectly without them, so their absence is not a failure.
+      # The status page, proxy and OpenHands are optional conveniences; chat
+      # works perfectly without them, so their absence is not a failure.
       if [[ "$svc" == hybrid-ai-* ]]; then
-        warn "${svc} does not exist" "Optional. Run ./install.sh to add the status page."
+        warn "${svc} does not exist" "Optional. Run ./install.sh to add it."
       else
         fail "${svc} does not exist" "Run ./install.sh to create it."
       fi ;;
@@ -303,12 +341,24 @@ else
        "Check: docker compose --env-file .env logs --tail 50 open-webui"
 fi
 
+# OpenHands is loopback-only by design, so this probe works on the Pi itself
+# but will never be reachable from elsewhere without an SSH tunnel.
+OH_PORT="$(grep -E '^OPENHANDS_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+OH_PORT="${OH_PORT:-3001}"
+if docker inspect -f '{{.State.Status}}' hybrid-ai-openhands >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 "http://127.0.0.1:${OH_PORT}" >/dev/null 2>&1; then
+    pass "OpenHands responding on 127.0.0.1:${OH_PORT} (tunnel to reach it remotely)"
+  else
+    warn "OpenHands container exists but is not answering on ${OH_PORT}" \
+         "Optional feature. Check: ./openhands/scripts/openhands-control.sh logs"
+  fi
+fi
+
 # Check every logical path the proxy is supposed to serve. Checking them
 # individually means a single broken route is identified precisely, rather
 # than reported as a vague "the proxy is unhappy".
 if curl -fsS --max-time 5 http://127.0.0.1:80/status/healthz >/dev/null 2>&1; then
   pass "Proxy: /status responding"
-
   for route in "/hub:hub page" "/app/:Open WebUI" "/health:health summary"; do
     path="${route%%:*}"; label="${route#*:}"
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://127.0.0.1:80${path}" 2>/dev/null)"
@@ -321,7 +371,6 @@ if curl -fsS --max-time 5 http://127.0.0.1:80/status/healthz >/dev/null 2>&1; th
            "Check the Caddyfile and: docker compose --env-file .env logs --tail 30 proxy"
     fi
   done
-
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://127.0.0.1:80/openwebui" 2>/dev/null)"
   if [[ "$code" == "302" ]]; then
     pass "Proxy: /openwebui redirects to /app/ (expected)"
@@ -345,17 +394,21 @@ if command -v tailscale >/dev/null 2>&1; then
     SELF="$(tailscale ip -4 2>/dev/null | head -1)"
     pass "Tailscale connected (this node: ${SELF:-unknown})"
 
+    # Match either the role-based name or the legacy one, so this check keeps
+    # working whichever you called the pod. install.sh prefers runpod-worker.
     PEER_JSON="$(tailscale status --json 2>/dev/null | jq -r '
       (.Peer // {}) | to_entries | map(.value)
-      | map(select((.HostName // "") | ascii_downcase | contains("runpod-vllm")))
+      | map(select((.HostName // "") | ascii_downcase | test("runpod-(worker|vllm)")))
       | .[0] // empty' 2>/dev/null)"
+
     if [[ -n "$PEER_JSON" ]]; then
+      PEER_NAME="$(printf '%s' "$PEER_JSON" | jq -r '.HostName // "?"' 2>/dev/null)"
       ONLINE="$(printf '%s' "$PEER_JSON" | jq -r '.Online // false' 2>/dev/null)"
       if [[ "$ONLINE" == "true" ]]; then
-        pass "GPU pod is online"
+        pass "GPU pod '${PEER_NAME}' is online"
       else
         # This is the normal, money-saving state. Not a problem.
-        pass "GPU pod known but stopped (normal - it wakes on demand)"
+        pass "GPU pod '${PEER_NAME}' known but stopped (normal - it wakes on demand)"
       fi
     else
       warn "GPU pod has never joined this tailnet" \
@@ -397,6 +450,7 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
       fail "Backup timer is not active" \
            "Enable it: systemctl --user enable --now hybrid-ai-backup.timer"
     fi
+
     # Without linger, user timers do not run when you are logged out -- which
     # means the nightly backup silently never happens.
     if command -v loginctl >/dev/null 2>&1; then
@@ -429,6 +483,7 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
     else
       warn "No successful backup recorded yet" "Run one now: ./backup/backup.sh"
     fi
+
     if grep -q 'event=backup_failed\|event=check_failed' backup.log 2>/dev/null; then
       RECENT_FAIL="$(grep -c 'event=backup_failed' backup.log 2>/dev/null || echo 0)"
       warn "${RECENT_FAIL} backup failure(s) recorded in the log" \

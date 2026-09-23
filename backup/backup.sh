@@ -420,7 +420,10 @@ docker compose --env-file "${REPO_DIR}/.env" config --images 2>/dev/null \
 for f in docker-compose.yml docker-compose.override.yml; do
   [[ -f "${REPO_DIR}/${f}" ]] && cp -a "${REPO_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
 done
-for d in openwebui status; do
+# openhands/ and scripts/ hold AGENTS.md, the prompts, the overlay, and the
+# workspace isolation guard. Tracked in git, but local edits exist nowhere
+# else -- the same argument that already put the Caddyfile in this list.
+for d in openwebui openhands scripts status; do
   if [[ -d "${REPO_DIR}/${d}" ]]; then
     mkdir -p "${HOST_DIR}/${d}"
     cp -a "${REPO_DIR}/${d}/." "${HOST_DIR}/${d}/" 2>/dev/null || true
