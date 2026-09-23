@@ -40,7 +40,8 @@ cd "$SCRIPT_DIR"
 
 ENV_FILE="${SCRIPT_DIR}/.env"
 # This must match TS_HOSTNAME in runpod/start.sh, or discovery will fail.
-PEER_HOSTNAME="${PEER_HOSTNAME:-runpod-vllm}"
+PEER_HOSTNAMES="${PEER_HOSTNAMES:-runpod-worker runpod-vllm}"
+PEER_HOSTNAME="${PEER_HOSTNAME:-${PEER_HOSTNAMES%% *}}"
 NON_INTERACTIVE=0
 NO_START=0
 
@@ -135,6 +136,25 @@ ok "compose $(docker compose version --short 2>/dev/null || echo '?')"
 ok "jq $(jq --version 2>/dev/null)"
 ok "sqlite3 $(sqlite3 --version 2>/dev/null | awk '{print $1}')"
 ok "tailscale $(tailscale version 2>/dev/null | head -n1 || echo '?')"
+
+# --- Make our own helper scripts executable --------------------------------
+# A git checkout, an unzip, or a copy from Windows can all drop the executable
+# bit. Without it the workspace setup below fails, the `|| warn` swallows it,
+# and Docker then CREATES ~/hybrid-ai-agent as an empty directory when it
+# mounts it -- so OpenHands comes up with an empty workspace and no clone.
+# Nothing fails loudly, which makes it unpleasant to diagnose. Fix it here.
+for _s in scripts/setup-agent-workspace.sh openhands/scripts/openhands-control.sh \
+          doctor.sh collect-diagnostics.sh backup/backup.sh backup/restore.sh \
+          runpod/start.sh; do
+  _f="${SCRIPT_DIR}/${_s}"
+  [[ -f "$_f" ]] || continue
+  if [[ ! -x "$_f" ]]; then
+    chmod +x "$_f" 2>/dev/null \
+      && ok "Made ${_s} executable." \
+      || warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"
+  fi
+done
+unset _s _f
 
 # ---------------------------------------------------------------------------
 # STEP 2. Load existing .env
@@ -353,8 +373,9 @@ prompt_secret RUNPOD_POD_ID  "RunPod pod ID"  0
 # ---------------------------------------------------------------------------
 # STEP 6. Find the GPU pod on the Tailscale network
 # "tailscale status --json" lists every machine on your private network. We use
-# jq (a JSON query tool) to find the one named "runpod-vllm" and pull out its
-# 100.x.x.x address. That address is private to your network and encrypted.
+# jq (a JSON query tool) to find the pod by hostname (see PEER_HOSTNAMES above)
+# and pull out its 100.x.x.x address. That address is private to your network
+# and encrypted.
 # ---------------------------------------------------------------------------
 log "Querying Tailscale mesh for peer '${PEER_HOSTNAME}'..."
 
@@ -370,45 +391,64 @@ if TS_JSON="$(tailscale status --json 2>/dev/null)"; then
   fi
 
   # Match on hostname or DNS name, preferring a peer that is currently online.
-  DISCOVERED_IP="$(
-    printf '%s' "$TS_JSON" | jq -r --arg peer "$PEER_HOSTNAME" '
-      (.Peer // {})
-      | to_entries
-      | map(.value)
-      | map(select(
-          ((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))
-          or ((.DNSName // "") | ascii_downcase | startswith(($peer | ascii_downcase) + "."))
-        ))
-      | sort_by((.Online // false) | not)
-      | .[0].TailscaleIPs[]? // empty
-    ' | grep -E '^100\.' | head -n1 || true
-  )"
+  # Try each candidate name in PEER_HOSTNAMES in order; first hit wins.
+  DISCOVERED_IP=""
+  PEER_ONLINE="false"
+  MATCHED_PEER=""
 
-  PEER_ONLINE="$(
-    printf '%s' "$TS_JSON" | jq -r --arg peer "$PEER_HOSTNAME" '
-      (.Peer // {}) | to_entries | map(.value)
-      | map(select(((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))))
-      | .[0].Online // false
-    ' 2>/dev/null || echo false
-  )"
+  for _peer in $PEER_HOSTNAMES; do
+    _ip="$(
+      printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
+        (.Peer // {})
+        | to_entries
+        | map(.value)
+        | map(select(
+            ((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))
+            or ((.DNSName // "") | ascii_downcase | startswith(($peer | ascii_downcase) + "."))
+          ))
+        | sort_by((.Online // false) | not)
+        | .[0].TailscaleIPs[]? // empty
+      ' | grep -E '^100\.' | head -n1 || true
+    )"
+
+    [[ -z "$_ip" ]] && continue
+
+    DISCOVERED_IP="$_ip"
+    MATCHED_PEER="$_peer"
+    PEER_ONLINE="$(
+      printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
+        (.Peer // {}) | to_entries | map(.value)
+        | map(select(((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))))
+        | .[0].Online // false
+      ' 2>/dev/null || echo false
+    )"
+    break
+  done
+  unset _peer _ip
 else
   warn "'tailscale status --json' failed. Is tailscaled running?"
   DISCOVERED_IP=""
   PEER_ONLINE="false"
+  MATCHED_PEER=""
 fi
 
 if [[ -n "${DISCOVERED_IP:-}" ]]; then
   TAILSCALE_IP="$DISCOVERED_IP"
   if [[ "$PEER_ONLINE" == "true" ]]; then
-    ok "Peer '${PEER_HOSTNAME}' online at ${TAILSCALE_IP}"
+    ok "Peer '${MATCHED_PEER}' online at ${TAILSCALE_IP}"
   else
     # This is the normal state most of the time -- the pod is stopped to save money.
-    ok "Peer '${PEER_HOSTNAME}' known at ${TAILSCALE_IP} (offline -- pod is stopped, expected)"
+    ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline -- pod is stopped, expected)"
+  fi
+
+  if [[ "$MATCHED_PEER" != "$PEER_HOSTNAME" ]]; then
+    warn "Pod is registered as '${MATCHED_PEER}' (legacy name)."
+    warn "Rename it: set TS_HOSTNAME=${PEER_HOSTNAME} in runpod/start.sh, then restart the pod."
   fi
 elif [[ -n "${TAILSCALE_IP:-}" ]]; then
-  warn "Peer '${PEER_HOSTNAME}' not in tailnet right now; keeping cached ${TAILSCALE_IP}"
+  warn "No peer (${PEER_HOSTNAMES}) in tailnet right now; keeping cached ${TAILSCALE_IP}"
 else
-  warn "Peer '${PEER_HOSTNAME}' not found and no cached address."
+  warn "No peer found (tried: ${PEER_HOSTNAMES}) and no cached address."
   if (( NON_INTERACTIVE )); then
     TAILSCALE_IP=""
     warn "Continuing with empty TAILSCALE_IP -- the pipe will error until the pod registers."
@@ -508,7 +548,7 @@ POD_WARMUP_TIMEOUT=${POD_WARMUP_TIMEOUT:-600}
 # --- OpenHands maintenance agent -------------------------------------------
 # Loopback-only UI; access through an SSH tunnel over Tailscale.
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
-OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE:-${SCRIPT_DIR}}
+OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR:-${HOME}/.openhands}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
 OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
@@ -528,6 +568,20 @@ ok ".env written (0600)."
 # ---------------------------------------------------------------------------
 # STEP 9. Launch
 # ---------------------------------------------------------------------------
+
+# --- Agent workspace (Option A: isolated clone) ----------------------------
+# OpenHands must NOT see this directory: it holds .env and the log files, and
+# the sandbox runs as our uid, so permissions would not stop it reading them.
+hr
+log "Preparing the OpenHands workspace..."
+if (( NON_INTERACTIVE )); then
+  "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" --non-interactive \
+    || warn "Agent workspace setup failed; OpenHands will not start until it exists."
+else
+  "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" \
+    || warn "Agent workspace setup failed; OpenHands will not start until it exists."
+fi
+
 if (( NO_START )); then
   hr; ok "--no-start requested. Environment prepared; Docker untouched."; hr
   exit 0
@@ -579,7 +633,12 @@ wait_for() {          # wait_for <label> <url> <max_seconds>
 HEALTH_FAILED=0
 wait_for "ollama"     "http://127.0.0.1:11434/api/tags" 60  || HEALTH_FAILED=1
 wait_for "open-webui" "http://127.0.0.1:3000/health"    180 || HEALTH_FAILED=1
-wait_for "openhands"  "http://127.0.0.1:${OPENHANDS_PORT:-3001}" 180 || HEALTH_FAILED=1
+# OpenHands is a maintenance convenience, not part of the serving path. Chat and
+# the cloud pipe work without it, and its image is large enough that a first pull
+# on a Pi can exceed this window. A warning, never a failed install -- and never
+# a failed CI deploy, which runs this script under script_stop: true.
+wait_for "openhands"  "http://127.0.0.1:${OPENHANDS_PORT:-3001}" 240 || \
+  warn "OpenHands not reachable yet. Optional; everything else is unaffected. Check: ./openhands/scripts/openhands-control.sh logs"
 # The status page and proxy are convenience features: if they fail the stack
 # is still fully usable, so they warn rather than failing the install.
 # The proxy and status page are conveniences: if they fail the stack is still
@@ -797,7 +856,7 @@ printf '    Open WebUI : http://%s/openwebui   (or http://%s:3000)\n' "${PI_IP:-
 printf '    Status     : http://%s/status\n' "${PI_IP:-localhost}"
 printf '    OpenHands  : http://127.0.0.1:%s via SSH tunnel only\n' "${OPENHANDS_PORT:-3001}"
 printf '    Ollama API : http://%s/ollama/\n' "${PI_IP:-localhost}"
-printf '    Ollama API : http://127.0.0.1:11434\n'
+printf '    Ollama dir : http://127.0.0.1:11434\n'
 printf '    vLLM peer  : http://%s:%s/v1  (on demand)\n\n' "${TAILSCALE_IP:-<unresolved>}" "${VLLM_PORT:-8000}"
 printf '\n  Next steps:\n'
 printf '    1. Open http://%s/openwebui and create your admin account\n' "${PI_IP:-localhost}"
