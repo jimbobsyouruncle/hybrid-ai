@@ -137,7 +137,7 @@ Start the pod once manually. Watch the logs — you are looking for:
 Then confirm from the Pi:
 
 ```bash
-tailscale status | grep runpod-vllm
+tailscale status | grep runpod-
 curl http://<pod-tailscale-ip>:8000/v1/models
 ```
 
