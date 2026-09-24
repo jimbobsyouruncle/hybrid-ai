@@ -68,7 +68,7 @@ Chat databases, uploads, and the vector store are **measured** — file sizes, r
 
 ### Access is restricted by source address
 
-Caddy allows `/status` only from loopback, RRC1918 private ranges, the Tailscale mesh (100.64.0.0/10), and the Tailscale IPv6 ULA range (fd7a:115c:a1e0::/48). Anything else gets the connection closed with no response body, revealing nothing about what runs here.
+Caddy allows `/status` only from loopback, RFC1918 private ranges, the Tailscale mesh (100.64.0.0/10), and the Tailscale IPv6 ULA range (fd7a:115c:a1e0::/48). Anything else gets the connection closed with no response body, revealing nothing about what runs here.
 
 The status container publishes **no ports of its own**. The proxy is the only route in, which is what stops the allowlist being bypassed by connecting directly.
 
