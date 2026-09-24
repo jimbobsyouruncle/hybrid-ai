@@ -460,7 +460,7 @@ Rehearse a restore before you need one:
 
 ### Step 8 — Automated deploys (optional)
 
-Add the six GitHub secrets from the table above, push to `main`, and watch the Actions tab. See [`.github/README.md`](.github/README.md).
+Add the seven GitHub secrets from the table above, push to `main`, and watch the Actions tab. See [`.github/README.md`](.github/README.md).
 
 ---
 
