@@ -5,7 +5,8 @@
 #   routes each request to the right place, so you have ONE address to remember
 #   instead of a collection of port numbers.
 #
-#       http://<pi>/              the hub page - links to everything
+# 		http://<pi>/ 			  the chat interface (same as /openwebui) 
+#		http://<pi>/hub 		  the hub page - links to everything
 #       http://<pi>/status        service health, jobs, logs, diagnostics
 #       http://<pi>/openwebui     the chat interface
 #       http://<pi>/ollama/       the local model API (for scripts)
