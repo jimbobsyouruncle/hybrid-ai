@@ -66,10 +66,6 @@ In the pod template's **Environment Variables** section:
 
 | Variable | Value | Required |
 |---|---|---|
-| `TRUST_REMOTE_CODE` | *(leave unset)* | No — **setting this to `1` lets code inside the model repository execute on the pod, with access to its credentials.** Only for a model you have specifically vetted |
-| `VLLM_PORT` | `8000` | No — must match `VLLM_PORT` in the Pi's `.env` |
-| `READY_TIMEOUT` | *(default)* | No — how long to wait for vLLM to report ready before treating the start as failed |
-| `MAX_RESTARTS` | *(default)* | No — restart budget before the pod stops itself on a crash loop |
 | `TAILSCALE_AUTH_KEY` | `tskey-auth-...` from step 1 | **Yes** — the pod cannot join your network without it |
 | `RUNPOD_API_KEY` | `rpa_...` from step 2 | **Yes** — without it the watchdog is disabled and the pod bills forever |
 | `RUNPOD_POD_ID` | *(do not set)* | Injected automatically by RunPod |
@@ -78,6 +74,10 @@ In the pod template's **Environment Variables** section:
 | `MAX_MODEL_LEN` | `16384` | No — raise for longer conversations, at the cost of GPU memory |
 | `GPU_MEM_UTIL` | `0.92` | No — lower to `0.85` if you hit out-of-memory errors |
 | `TS_HOSTNAME` | `runpod-worker` | No — **if you change it, add it to `PEER_HOSTNAMES` in `install.sh` to match** |
+| `TRUST_REMOTE_CODE` | *(leave unset)* | No — **setting this to `1` lets code inside the model repository execute on the pod, with access to its credentials.** Only for a model you have specifically vetted |
+| `VLLM_PORT` | `8000` | No — must match `VLLM_PORT` in the Pi's `.env` |
+| `READY_TIMEOUT` | *(default)* | No — how long to wait for vLLM to report ready before treating the start as failed |
+| `MAX_RESTARTS` | *(default)* | No — restart budget before the pod stops itself on a crash loop |
 
 > If `RUNPOD_API_KEY` is missing, `start.sh` prints a warning and runs without a watchdog. The pod will then bill continuously until you stop it by hand. Do not skip this variable.
 
