@@ -129,7 +129,7 @@ GitHub repo → **Settings** → **Secrets and variables** → **Actions** → *
 | `PI_SSH_USER` | Usually `pi` | Your Pi's username |
 | `PI_SSH_KEY` | **Private** key contents | `cat ~/.ssh/hybrid_ai_deploy` — include the BEGIN and END lines |
 | `PI_REPO_PATH` | e.g. `/home/pi/hybrid-ai` | `pwd` in the repo folder on the Pi |
-| `PI_SSH_HOST_KEY` | The Pi's SSH host key | `ssh-keyscan -t ed25519 $(tailscale ip -4)` \| ssh-keygen -lf - on the Pi — use the SHA256:... field, not the raw known_hosts line |
+| `PI_SSH_HOST_KEY` | The Pi's SSH host key | `ssh-keyscan -t ed25519 $(tailscale ip -4) \| ssh-keygen -lf -` on the Pi — use the SHA256:... field, not the raw known_hosts line |
 
 > `PI_SSH_KEY` takes the **private** key. That is correct and expected — GitHub needs it to authenticate. It is stored encrypted and masked in logs. This is also why the key should be dedicated to this purpose and authorised only on the Pi, never a key you use elsewhere.
 
