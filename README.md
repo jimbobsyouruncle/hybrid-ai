@@ -2,7 +2,7 @@
 
 **A private, self-hosted AI platform that runs small models locally on a Raspberry Pi and borrows a cloud GPU only when it needs one — then shuts it off automatically.**
 
-[![Deploy Control Plane](https://github.com/YOUR_USERNAME/hybrid-ai/actions/workflows/deploy.yml/badge.svg)](https://github.com/YOUR_USERNAME/hybrid-ai/actions/workflows/deploy.yml)
+[![Deploy Control Plane](https://github.com/jimbobsyouruncle/hybrid-ai/actions/workflows/deploy.yml/badge.svg)](https://github.com/jimbobsyouruncle/hybrid-ai/actions/workflows/deploy.yml)
 ![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi%204%20%7C%205-c51a4a)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -34,13 +34,13 @@ Your prompts travel over an encrypted private network. The cloud server keeps no
 │  YOUR HOME                                                      │
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────┐      │
-│  │  Raspberry Pi  ::  local control plane                 │      │
-│  │                                                        │      │
-│  │   Open WebUI ──── chat UI, history, documents          │      │
-│  │        │                                               │      │
-│  │        ├──▶ Ollama ──── small models, runs on the Pi   │      │
-│  │        │                                               │      │
-│  │        └──▶ runpod_pipe.py ──┐                         │      │
+│  │  Raspberry Pi  ::  local control plane                │      │
+│  │                                                       │      │
+│  │   Open WebUI ──── chat UI, history, documents         │      │
+│  │        │                                              │      │
+│  │        ├──▶ Ollama ──── small models, runs on the Pi │      │
+│  │        │                                              │      │
+│  │        └──▶ runpod_pipe.py ──┐                        │      │
 │  │                              │                         │      │
 │  │   ./webui_data   ./ollama_data   (your data, on disk)  │      │
 │  └──────────────────────────────┼─────────────────────────┘      │
@@ -51,14 +51,14 @@ Your prompts travel over an encrypted private network. The cloud server keeps no
                                   │
 ┌─────────────────────────────────┼────────────────────────────────┐
 │  RUNPOD CLOUD                   ▼                                │
-│  ┌────────────────────────────────────────────────────────┐      │
-│  │  GPU pod  ::  cloud inference plane                     │      │
-│  │                                                         │      │
-│  │   start.sh ──▶ joins tailnet ──▶ vLLM (32B model)       │      │
-│  │            └─▶ idle watchdog ──▶ self-shutdown @ 15min  │      │
-│  │                                                         │      │
-│  │   logging disabled · stopped by default · pay per minute│      │
-│  └─────────────────────────────────────────────────────────┘      │
+│  ┌─────────────────────────────────────────────────────────┐     │
+│  │  GPU pod  ::  cloud inference plane                     │     │
+│  │                                                         │     │
+│  │   start.sh ──▶ joins tailnet ──▶ vLLM (32B model)      │     │
+│  │            └─▶ idle watchdog ──▶ self-shutdown @ 15min │     │
+│  │                                                         │     │
+│  │   logging disabled · stopped by default · pay per minute│     │
+│  └─────────────────────────────────────────────────────────┘     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -387,12 +387,12 @@ Backup credentials sit outside the repository deliberately: no `git add`, no str
 ### Step 1 — Pi setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hybrid-ai.git
+git clone https://github.com/jimbobsyouruncle/hybrid-ai.git
 cd hybrid-ai
-chmod +x inschmod +x install.sh doctor.sh collect-diagnostics.sh \
+chmod +x install.sh doctor.sh collect-diagnostics.sh \
          backup/backup.sh backup/restore.sh runpod/start.sh \
          scripts/setup-agent-workspace.sh \
-         openhands/scripts/openhands-control.shtall.sh runpod/start.sh
+         openhands/scripts/openhands-control.sh
 
 sudo tailscale up          # follow the printed URL to authenticate
 tailscale ip -4            # note this address for later
