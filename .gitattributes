@@ -1,4 +1,11 @@
-*.sh text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-Caddyfile text eol=lf
+* text=auto eol=lf 
+*.sh text eol=lf 
+*.yml text eol=lf 
+*.yaml text eol=lf 
+*.py text eol=lf 
+*.service text eol=lf 
+*.timer text eol=lf 
+*.md text eol=lf 
+Caddyfile text eol=lf 
+LICENSE text eol=lf 
+.env.example text eol=lf
