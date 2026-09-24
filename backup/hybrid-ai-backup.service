@@ -53,7 +53,9 @@ ProtectHome=read-only
 # Explicitly re-grant write access to exactly what the backup needs:
 #   the repo (staging dir, backup.log) and the restic cache.
 ReadWritePaths=__REPO_DIR__
-ReadWritePaths=%h/.cache/restic
+# The leading '-' makes systemd tolerate the path not existing rather than
+# refusing to start the unit. install.sh creates it; this is the backstop.
+ReadWritePaths=-%h/.cache/restic
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

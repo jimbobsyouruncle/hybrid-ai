@@ -206,13 +206,14 @@ curl -fsSL https://tailscale.com/install.sh | sudo sh
 exit
 ```
 
-**Confirm readiness.** All five must pass before you continue:
+**Confirm readiness.** All of these must pass before you continue:
 
 ```bash
 uname -m                        # aarch64
 findmnt -n -o SOURCE /          # nvme0n1... recommended (mmcblk = SD card)
 docker run --rm hello-world     # succeeds with no sudo
 docker compose version          # v2.x or newer
+git --version                   # any version
 jq --version                    # any version
 sqlite3 --version               # any version
 restic version                  # any version
@@ -331,7 +332,7 @@ Optional. Everything works if you deploy by hand. CI just means `git push` updat
 |---|---|
 | **Sign up** | [github.com](https://github.com) |
 | **Cost** | Free — public repos get unlimited Actions minutes; private repos get 2,000/month |
-| **Credentials needed** | Six repository secrets, listed below |
+| **Credentials needed** | Seven repository secrets, listed below |
 
 ### 5. Skills assumed
 
@@ -360,7 +361,7 @@ You should be comfortable with a Linux terminal over SSH, basic `git`, and editi
 | `PI_SSH_USER` | *your Pi* | Usually `pi` | GitHub repository secret | Same |
 | `PI_SSH_KEY` | *self-generated* | `ssh-keygen -t ed25519` | GitHub repository secret | Paste the **private** key; the public half goes in the Pi's `~/.ssh/authorized_keys` |
 | `PI_REPO_PATH` | *your Pi* | e.g. `/home/pi/hybrid-ai` | GitHub repository secret | Same |
-| `PI_SSH_HOST_KEY` | *your Pi* | `ssh-keyscan -t ed25519 $(tailscale ip -4)` | GitHub repository secret | Same — prevents host impersonation |
+| `PI_SSH_HOST_KEY` | *your Pi* | `ssh-keyscan -t ed25519 $(tailscale ip -4) \| ssh-keygen -lf -` | GitHub repository secret | Same — prevents host impersonation |
 
 ### Three places credentials live — and one place they must never
 
@@ -408,7 +409,7 @@ Follow [`runpod/README.md`](runpod/README.md). At the end you will have a pod ID
 ./install.sh
 ```
 
-It prompts for your RunPod API key and pod ID, finds the pod on your tailnet, writes `.env`, and starts both containers. Expect 5–10 minutes on first run while images download.
+It prompts for your RunPod API key and pod ID, finds the pod on your tailnet, writes `.env`, and starts the stack — Ollama, Open WebUI, the status page, the proxy, and the OpenHands agent. Expect 5–10 minutes on first run while images download.
 
 ### Step 4 — Configure OpenHands
 

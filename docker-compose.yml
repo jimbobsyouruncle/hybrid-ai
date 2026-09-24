@@ -55,7 +55,9 @@ services:
     # `docker compose pull` can silently swap the image underneath you, which
     # is both a supply-chain risk and an unreproducible-deploy problem.
     # Bump deliberately after reading the release notes.
-    image: ollama/ollama:0.5.7
+    # Overridable so a version bump is an .env change plus a restart, not a
+    # commit. The default is still an explicit pin, never :latest.
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.5.7}
     container_name: ollama
     restart: unless-stopped
     ports:
@@ -87,13 +89,21 @@ services:
       # multiplies KV cache memory.
       OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
       OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
-      # Ollama silently caps EVERY model at 4096 tokens unless told otherwise,
-      # which quietly truncates long chats and RAG context.
+      # Ollama caps every model at 4096 tokens unless told otherwise, which
+      # quietly truncates long chats and RAG context.
+      #
+      # VERSION DEPENDENCY: OLLAMA_CONTEXT_LENGTH is honoured only by newer
+      # Ollama servers. On an older pinned image it is silently ignored and
+      # you get 4096 regardless -- the same class of failure as the removed
+      # OLLAMA_MAX_VRAM. install.sh verifies this after start and warns if
+      # the setting did not take effect.
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
-      # Halves KV cache memory for negligible quality loss, which is what makes
-      # the larger context above affordable.
       OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-1}
-      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-q8_0}
+      # f16 by default. q8_0 halves KV cache memory but requires flash
+      # attention to be active; when Ollama auto-disables it for an
+      # unsupported architecture, the runner panics instead of degrading.
+      # See the note in install.sh before opting in.
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-f16}
       # --- Privacy: switch off every telemetry/analytics phone-home ---------
       SCARF_NO_ANALYTICS: "true"
       DO_NOT_TRACK: "true"
@@ -125,7 +135,7 @@ services:
   open-webui:
     # SECURITY: pinned for the same reason as Ollama above. ":main" tracks
     # the development branch and can change on any push upstream.
-    image: ghcr.io/open-webui/open-webui:v0.5.20
+    image: ${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.5.20}
     container_name: open-webui
     restart: unless-stopped
     depends_on:

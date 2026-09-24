@@ -42,7 +42,7 @@ It shows:
 - **Services** — Open WebUI, Ollama, and the GPU pod, with response times
 - **Scheduled jobs** — the last outcome of every backup, integrity check, restore rehearsal, retention prune and install, with staleness detection
 - **System checks** — container states, disk, memory, installed models, backup freshness, database health
-- **Recent errors** — filtered from the last 250 log lines of each service
+- **Recent errors** — filtered from the last 120 log lines of each service
 - **Log tails** — collapsible, last 40 lines per service
 - **Download diagnostic** — one click, no terminal
 
@@ -68,7 +68,7 @@ Chat databases, uploads, and the vector store are **measured** — file sizes, r
 
 ### Access is restricted by source address
 
-Caddy allows `/status` only from loopback, RRC1918 private ranges, and the Tailscale mesh (`100.64.0.0/10`). Anything else gets the connection closed with no response body, revealing nothing about what runs here.
+Caddy allows `/status` only from loopback, RRC1918 private ranges, the Tailscale mesh (100.64.0.0/10), and the Tailscale IPv6 ULA range (fd7a:115c:a1e0::/48). Anything else gets the connection closed with no response body, revealing nothing about what runs here.
 
 The status container publishes **no ports of its own**. The proxy is the only route in, which is what stops the allowlist being bypassed by connecting directly.
 

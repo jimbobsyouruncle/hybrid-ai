@@ -30,6 +30,11 @@
 #     PI_SSH_USER          SSH username on the Pi, e.g. pi
 #     PI_SSH_KEY           private SSH key authorised on the Pi
 #     PI_REPO_PATH         absolute path to the checkout, e.g. /home/pi/hybrid-ai
+#     PI_SSH_HOST_KEY      SHA256 fingerprint of the Pi's SSH host key:
+#                            ssh-keyscan -t ed25519 <pi-ip> | ssh-keygen -lf -
+#                          Use the SHA256:... field. A raw known_hosts line is
+#                          NOT accepted by the action and silently disables
+#                          host verification.
 #
 #   You must also add an ACL rule in Tailscale allowing tag:ci to reach the Pi
 #   on port 22. Full walkthrough in .github/README.md.
@@ -47,11 +52,6 @@ on:
       - "LICENSE"
       - ".gitignore"
   workflow_dispatch:      # adds a manual "Run workflow" button in the UI
-    inputs:
-      restart_stack:
-        description: "Recreate containers even if images are unchanged"
-        required: false
-        default: "false"
 
 # Only one deploy at a time. Without this, two quick pushes could have two
 # runners reconfiguring the same Pi simultaneously.
@@ -78,12 +78,13 @@ jobs:
         # "bash -n" parses a script without running it. Catches typos and
         # unbalanced quotes safely.
         run: |
-          bash -n install.sh
-          bash -n runpod/start.sh
-          bash -n backup/backup.sh
-          bash -n backup/restore.sh
-          bash -n doctor.sh
-          bash -n collect-diagnostics.sh
+          # Every shell script in the repo, found rather than listed -- a
+          # hardcoded list silently stops covering new files.
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" || fail=1
+          done < <(git ls-files '*.sh')
+          exit $fail
 
       - name: Shellcheck
         # A linter that flags common shell scripting bugs. Advisory only --
@@ -105,18 +106,42 @@ jobs:
           python-version: "3.11"
 
       - name: Python syntax check
-        run: python -m py_compile openwebui/runpod_pipe.py
+        # status/app.py is bind-mounted straight into the container with no
+        # build step, so a syntax error there ships undetected.
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            python -m py_compile "$f" || fail=1
+          done < <(git ls-files '*.py')
+          exit $fail
+
+      - name: Generated pipe is in sync with its sources
+        # runpod_pipe.py is concatenated from runpod_core.py and
+        # pipe_wrapper.py. A forgotten rebuild means the file you paste into
+        # Open WebUI is not the code that was reviewed.
+        run: python3 openwebui/build_pipe.py --check
+
+      - name: Pipe behavioural tests
+        # Mesh-address enforcement, credential scrubbing and stream-truncation
+        # detection are security properties, not conveniences.
+        run: python3 openwebui/test_refactor.py
 
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything.
         run: |
           set -a
-          OLLAMA_MAX_VRAM=1 TAILSCALE_IP=100.64.0.1 RUNPOD_API_KEY=x \
+          TAILSCALE_IP=100.64.0.1 RUNPOD_API_KEY=x \
           RUNPOD_POD_ID=x WEBUI_SECRET_KEY=x STATUS_UID=1000 DOCKER_GID=999 \
-          OLLAMA_MEM_LIMIT=8g WEBUI_MEM_LIMIT=3g OLLAMA_CPUS=3.5 WEBUI_CPUS=2.0
+          OLLAMA_MEM_LIMIT=8g WEBUI_MEM_LIMIT=3g OLLAMA_CPUS=3.5 WEBUI_CPUS=2.0 \
+          OPENHANDS_WORKSPACE=/tmp/agent-workspace
           set +a
           docker compose -f docker-compose.yml config --quiet
+          # The overlay is deployed on every install but was never validated
+          # here, so a broken overlay reached the Pi before anything caught it.
+          docker compose -f docker-compose.yml \
+                         -f openhands/docker-compose.openhands.yml \
+                         config --quiet
 
       - name: Assert proxy allowlist is intact
         # A future edit could remove `import trusted_only` from a sensitive
@@ -207,7 +232,6 @@ jobs:
           fingerprint: ${{ secrets.PI_SSH_HOST_KEY }}
           command_timeout: 20m
           script_stop: true       # abort on the first failing command
-          envs: RESTART_STACK
           script: |
             set -Eeuo pipefail
             cd "${{ secrets.PI_REPO_PATH }}"
@@ -220,7 +244,9 @@ jobs:
             # "reset --hard" makes the Pi match the repo exactly. Safe here
             # because .gitignore keeps all your real data untracked.
             git reset --hard origin/main
-            chmod +x install.sh runpod/start.sh
+            # install.sh chmods the rest itself, but it cannot run if it is
+            # not executable to begin with.
+            chmod +x install.sh
 
             echo "==> Reprovisioning (non-interactive; existing .env preserved)"
             ./install.sh --non-interactive
@@ -268,8 +294,6 @@ jobs:
 
             # Reclaim SD card space from superseded images.
             docker image prune -f >/dev/null 2>&1 || true
-        env:
-          RESTART_STACK: ${{ github.event.inputs.restart_stack || 'false' }}
 
       - name: Summary
         # "if: always()" means this runs even when the deploy failed, so you
