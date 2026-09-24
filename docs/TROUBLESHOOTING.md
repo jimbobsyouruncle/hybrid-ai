@@ -311,16 +311,79 @@ Fix with `sudo raspi-config` → Advanced Options → Boot Order → NVMe/USB Bo
 
 **First response slow, later ones fast.** Normal — the model is loading from disk. On 16 GB `install.sh` sets a 30-minute keep-alive so it stays resident. NVMe makes the initial load several times faster.
 
-**Long conversations get truncated.** Ollama silently caps every model at 4096 tokens unless told otherwise. `install.sh` raises `OLLAMA_CONTEXT_LENGTH` based on RAM (16384 at 16 GB); increase it in `.env` and re-run `./install.sh` if needed, at the cost of KV cache memory.
+**Long conversations get truncated.** Ollama caps every model at 4096 tokens unless told otherwise. `install.sh` raises `OLLAMA_CONTEXT_LENGTH` based on RAM (16384 at 16 GB); increase it in `.env` and re-run `./install.sh` if needed, at the cost of KV cache memory.
+
+If conversations still truncate at 4096 after that, the **pinned Ollama image
+is too old to honour the variable** — it is accepted and ignored. `install.sh`
+now checks for this after start and warns. Confirm and fix:
+
+```bash
+docker exec ollama ollama --version
+grep OLLAMA_IMAGE .env          # bump to a current release, then ./install.sh
+```
+
+**Ollama panics on model load: `V cache quantization requires flash_attn`.**
+`OLLAMA_KV_CACHE_TYPE=q8_0` requires flash attention to be active. When Ollama
+auto-disables flash attention for a model architecture that does not support
+it, the runner aborts rather than degrading. The default is now `f16`; if you
+opted into `q8_0`, revert it in `.env` and re-run `./install.sh`.
 
 **`model requires more system memory than is available`**
 
 ```bash
 free -h
-grep OLLAMA_MAX_VRAM .env
+grep -E 'OLLAMA_MEM_LIMIT|OLLAMA_CONTEXT_LENGTH' .env
+docker stats --no-stream ollama
 ```
 
-`install.sh` sets a conservative ceiling deliberately. Use a smaller model rather than raising it — exceeding physical RAM pushes the Pi into swap, which is dramatically worse than simply using a smaller model — even on NVMe.
+`OLLAMA_MAX_VRAM` no longer exists anywhere in this project — it was never
+honoured by Ollama and has been removed upstream. The real ceiling is
+`OLLAMA_MEM_LIMIT`, a kernel-enforced Docker cgroup limit, which `install.sh`
+sets conservatively and deliberately. Use a smaller model rather than raising it — exceeding physical RAM pushes the Pi into swap, which is dramatically worse than simply using a smaller model — even on NVMe.
+
+---
+
+## OpenHands maintenance agent
+
+OpenHands is optional. Chat, the cloud pipe and backups all work without it,
+so `install.sh` warns rather than failing when it does not come up.
+
+**The container vanished after a deploy or re-install.** Almost certainly a
+`docker compose up -d --remove-orphans` that omitted the overlay file, which
+makes compose treat OpenHands as an orphan and delete it. State in
+`~/.openhands` survives, so recovery is just a start:
+
+```bash
+./openhands/scripts/openhands-control.sh start
+```
+
+Use that wrapper rather than bare `docker compose` — it always passes both
+files.
+
+**`OPENHANDS_WORKSPACE must be set`.** The overlay deliberately has no default
+for the workspace, so it fails loudly rather than silently mounting the
+deployment directory (which holds `.env`). Run `./install.sh`, or create the
+clone by hand:
+
+```bash
+./scripts/setup-agent-workspace.sh
+./scripts/setup-agent-workspace.sh --check
+```
+
+**`SECURITY: .env found inside the agent workspace`.** Something copied rather
+than cloned. Remove the file — its presence defeats the isolation the separate
+workspace exists to provide.
+
+**The UI will not load.** It binds to loopback only and there is no Caddy
+route, by design. Reach it through a tunnel:
+
+```bash
+ssh -L 3001:127.0.0.1:3001 <user>@<pi-tailnet-name>
+./openhands/scripts/openhands-control.sh logs
+```
+
+**First start times out.** The image is large and the first pull on a Pi can
+exceed the health-check window. Watch the pull, then re-check.
 
 ---
 

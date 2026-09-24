@@ -123,9 +123,19 @@
 	# than rewrite. 302 (not 301) so browsers do not cache it permanently,
 	# which keeps the door open for a real rewrite later.
 	redir /openwebui /app/ 302
-	redir /openwebui/* /app{uri} 302
 	redir /chat /app/ 302
-	redir /chat/* /app{uri} 302
+
+	# Deep links need the alias prefix STRIPPED before the redirect target is
+	# built. A bare `redir /openwebui/* /app{uri}` sends /openwebui/c/abc to
+	# /app/openwebui/c/abc, which handle_path below strips back to
+	# /openwebui/c/abc -- a 404 inside Open WebUI. handle_path removes the
+	# matched prefix first, so {uri} here is already the remainder.
+	handle_path /openwebui/* {
+		redir * /app{uri} 302
+	}
+	handle_path /chat/* {
+		redir * /app{uri} 302
+	}
 
 	# --- Ollama API ---------------------------------------------------------
 	# A plain REST API, so unlike Open WebUI it works perfectly under a path

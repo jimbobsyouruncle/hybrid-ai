@@ -17,7 +17,7 @@ The problem with rented GPUs is that they bill continuously whether you are usin
 The three jobs `start.sh` performs, in order:
 
 1. **Join the private network.** Connects to your Tailscale mesh as `runpod-worker`, giving it a `100.x.x.x` address reachable only by your own devices. No public ports are opened.
-2. **Arm the watchdog.** A background loop samples GPU utilisation once a minute and calls RunPod's shutdown API after 15 consecutive idle readings.
+2. **Arm the watchdog.** A background loop samples GPU utilisation every 5 seconds and   keeps the peak across each 60-second window. A single non-zero reading in a window resets the idle counter to zero, so a long generation can never be interrupted. After 15 consecutive idle windows it calls RunPod's shutdown API. A failed `nvidia-smi` counts as *unknown*, not idle — five consecutive unreadable windows stop the pod as genuinely broken rather than billing it indefinitely.
 3. **Serve the model.** Launches vLLM with an OpenAI-compatible API, with all request and statistics logging disabled.
 
 ---
@@ -66,6 +66,10 @@ In the pod template's **Environment Variables** section:
 
 | Variable | Value | Required |
 |---|---|---|
+| `TRUST_REMOTE_CODE` | *(leave unset)* | No — **setting this to `1` lets code inside the model repository execute on the pod, with access to its credentials.** Only for a model you have specifically vetted |
+| `VLLM_PORT` | `8000` | No — must match `VLLM_PORT` in the Pi's `.env` |
+| `READY_TIMEOUT` | *(default)* | No — how long to wait for vLLM to report ready before treating the start as failed |
+| `MAX_RESTARTS` | *(default)* | No — restart budget before the pod stops itself on a crash loop |
 | `TAILSCALE_AUTH_KEY` | `tskey-auth-...` from step 1 | **Yes** — the pod cannot join your network without it |
 | `RUNPOD_API_KEY` | `rpa_...` from step 2 | **Yes** — without it the watchdog is disabled and the pod bills forever |
 | `RUNPOD_POD_ID` | *(do not set)* | Injected automatically by RunPod |
@@ -183,6 +187,7 @@ Once `tailscale up` succeeds, the key is written into Tailscale's own state file
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| Pod stopped itself and the log shows `gpu_unreadable` | `nvidia-smi` failed for five consecutive windows — usually a driver fault, not idleness | Check `nvidia-smi` on a fresh pod; if it recurs, the host is faulty — redeploy on a different one |
 | `TAILSCALE_AUTH_KEY is not set` | Variable missing from the pod template | Add it, then restart the pod |
 | `tailscaled died during startup` | Auth key expired or already consumed | Check `/var/log/tailscaled.log`; generate a new reusable key |
 | `No CUDA devices visible` | GPU not attached, or a CPU-only image | Verify the pod has a GPU; run `nvidia-smi` on the pod |

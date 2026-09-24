@@ -26,10 +26,12 @@ Runs on every push. Catches mistakes before they can reach the Pi.
 
 | Check | What it catches |
 |---|---|
-| `bash -n` on both shell scripts | Syntax errors, unbalanced quotes |
+| `bash -n` on every `*.sh` in the repo | Syntax errors, unbalanced quotes |
 | ShellCheck | Common shell bugs (advisory — reports but does not block) |
-| `py_compile` on the pipe | Python syntax errors |
-| `docker compose config` | Malformed compose file |
+| `py_compile` on every `*.py` in the repo | Python syntax errors, including `status/app.py`, which is bind-mounted with no build step |
+| `build_pipe.py --check` | A forgotten rebuild — the pasted pipe not matching its reviewed sources |
+| `test_refactor.py` | Regressions in mesh enforcement, credential scrubbing, truncation detection |
+| `docker compose config`, both files | Malformed compose file or OpenHands overlay |
 | **Secret assertion** | Fails the build if `.env` or a data folder was ever committed |
 
 That last check is the one worth understanding. If `.env` somehow got committed, this stops the deploy and tells you. Note that by then the credentials are already in git history and **must be rotated** — deleting the file in a later commit does not remove it from history, and anyone with a clone still has a copy.
@@ -127,7 +129,7 @@ GitHub repo → **Settings** → **Secrets and variables** → **Actions** → *
 | `PI_SSH_USER` | Usually `pi` | Your Pi's username |
 | `PI_SSH_KEY` | **Private** key contents | `cat ~/.ssh/hybrid_ai_deploy` — include the BEGIN and END lines |
 | `PI_REPO_PATH` | e.g. `/home/pi/hybrid-ai` | `pwd` in the repo folder on the Pi |
-| `PI_SSH_HOST_KEY` | The Pi's SSH host key | `ssh-keyscan -t ed25519 $(tailscale ip -4)` on the Pi |
+| `PI_SSH_HOST_KEY` | The Pi's SSH host key | `ssh-keyscan -t ed25519 $(tailscale ip -4)` \| ssh-keygen -lf - on the Pi — use the SHA256:... field, not the raw known_hosts line |
 
 > `PI_SSH_KEY` takes the **private** key. That is correct and expected — GitHub needs it to authenticate. It is stored encrypted and masked in logs. This is also why the key should be dedicated to this purpose and authorised only on the Pi, never a key you use elsewhere.
 

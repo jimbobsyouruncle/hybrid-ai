@@ -8,8 +8,9 @@
 #   no data is lost. The CI/CD pipeline runs it on every deploy for that reason.
 #
 # WHAT IT DOES, IN ORDER:
-#   1. Checks that required programs (docker, jq, tailscale, curl, openssl) are
-#      installed, and stops with instructions if any are missing.
+#   1. Checks that required programs (docker, git, jq, curl, openssl, sqlite3,
+#      rsync, tailscale) are installed, and stops with instructions if any are
+#      missing.
 #   2. Loads your existing .env file, if there is one, so it only asks you for
 #      things it does not already know.
 #   3. Reads your Pi's RAM and works out a safe memory budget for Ollama.
@@ -110,7 +111,7 @@ log "Probing host dependencies..."
 MISSING=()
 # sqlite3 and rsync support the backup subsystem; restic is checked
 # separately below because it is optional until you enable backups.
-for bin in docker jq curl openssl sqlite3 rsync; do
+for bin in docker git jq curl openssl sqlite3 rsync; do
   command -v "$bin" >/dev/null 2>&1 || MISSING+=("$bin")
 done
 command -v tailscale >/dev/null 2>&1 || MISSING+=("tailscale")
@@ -122,7 +123,7 @@ if ((${#MISSING[@]} > 0)); then
   Install them first. On Raspberry Pi OS / Debian / Ubuntu:
 
     sudo apt-get update
-    sudo apt-get install -y jq curl openssl sqlite3 rsync restic
+    sudo apt-get install -y git jq curl openssl sqlite3 rsync restic
     curl -fsSL https://get.docker.com | sudo sh
     curl -fsSL https://tailscale.com/install.sh | sudo sh
     sudo usermod -aG docker "$USER"   # then log out and back in
@@ -291,7 +292,15 @@ fi
 # Quantising the KV cache roughly halves context memory for a negligible
 # quality difference, letting the larger context above fit comfortably.
 OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
-OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
+# DEFAULT IS f16, DELIBERATELY.
+#   q8_0 halves KV cache memory, but quantised V cache REQUIRES flash attention
+#   to be active. When Ollama auto-disables flash attention for a model
+#   architecture that does not support it, llama.cpp aborts rather than
+#   degrading -- "V cache quantization requires flash_attn" followed by a
+#   panic, which presents as a container that will not load any model.
+#   Opt in per-deployment once you have confirmed your model works with it:
+#       OLLAMA_KV_CACHE_TYPE=q8_0 ./install.sh
+OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-f16}"
 
 # --- CPU shares -------------------------------------------------------------
 # docker-compose.yml references OLLAMA_CPUS and WEBUI_CPUS, and .env.example
@@ -523,6 +532,13 @@ mkdir -p webui_data/caddy
 mkdir -p "${HOME}/.openhands"
 chmod 700 "${HOME}/.openhands"
 
+# The backup systemd units run under ProtectHome=read-only and re-grant write
+# access to the restic cache with ReadWritePaths=. systemd refuses to set up
+# the mount namespace when a ReadWritePaths= target does not exist, so the
+# very first scheduled backup would fail to start with a namespace error --
+# long after the install that looked successful. Create it now.
+mkdir -p "${HOME}/.cache/restic"
+
 for d in ollama_data webui_data; do
   if [[ -d "$d" ]]; then
     ok "./${d} exists ($(du -sh "$d" 2>/dev/null | cut -f1 || echo '0') on disk) -- untouched."
@@ -564,6 +580,11 @@ OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS}
 OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}
 OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION}
 OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE}
+
+# --- Container image pins --------------------------------------------------
+# Explicit pins, never :latest. Bump deliberately after reading release notes.
+OLLAMA_IMAGE=${OLLAMA_IMAGE:-ollama/ollama:0.5.7}
+WEBUI_IMAGE=${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.5.20}
 
 # --- Status page identity (numeric ids, not secrets) -----------------------
 STATUS_UID=${STATUS_UID}
@@ -691,6 +712,26 @@ wait_for() {          # wait_for <label> <url> <max_seconds>
 
 HEALTH_FAILED=0
 wait_for "ollama"     "http://127.0.0.1:11434/api/tags" 60  || HEALTH_FAILED=1
+
+# --- Did the context-length setting actually take effect? ------------------
+# CORRECTNESS: OLLAMA_CONTEXT_LENGTH is honoured only by newer Ollama servers.
+# On an older pinned image it is accepted, ignored, and every model silently
+# runs at 4096 tokens -- exactly the failure mode OLLAMA_MAX_VRAM had. The
+# README, .env.example and this script all promise a larger context, so verify
+# the promise rather than printing it.
+if EFFECTIVE_CTX="$(docker exec ollama sh -c 'printf "%s" "${OLLAMA_CONTEXT_LENGTH:-}"' 2>/dev/null)"; then
+  if [[ "$EFFECTIVE_CTX" != "$OLLAMA_CONTEXT_LENGTH" ]]; then
+    warn "Ollama did not receive OLLAMA_CONTEXT_LENGTH. Context will be 4096."
+    event "context_length_not_applied" "requested=${OLLAMA_CONTEXT_LENGTH}"
+  elif docker exec ollama ollama --version 2>/dev/null | grep -qE '\b0\.([0-9]|1[01])\.'; then
+    warn "Ollama ${OLLAMA_IMAGE:-pinned} predates OLLAMA_CONTEXT_LENGTH support."
+    warn "The variable is set but ignored; every model runs at 4096 tokens."
+    warn "Fix: set OLLAMA_IMAGE to a current release in .env and re-run ./install.sh"
+    event "context_length_unsupported" "requested=${OLLAMA_CONTEXT_LENGTH}"
+  else
+    ok "Context length ${OLLAMA_CONTEXT_LENGTH} applied."
+  fi
+fi
 wait_for "open-webui" "http://127.0.0.1:3000/health"    180 || HEALTH_FAILED=1
 
 # OpenHands is a maintenance convenience, not part of the serving path. Chat and

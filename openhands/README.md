@@ -79,7 +79,7 @@ control for a service that can execute arbitrary code as root.
    in `~/.openhands`, outside the repo and outside the sandbox.
 4. Start a conversation with: *"Read `/workspace/openhands/AGENTS.md` and follow it for all
    work in this repository."*
-5. For a task, paste the relevant file from `prompts/` and add your specifics.
+5. For a task, paste the relevant file from `prompts/` and add your specifics: `feature.md` for new behaviour, `fix-from-diagnostics.md` for working from a diagnostic bundle, `security-review.md` for a review pass.
 
 ---
 

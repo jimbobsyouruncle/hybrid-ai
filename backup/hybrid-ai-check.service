@@ -30,7 +30,9 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=__REPO_DIR__
-ReadWritePaths=%h/.cache/restic
+# The leading '-' makes systemd tolerate the path not existing rather than
+# refusing to start the unit. install.sh creates it; this is the backstop.
+ReadWritePaths=-%h/.cache/restic
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
