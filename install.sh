@@ -583,8 +583,8 @@ OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE}
 
 # --- Container image pins --------------------------------------------------
 # Explicit pins, never :latest. Bump deliberately after reading release notes.
-OLLAMA_IMAGE=${OLLAMA_IMAGE:-ollama/ollama:0.5.7}
-WEBUI_IMAGE=${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.5.20}
+OLLAMA_IMAGE=${OLLAMA_IMAGE:-ollama/ollama:0.34.4}
+WEBUI_IMAGE=${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.4}
 
 # --- Status page identity (numeric ids, not secrets) -----------------------
 STATUS_UID=${STATUS_UID}
