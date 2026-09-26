@@ -226,8 +226,13 @@ If `docker run` fails with a permissions error, you skipped the log out and back
 
 ```bash
 sudo apt-get install -y unattended-upgrades && sudo dpkg-reconfigure -plow unattended-upgrades
-sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-sudo systemctl restart ssh      # ensure your SSH key works BEFORE running this
+if sudo sh -c 'ls /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys 2>/dev/null | xargs grep -qs "^ssh-"'; then
+    echo "SSH public key found. Disabling password authentication over SSH..."
+    sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+    sudo systemctl reload ssh
+else
+    echo "ERROR: No valid SSH public key found in /home/*/.ssh/ or /root/.ssh/. Password auth unchanged." >&2
+fi
 ```
 
 ### 3. OpenHands maintenance prerequisites
