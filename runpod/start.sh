@@ -317,17 +317,17 @@ umask 077   # any file created from here on is readable only by this user
 cat > "${RUNTIME_ENV}" <<EOF
 # Runtime State Capture -- written by start.sh at $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Source of truth for this pod instance. Do not edit by hand.
-TAILSCALE_IP=${TAILSCALE_IP}
-TS_HOSTNAME=${TS_HOSTNAME}
-TS_SOCK=${TS_SOCK}
-GPU_COUNT=${GPU_COUNT}
-GPU_NAME=${GPU_NAME}
-GPU_MEM_TOTAL_MB=${GPU_MEM_TOTAL}
-RUNPOD_POD_ID=${RUNPOD_POD_ID:-unknown}
-VLLM_MODEL=${VLLM_MODEL}
-VLLM_PORT=${VLLM_PORT}
-IDLE_MINUTES=${IDLE_MINUTES}
-BOOT_TS=$(date -u +%s)
+TAILSCALE_IP="${TAILSCALE_IP}"
+TS_HOSTNAME="${TS_HOSTNAME}"
+TS_SOCK="${TS_SOCK}"
+GPU_COUNT="${GPU_COUNT}"
+GPU_NAME="${GPU_NAME}"
+GPU_MEM_TOTAL_MB="${GPU_MEM_TOTAL}"
+RUNPOD_POD_ID="${RUNPOD_POD_ID:-unknown}"
+VLLM_MODEL="${VLLM_MODEL}"
+VLLM_PORT="${VLLM_PORT}"
+IDLE_MINUTES="${IDLE_MINUTES}"
+BOOT_TS="$(date -u +%s)"
 EOF
 chmod 600 "${RUNTIME_ENV}"
 
