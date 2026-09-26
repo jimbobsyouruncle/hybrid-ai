@@ -222,6 +222,12 @@ if ! command -v tailscaled >/dev/null 2>&1; then
   apt-get install -y -qq curl ca-certificates iproute2 jq >/dev/null
   curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
 fi
+
+if ! python3 -c "import vllm" >/dev/null 2>&1; then
+  log "vLLM absent -- installing via pip."
+  python3 -m pip install --no-cache-dir vllm
+fi
+
 command -v jq   >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
 command -v curl >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq curl >/dev/null; }
 
