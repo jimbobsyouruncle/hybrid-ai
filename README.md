@@ -30,36 +30,36 @@ Your prompts travel over an encrypted private network. The cloud server keeps no
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  YOUR HOME                                                      │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────┐      │
-│  │  Raspberry Pi  ::  local control plane                │      │
-│  │                                                       │      │
-│  │   Open WebUI ──── chat UI, history, documents         │      │
-│  │        │                                              │      │
-│  │        ├──▶ Ollama ──── small models, runs on the Pi │      │
-│  │        │                                              │      │
-│  │        └──▶ runpod_pipe.py ──┐                        │      │
-│  │                              │                         │      │
-│  │   ./webui_data   ./ollama_data   (your data, on disk)  │      │
-│  └──────────────────────────────┼─────────────────────────┘      │
-└─────────────────────────────────┼────────────────────────────────┘
-                                  │
-                   Tailscale encrypted mesh (100.x.x.x)
++──────────────────────────────────────────────────────────────────+
+|  YOUR HOME                                                       |
+|                                                                  |
+|  +────────────────────────────────────────────────────────────+  |
+|  |  Raspberry Pi  ::  local control plane                     |  |
+|  |                                                            |  |
+|  |   Open WebUI ---- chat UI, history, documents              |  |
+|  |        |                                                   |  |
+|  |        +---> Ollama ---- small models, runs on the Pi      |  |
+|  |        |                                                   |  |
+|  |        +---> runpod_pipe.py --+                            |  |
+|  |                               |                            |  |
+|  |   ./webui_data   ./ollama_data   (your data, on disk)      |  |
+|  +───────────────────────────────┼────────────────────────────+  |
++──────────────────────────────────┼───────────────────────────────+
+                                   |
+                    Tailscale encrypted mesh (100.x.x.x)
                      no public ports, WireGuard tunnel
-                                  │
-┌─────────────────────────────────┼────────────────────────────────┐
-│  RUNPOD CLOUD                   ▼                                │
-│  ┌─────────────────────────────────────────────────────────┐     │
-│  │  GPU pod  ::  cloud inference plane                     │     │
-│  │                                                         │     │
-│  │   start.sh ──▶ joins tailnet ──▶ vLLM (32B model)      │     │
-│  │            └─▶ idle watchdog ──▶ self-shutdown @ 15min │     │
-│  │                                                         │     │
-│  │   logging disabled · stopped by default · pay per minute│     │
-│  └─────────────────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────────────────┘
+                                   |
++──────────────────────────────────┼───────────────────────────────+
+|  RUNPOD CLOUD                    V                               |
+|  +────────────────────────────────────────────────────────────+  |
+|  |  GPU pod  ::  cloud inference plane                        |  |
+|  |                                                            |  |
+|  |   start.sh ---> joins tailnet ---> vLLM (32B model)        |  |
+|  |            +--> idle watchdog ---> self-shutdown @ 15min   |  |
+|  |                                                            |  |
+|  |   logging disabled . stopped by default . pay per minute   |  |
+|  +────────────────────────────────────────────────────────────+  |
++──────────────────────────────────────────────────────────────────+
 ```
 
 **A request to the cloud model, end to end:**
