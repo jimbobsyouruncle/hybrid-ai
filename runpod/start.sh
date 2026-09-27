@@ -158,6 +158,11 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   GPU_COUNT="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"
   GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
   GPU_MEM_TOTAL="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1)"
+  
+  # Sanitize memory output in case host reports insufficient permissions
+  if [[ ! "$GPU_MEM_TOTAL" =~ ^[0-9]+$ ]]; then
+    GPU_MEM_TOTAL=0
+  fi
 else
   GPU_COUNT=0; GPU_NAME="none"; GPU_MEM_TOTAL=0
 fi
@@ -329,8 +334,6 @@ while true; do
       --max-model-len "${MAX_MODEL_LEN}" \
       --host 127.0.0.1 \
       --port "${VLLM_PORT}" \
-      --disable-log-requests \
-      --disable-log-stats \
       --uvicorn-log-level warning \
       "${TRUST_FLAG[@]}" \
       "${APIKEY_FLAG[@]}" \
@@ -345,8 +348,6 @@ while true; do
       --max-model-len "${MAX_MODEL_LEN}" \
       --host 127.0.0.1 \
       --port "${VLLM_PORT}" \
-      --disable-log-requests \
-      --disable-log-stats \
       --uvicorn-log-level warning \
       "${TRUST_FLAG[@]}" \
       "${APIKEY_FLAG[@]}" \
