@@ -1,10 +1,16 @@
 # `runpod/` — Cloud Inference Plane
 
-Everything in this folder runs on the **rented GPU machine**, not on your Raspberry Pi.
+> ⚠️ **Repository Notice:** The container initialization script (`start.sh`), `Dockerfile`, and GitHub Actions CI/CD pipeline are actively maintained in the dedicated worker repository:  
+> 👉 **[github.com/jimbobsyouruncle/runpod-hybrid-worker](https://github.com/jimbobsyouruncle/runpod-hybrid-worker)**
 
-| File | Purpose |
-|---|---|
-| `start.sh` | The pod's entrypoint. Injects SSH public keys, joins your private Tailscale network, arms the cost watchdog, and starts the vLLM model server. |
+Everything described in this guide configures and runs on the **rented GPU machine**, not on your local Raspberry Pi.
+
+| File / Component | Purpose | Location |
+|---|---|---|
+| `README.md` | Cloud inference plane architecture and deployment guide | `hybrid-ai/runpod/` |
+| `start.sh` | Pod entrypoint (SSH injection, Tailscale mesh join, GPU watchdog, vLLM launcher) | **`runpod-hybrid-worker`** repo |
+| `Dockerfile` | Custom container definition based on `vllm/vllm-openai:v0.30.0` | **`runpod-hybrid-worker`** repo |
+| `build.yml` | GitHub Actions workflow publishing to GHCR (`ghcr.io`) | **`runpod-hybrid-worker`** repo |
 
 ---
 
@@ -12,7 +18,7 @@ Everything in this folder runs on the **rented GPU machine**, not on your Raspbe
 
 The Pi cannot run a 32-billion-parameter model — it does not have the memory or the compute. So when you need real capability, a GPU machine is rented by the minute from RunPod.
 
-The problem with rented GPUs is that they bill continuously whether you are using them or not, and it is remarkably easy to leave one running overnight. `start.sh` solves that by making the pod responsible for its own shutdown: it watches its own GPU utilisation and stops itself after fifteen idle minutes. You never have to remember.
+The problem with rented GPUs is that they bill continuously whether you are using them or not, and it is remarkably easy to leave one running overnight. `start.sh` (hosted in `runpod-hybrid-worker`) solves that by making the pod responsible for its own shutdown: it watches its own GPU utilisation and stops itself after fifteen idle minutes. You never have to remember.
 
 The main jobs `start.sh` performs, in order:
 
@@ -50,8 +56,11 @@ Official vLLM Docker images hardcode `vllm serve` as their default `ENTRYPOINT`.
 
 To bypass this, you must build a custom container image hosted on GitHub Container Registry (GHCR) that overrides the container `ENTRYPOINT`.
 
-#### Local Repository Setup
-In your dedicated container repository (e.g., `runpod-hybrid-worker`), create the following file structure:
+> 📌 **Note:** All assets below are maintained in the dedicated **`runpod-hybrid-worker`** repository so that any push to `start.sh` or `Dockerfile` immediately triggers a new image build in GitHub Actions.
+
+#### Worker Repository Setup (`runpod-hybrid-worker`)
+
+File structure in `jimbobsyouruncle/runpod-hybrid-worker`:
 
 ```text
 runpod-hybrid-worker/
@@ -135,8 +144,8 @@ runpod-hybrid-worker/
    ```
 
 4. **Publishing & Package Visibility:**
-   * Push your changes to GitHub: `git add . && git commit -m "Build worker" && git push`
-   * Once the GitHub Action completes, go to your GitHub repository → **Packages** → click your container image → **Package Settings**.
+   * Push your changes in the worker repo: `git add . && git commit -m "Update worker" && git push`
+   * Once the GitHub Action completes, go to your GitHub repository → **Packages** → click `runpod-hybrid-worker` → **Package Settings**.
    * Under **Danger Zone**, set **Package Visibility** to **Public**.
 
 ### 4. Deploy the Pod on RunPod
@@ -145,7 +154,7 @@ RunPod console → **Pods** → **Deploy Pod**:
 
 | Setting | Value | Notes |
 |---|---|---|
-| Container Image | `ghcr.io/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME:latest` | Your public custom worker image |
+| Container Image | `ghcr.io/jimbobsyouruncle/runpod-hybrid-worker:latest` | Your public custom worker image |
 | Docker Start Command | **leave empty** | The Dockerfile `ENTRYPOINT` handles execution |
 | GPU | 48 GB VRAM — A6000, A40, or L40S | Comfortable fit for a 32B AWQ model with room for context |
 | Container disk | 20 GB | Holds the OS layer only |
@@ -163,6 +172,7 @@ In the pod template's **Environment Variables** section:
 |---|---|---|
 | `TAILSCALE_AUTH_KEY` | `tskey-auth-...` or secret reference | **Yes** — the pod cannot join your network without it |
 | `RUNPOD_API_KEY` | `rpa_...` or secret reference | **Yes** — without it the watchdog is disabled and the pod bills forever |
+| `VLLM_API_KEY` | `sk-vllm-...` or secret reference | Recommended — secures the `/v1` endpoint |
 | `RUNPOD_POD_ID` | *(do not set)* | Injected automatically by RunPod |
 | `PUBLIC_KEY` | *(do not set)* | Injected automatically by RunPod from your account settings |
 | `VLLM_MODEL` | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` | No — this is the default |
@@ -205,7 +215,7 @@ curl [http://100.](http://100.)x.x.x:8000/v1/models
 ## Design Decisions & Architecture
 
 ### Custom Image vs Command Overrides
-Official vLLM images wrap execution inside an immutable `vllm serve` entrypoint. Building a custom container via GitHub Actions ensures our init script runs as PID 1, allowing Tailscale, OpenSSH, and the GPU watchdog to initialize cleanly before vLLM boots.
+Official vLLM images wrap execution inside an immutable `vllm serve` entrypoint. Maintaining `start.sh` inside the `runpod-hybrid-worker` repository and building via GitHub Actions ensures our init script runs as PID 1, allowing Tailscale, OpenSSH, and the GPU watchdog to initialize cleanly before vLLM boots.
 
 ### Userspace Networking & SSH Isolation
 Tailscale runs with `--tun=userspace-networking` so it requires no elevated kernel privileges (`/dev/net/tun`) inside RunPod. OpenSSH binds internally to the container network, accepting RunPod's injected `$PUBLIC_KEY` variable without exposing port 22 or vLLM port 8000 to the public internet.
@@ -214,7 +224,7 @@ Tailscale runs with `--tun=userspace-networking` so it requires no elevated kern
 Every time the pod starts, it detects its network address and CUDA GPU topology once, writing them to `/etc/runtime.env`. Subshells and watchdog routines read this file as a single source of truth.
 
 ### Zero-Trace Logging Posture
-vLLM request, token, and prompt persistences are explicitly disabled via runtime flags (`--disable-log-requests`, `--disable-log-stats`, `VLLM_CONFIGURE_LOGGING=0`, `HF_HUB_DISABLE_TELEMETRY=1`).
+vLLM request, token, and prompt persistences are explicitly disabled via environment configuration (`VLLM_CONFIGURE_LOGGING=0`, `VLLM_NO_USAGE_STATS=1`, `HF_HUB_DISABLE_TELEMETRY=1`).
 
 ---
 
@@ -222,8 +232,9 @@ vLLM request, token, and prompt persistences are explicitly disabled via runtime
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `vllm serve: error: argument --compilation-config: Invalid JSON` | You passed a start script string into RunPod's "Start Command" field on a stock image | Use the custom GHCR image built from this directory; leave "Start Command" empty |
-| `/start.sh: \r: command not found` | Script saved with Windows `CRLF` line endings | Ensure `.gitattributes` enforces `eol=lf` and rebuild image via GitHub Actions |
+| `vllm serve: error: argument --compilation-config: Invalid JSON` | You passed a start script string into RunPod's "Start Command" field on a stock image | Use the custom GHCR image built from `runpod-hybrid-worker`; leave "Start Command" empty |
+| `vllm: error: unrecognized arguments: --disable-log-requests` | Deprecated flags passed to vLLM v0.30.0+ | Ensure you are using the updated `start.sh` from `runpod-hybrid-worker` |
+| `/start.sh: \r: command not found` | Script saved with Windows `CRLF` line endings | Ensure `.gitattributes` in `runpod-hybrid-worker` enforces `eol=lf` and rebuild image |
 | RunPod error `Error pulling image: access denied` | GHCR package visibility is set to Private | GitHub package settings → Change package visibility to **Public** |
 | Pod stopped itself and log shows `gpu_unreadable` | `nvidia-smi` failed 5 consecutive times (driver issue) | Deploy pod on a different RunPod host |
 | `TAILSCALE_AUTH_KEY is not set` | Variable missing from the pod template | Add variable/secret to pod environment |
