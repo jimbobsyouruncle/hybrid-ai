@@ -211,22 +211,22 @@ log " hybrid-ai cloud inference plane :: cold start"
 log "=============================================================="
 
 # ---------------------------------------------------------------------------
-# STEP 0. Install missing tools
-# On a properly built custom image this does nothing. On a stock RunPod image
-# it installs Tailscale on first boot, which adds a minute or two.
+# STEP 0. Install missing tools & dependencies safely
 # ---------------------------------------------------------------------------
 if ! command -v tailscaled >/dev/null 2>&1; then
   log "tailscaled absent -- installing."
-  export DEBIAN_FRONTEND=noninteractive   # stop apt asking interactive questions
+  export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y -qq curl ca-certificates iproute2 jq >/dev/null
   curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
 fi
 
 if ! python3 -c "import vllm" >/dev/null 2>&1; then
-  log "vLLM absent -- installing dependencies and vLLM without upgrading PyTorch."
-  python3 -m pip install --no-cache-dir regex tiktoken sentencepiece protobuf
-  python3 -m pip install --no-cache-dir --no-deps vllm
+  log "vLLM absent -- installing full package tree without touching system PyTorch/CUDA."
+  # Tell pip to install vLLM dependencies, but explicitly exclude torch/torchvision from being replaced
+  python3 -m pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cu121 \
+    "vllm" "torch==$(python3 -c 'import torch; print(torch.__version__)')"
 fi
 
 command -v jq   >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
