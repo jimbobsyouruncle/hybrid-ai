@@ -211,7 +211,7 @@ log " hybrid-ai cloud inference plane :: cold start"
 log "=============================================================="
 
 # ---------------------------------------------------------------------------
-# STEP 0. Install missing tools & dependencies safely
+# STEP 0. Core Tool Check
 # ---------------------------------------------------------------------------
 if ! command -v tailscaled >/dev/null 2>&1; then
   log "tailscaled absent -- installing."
@@ -221,16 +221,11 @@ if ! command -v tailscaled >/dev/null 2>&1; then
   curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
 fi
 
-if ! python3 -c "import vllm" >/dev/null 2>&1; then
-  log "vLLM absent -- installing full package tree without touching system PyTorch/CUDA."
-  # Tell pip to install vLLM dependencies, but explicitly exclude torch/torchvision from being replaced
-  python3 -m pip install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cu121 \
-    "vllm" "torch==$(python3 -c 'import torch; print(torch.__version__)')"
-fi
-
 command -v jq   >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
 command -v curl >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq curl >/dev/null; }
+
+# Verify pre-baked environment health before proceeding
+python3 -c "import vllm" >/dev/null 2>&1 || die "vLLM is not installed in the base image. Use a RunPod image with vLLM pre-installed (e.g., vllm/vllm-openai:latest or runpod/vllm)."
 
 # ---------------------------------------------------------------------------
 # STEP 1. Join the private network
