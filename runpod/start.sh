@@ -1,37 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# FILE: start.sh
-# PURPOSE:
-#   1) Join a Tailscale network (userspace mode; no /dev/net/tun required)
-#   2) Run an idle watchdog that stops the pod via Runpod GraphQL
-#   3) Launch vLLM (OpenAI-compatible) in a supervised loop
-#
-# RECOMMENDED IMAGE:
-#   Prefer a pinned tag of vllm/vllm-openai (avoid :latest in production).
-#
-# REQUIRED ENV VARS (Pod env):
-#   TAILSCALE_AUTH_KEY   Ephemeral, pre-authorized auth key
-#   RUNPOD_API_KEY       Used only for podStop (pod shuts itself down)
-#
-# PROVIDED BY RUNPOD:
-#   RUNPOD_POD_ID        Injected automatically
-#
-# OPTIONAL ENV VARS:
-#   VLLM_MODEL               (default below)
-#   VLLM_PORT                8000
-#   IDLE_MINUTES             15
-#   MAX_MODEL_LEN            16384
-#   GPU_MEM_UTIL             0.92
-#   TS_HOSTNAME              runpod-worker
-#
-#   # vLLM launch controls (safer + image-compatible)
-#   TENSOR_PARALLEL_SIZE     (default: GPU_COUNT)
-#   VLLM_QUANTIZATION        (default: empty => do not set --quantization)
-#   TRUST_REMOTE_CODE        0/1
-#   VLLM_API_KEY             (optional; if set, enables --api-key)
-#
-# LOGGING:
-#   Event metadata is written to stdout and optionally to EVENT_LOG.
+# FILE: runpod/start.sh
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -43,9 +12,9 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.92}"
 TS_HOSTNAME="${TS_HOSTNAME:-runpod-worker}"
 
 # Optional controls
-VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"       # e.g. "awq" or "gptq" (leave empty to omit)
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-}" # if empty we'll default to GPU_COUNT
-VLLM_API_KEY="${VLLM_API_KEY:-}"                 # if set, will pass --api-key
+VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-}"       
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-}" 
+VLLM_API_KEY="${VLLM_API_KEY:-}"                 
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
 RUNTIME_ENV="/etc/runtime.env"
@@ -71,7 +40,6 @@ event() {
   printf '%s\n' "$line" >> "$EVENT_LOG" 2>/dev/null || true
 }
 
-# stop_pod <reason> -- unchanged core behavior from your original script
 stop_pod() {
   local reason="${1:-unspecified}"
   local attempt delay resp http_ok
@@ -102,19 +70,14 @@ stop_pod() {
           "detail=$(printf '%s' "$resp" | jq -rc '.errors[0].message // "no_response"' 2>/dev/null | tr -d '\n' | cut -c1-120)"
 
     if (( attempt < 4 )); then
-      delay=$(( attempt * attempt * 5 ))   # 5s, 20s, 45s
+      delay=$(( attempt * attempt * 5 ))
       sleep "$delay"
     fi
   done
 
   event "podstop_exhausted" "reason=${reason}" "severity=critical" \
-        "action=terminating_pod_locally" \
-        "note=RUNPOD_API_UNREACHABLE_VERIFY_POD_IS_STOPPED_IN_THE_CONSOLE"
-
-  log "CRITICAL: could not reach Runpod's API to stop this pod."
-  log "CRITICAL: shutting everything down locally so the GPU goes idle."
-  log "CRITICAL: VERIFY IN THE RUNPOD CONSOLE that this pod is actually stopped."
-
+        "action=terminating_pod_locally"
+  
   kill -TERM "$MAIN_PID" 2>/dev/null || true
   sleep 10
   pkill -TERM -f 'vllm' 2>/dev/null || true
@@ -122,34 +85,21 @@ stop_pod() {
 }
 
 log "=============================================================="
-log " hybrid-ai cloud inference plane :: cold start"
+log " cloud inference plane :: cold start"
 log "=============================================================="
 
 # ---------------------------------------------------------------------------
-# STEP 0. Core tools
-#   Keep runtime install, but avoid unnecessary package churn.
+# STEP 0. Secure SSH Injection
 # ---------------------------------------------------------------------------
-export DEBIAN_FRONTEND=noninteractive
-
-need_pkg=0
-command -v curl >/dev/null 2>&1 || need_pkg=1
-command -v jq   >/dev/null 2>&1 || need_pkg=1
-command -v ip   >/dev/null 2>&1 || need_pkg=1
-command -v ca-certificates >/dev/null 2>&1 || true
-
-if (( need_pkg )); then
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates iproute2 jq >/dev/null
+if [[ -n "${PUBLIC_KEY:-}" ]]; then
+  log "Injecting RunPod public SSH keys..."
+  echo "${PUBLIC_KEY}" >> /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  service ssh start
+  log "SSH daemon started. Accessible via Tailscale on port 22."
+else
+  log "WARNING: No PUBLIC_KEY environment variable provided. Standard SSH will not authenticate."
 fi
-
-if ! command -v tailscaled >/dev/null 2>&1; then
-  log "tailscaled absent -- installing."
-  curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
-fi
-
-# vLLM presence check (lightweight, but don’t pretend it validates CUDA health)
-command -v vllm >/dev/null 2>&1 || python3 -c "import vllm" >/dev/null 2>&1 \
-  || die "vLLM not found. Are you sure you're using a vLLM-capable image?"
 
 # ---------------------------------------------------------------------------
 # STEP 1. Join tailnet (userspace networking)
@@ -204,8 +154,6 @@ event "tailnet_joined" "hostname=${TS_HOSTNAME}" "mode=userspace"
 # ---------------------------------------------------------------------------
 # STEP 2. Runtime state capture
 # ---------------------------------------------------------------------------
-log "Capturing runtime state -> ${RUNTIME_ENV}"
-
 if command -v nvidia-smi >/dev/null 2>&1; then
   GPU_COUNT="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"
   GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
@@ -215,14 +163,12 @@ else
 fi
 [[ "${GPU_COUNT:-0}" -ge 1 ]] || die "No CUDA devices visible. Refusing to start vLLM."
 
-# Default TP size to GPU_COUNT unless user explicitly overrides
 if [[ -z "${TENSOR_PARALLEL_SIZE}" ]]; then
   TENSOR_PARALLEL_SIZE="${GPU_COUNT}"
 fi
 
 umask 077
 cat > "${RUNTIME_ENV}" <<EOF
-# Runtime State Capture -- written by start.sh at $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 TAILSCALE_IP="${TAILSCALE_IP}"
 TS_HOSTNAME="${TS_HOSTNAME}"
 TS_SOCK="${TS_SOCK}"
@@ -241,8 +187,6 @@ BOOT_TS="$(date -u +%s)"
 EOF
 chmod 600 "${RUNTIME_ENV}"
 
-log "GPU: ${GPU_COUNT}x ${GPU_NAME} (${GPU_MEM_TOTAL} MiB each)"
-log "TP size: ${TENSOR_PARALLEL_SIZE}"
 event "runtime_state_captured" "gpu_count=${GPU_COUNT}" "gpu_mem_mb=${GPU_MEM_TOTAL}" "tp=${TENSOR_PARALLEL_SIZE}" "pod=${RUNPOD_POD_ID:-unknown}"
 
 # ---------------------------------------------------------------------------
@@ -275,9 +219,7 @@ if [[ -n "${RUNPOD_API_KEY:-}" && -n "${RUNPOD_POD_ID:-}" ]]; then
 
       if (( window_peak < 0 )); then
         unknown_streak=$(( unknown_streak + 1 ))
-        event "gpu_unreadable" "consecutive_windows=${unknown_streak}"
         if (( unknown_streak >= 5 )); then
-          event "watchdog_trigger" "reason=gpu_unreadable" "windows=${unknown_streak}"
           stop_pod "gpu_unreadable"
           exit 0
         fi
@@ -286,16 +228,13 @@ if [[ -n "${RUNPOD_API_KEY:-}" && -n "${RUNPOD_POD_ID:-}" ]]; then
       unknown_streak=0
 
       if (( window_peak > 0 )); then
-        (( idle_count > 0 )) && event "idle_counter_reset" "peak_util=${window_peak}" "was=${idle_count}"
         idle_count=0
         continue
       fi
 
       idle_count=$(( idle_count + 1 ))
-      event "idle_window" "count=${idle_count}" "threshold=${IDLE_MINUTES}"
 
       if (( idle_count >= IDLE_MINUTES )); then
-        event "watchdog_trigger" "reason=idle" "idle_minutes=${idle_count}"
         stop_pod "idle"
         exit 0
       fi
@@ -305,7 +244,6 @@ if [[ -n "${RUNPOD_API_KEY:-}" && -n "${RUNPOD_POD_ID:-}" ]]; then
   echo "WATCHDOG_PID=${WATCHDOG_PID}" >> "${RUNTIME_ENV}"
 else
   log "WARNING: RUNPOD_API_KEY or RUNPOD_POD_ID unset -- idle watchdog DISABLED."
-  event "watchdog_disabled" "reason=missing_credentials" "severity=high"
 fi
 
 # ---------------------------------------------------------------------------
@@ -318,22 +256,20 @@ cleanup() {
 
   SHUTTING_DOWN=1
   log "Shutting down..."
-  event "pod_shutdown_begin" "uptime_seconds=${SECONDS}"
 
   [[ -n "${WATCHDOG_PID:-}" ]] && kill "${WATCHDOG_PID}" 2>/dev/null || true
   [[ -n "${VLLM_PID:-}"     ]] && kill -TERM "${VLLM_PID}" 2>/dev/null || true
   tailscale --socket="${TS_SOCK}" logout >/dev/null 2>&1 || true
   [[ -n "${TAILSCALED_PID:-}" ]] && kill "${TAILSCALED_PID}" 2>/dev/null || true
+  
+  service ssh stop >/dev/null 2>&1 || true
 
-  event "pod_shutdown_complete" "uptime_seconds=${SECONDS}"
   log "Clean exit."
 }
 trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------------------
-# STEP 5. Start vLLM (image-friendly invocation)
-#   Use `vllm serve` if available; otherwise fall back to python -m.
-#   Bind to 127.0.0.1 so it’s only reachable via tailscaled’s userspace proxy.
+# STEP 5. Start vLLM 
 # ---------------------------------------------------------------------------
 export VLLM_CONFIGURE_LOGGING=0
 export VLLM_NO_USAGE_STATS=1
@@ -343,14 +279,10 @@ export ANONYMIZED_TELEMETRY=False
 export TOKENIZERS_PARALLELISM=false
 export NCCL_DEBUG=WARN
 
-# Load captured values (and anything appended)
-# shellcheck disable=SC1090
 source "${RUNTIME_ENV}"
 
 TRUST_FLAG=()
 if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
-  log "WARNING: --trust-remote-code ENABLED."
-  event "trust_remote_code_enabled" "severity=high" "model=${VLLM_MODEL}"
   TRUST_FLAG=(--trust-remote-code)
 fi
 
@@ -362,7 +294,6 @@ fi
 QUANT_FLAG=()
 if [[ -n "${VLLM_QUANTIZATION}" ]]; then
   QUANT_FLAG=(--quantization "${VLLM_QUANTIZATION}")
-  event "quantization_enabled" "mode=${VLLM_QUANTIZATION}"
 fi
 
 MAX_RESTARTS="${MAX_RESTARTS:-3}"
@@ -383,18 +314,13 @@ probe_ready() {
 
 while true; do
   if [[ "${SHUTTING_DOWN:-0}" == "1" ]]; then
-    event "vllm_start_skipped" "reason=shutdown_in_progress"
     break
   fi
 
   log "Launching vLLM -- model=${VLLM_MODEL} tp=${TENSOR_PARALLEL_SIZE} port=${VLLM_PORT}"
-  event "vllm_starting" "model=${VLLM_MODEL}" "tp=${TENSOR_PARALLEL_SIZE}" \
-        "attempt=$(( restart_count + 1 ))" "max_attempts=$(( MAX_RESTARTS + 1 ))"
-
   launch_ts=$SECONDS
 
   if command -v vllm >/dev/null 2>&1; then
-    # Preferred for vllm/vllm-openai images
     vllm serve "${VLLM_MODEL}" \
       --served-model-name "${VLLM_MODEL}" \
       --dtype auto \
@@ -410,7 +336,6 @@ while true; do
       "${APIKEY_FLAG[@]}" \
       "${QUANT_FLAG[@]}" &
   else
-    # Fallback if vllm CLI isn't on PATH
     python3 -m vllm.entrypoints.openai.api_server \
       --model "${VLLM_MODEL}" \
       --served-model-name "${VLLM_MODEL}" \
@@ -435,12 +360,7 @@ while true; do
   log "vLLM starting (pid ${VLLM_PID}). Probing readiness on 127.0.0.1:${VLLM_PORT}"
 
   if probe_ready; then
-    event "vllm_ready" "pid=${VLLM_PID}" "load_seconds=$(( SECONDS - launch_ts ))" \
-          "restarts_used=${restart_count}"
     log "vLLM is serving. Reachable from tailnet at ${TAILSCALE_IP}:${VLLM_PORT}"
-  else
-    event "vllm_ready_timeout" "pid=${VLLM_PID}" \
-          "elapsed_seconds=$(( SECONDS - launch_ts ))" "severity=high"
   fi
 
   if wait "${VLLM_PID}"; then
@@ -448,19 +368,12 @@ while true; do
   else
     exit_code=$?
   fi
-  uptime_s=$(( SECONDS - launch_ts ))
 
   if [[ "${SHUTTING_DOWN:-0}" == "1" ]]; then
-    event "vllm_stopped" "reason=deliberate_shutdown" "uptime_seconds=${uptime_s}"
     break
   fi
 
-  event "vllm_exited" "exit_code=${exit_code}" "uptime_seconds=${uptime_s}" \
-        "restarts_used=${restart_count}" "severity=high"
-
   if (( restart_count >= MAX_RESTARTS )); then
-    event "vllm_restart_budget_exhausted" "restarts=${restart_count}" \
-          "severity=critical" "action=stopping_pod"
     log "FATAL: vLLM failed ${restart_count} times. Stopping the pod."
     if [[ -n "${RUNPOD_API_KEY:-}" && -n "${RUNPOD_POD_ID:-}" ]]; then
       stop_pod "vllm_crash_loop" || true
@@ -470,6 +383,5 @@ while true; do
 
   restart_count=$(( restart_count + 1 ))
   backoff=$(( restart_count * 15 ))
-  event "vllm_restarting" "attempt=${restart_count}" "backoff_seconds=${backoff}"
   sleep "$backoff"
 done
