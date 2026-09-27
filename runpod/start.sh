@@ -224,7 +224,8 @@ if ! command -v tailscaled >/dev/null 2>&1; then
 fi
 
 if ! python3 -c "import vllm" >/dev/null 2>&1; then
-  log "vLLM absent -- installing via pip with --no-deps to preserve PyTorch base layers."
+  log "vLLM absent -- installing dependencies and vLLM without upgrading PyTorch."
+  python3 -m pip install --no-cache-dir regex tiktoken sentencepiece protobuf
   python3 -m pip install --no-cache-dir --no-deps vllm
 fi
 
