@@ -596,7 +596,7 @@ while true; do
     --max-model-len "${MAX_MODEL_LEN}" \
     --host 127.0.0.1 \
     --port "${VLLM_PORT}" \
-    --disable-log-requests \
+    --no-enable-log-requests \
     --disable-log-stats \
     --uvicorn-log-level warning \
     "${TRUST_FLAG[@]}" &
