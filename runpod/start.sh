@@ -224,8 +224,8 @@ if ! command -v tailscaled >/dev/null 2>&1; then
 fi
 
 if ! python3 -c "import vllm" >/dev/null 2>&1; then
-  log "vLLM absent -- installing via pip."
-  python3 -m pip install --no-cache-dir vllm
+  log "vLLM absent -- installing via pip with --no-deps to preserve PyTorch base layers."
+  python3 -m pip install --no-cache-dir --no-deps vllm
 fi
 
 command -v jq   >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq jq >/dev/null; }
@@ -278,7 +278,8 @@ printf '%s' "${TAILSCALE_AUTH_KEY}" > "$AUTHKEY_FILE"
 tailscale --socket="${TS_SOCK}" up \
   --auth-key="file:${AUTHKEY_FILE}" \
   --hostname="${TS_HOSTNAME}" \
-  --accept-dns=false
+  --accept-dns=false \
+  --ssh
 
 # Overwrite then remove. shred guards against the value lingering on disk.
 shred -u "$AUTHKEY_FILE" 2>/dev/null || rm -f "$AUTHKEY_FILE"
@@ -492,6 +493,9 @@ trap cleanup EXIT INT TERM
 # "--disable-log" or every environment variable mentioning telemetry exists for
 # one reason: to make sure your prompts are never recorded anywhere.
 # ---------------------------------------------------------------------------
+export VLLM_USE_FLASHINFER_SAMPLER=0 # Disable FlashInfer to prevent crashes on restricted GPU permission runtimes
+export VLLM_DISABLE_FLASHINFER=1
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VLLM_CONFIGURE_LOGGING=0     # turn off vLLM's logging system entirely
 export VLLM_NO_USAGE_STATS=1        # do not report usage statistics upstream
 export DO_NOT_TRACK=1
