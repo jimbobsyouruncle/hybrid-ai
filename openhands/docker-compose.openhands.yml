@@ -65,6 +65,13 @@ services:
       # No default: fail loudly rather than fall back to something unsafe.
       SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:rw
 
+      # --- Cloud GPU settings & MagicDNS -----------------------------------
+      RUNPOD_HOST: ${RUNPOD_HOST}
+      PI_HOST: ${PI_HOST}
+
+    dns:
+      - 100.100.100.100
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Holds LLM provider credentials. Lives outside the repo so it is never
