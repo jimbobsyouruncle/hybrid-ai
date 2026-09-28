@@ -120,7 +120,7 @@ class EndpointConfig:
 
     runpod_api_key: str = ""
     runpod_pod_id: str = ""
-    tailscale_ip: str = ""
+    runpod_host: str = ""
     vllm_port: int = 8000
     model_name: str = ""
     # Peer hostname this endpoint registers under on the tailnet. Used only to
@@ -218,8 +218,8 @@ class RunPodEndpoint:
 
     @property
     def base_url(self) -> str:
-        """Root URL of the vLLM server, e.g. http://100.x.x.x:8000"""
-        return f"http://{self.config.tailscale_ip}:{self.config.vllm_port}"
+        """Root URL of the vLLM server, e.g. http://runpod-worker.tailXXXX.ts.net:8000"""
+        return f"http://{self.config.runpod_host}:{self.config.vllm_port}"
 
     def preflight(self) -> Optional[str]:
         """
@@ -234,9 +234,9 @@ class RunPodEndpoint:
             return "RUNPOD_API_KEY is not set. Re-run ./install.sh on the Pi."
         if not c.runpod_pod_id:
             return "RUNPOD_POD_ID is not set. Re-run ./install.sh on the Pi."
-        if not c.tailscale_ip:
+        if not c.runpod_host:
             return (
-                "TAILSCALE_IP is empty. The pod has not registered on the tailnet yet. "
+                "RUNPOD_HOST is empty. The pod has not registered on the tailnet yet. "
                 "Start it once manually, then re-run ./install.sh to discover the peer."
             )
 
@@ -254,14 +254,15 @@ class RunPodEndpoint:
             return f"VLLM_PORT must be a valid port (got {c.vllm_port})."
 
         # SECURITY: validated here, at the point of use, rather than only at
-        # install time. The address is resolved from live tailnet state and can
-        # change between runs.
-        if c.enforce_mesh_only and not is_mesh_address(c.tailscale_ip):
-            return (
-                f"Refusing to transmit: {c.tailscale_ip} is outside the Tailscale mesh "
-                f"range (100.64.0.0/10). Prompts would leave the encrypted tunnel. "
-                f"Fix TAILSCALE_IP, or disable ENFORCE_MESH_ONLY if this is intentional."
-            )
+        # install time. The address is resolved from live tailnet state.
+        if c.enforce_mesh_only:
+            is_secure = is_mesh_address(c.runpod_host) or c.runpod_host.endswith(".ts.net")
+            if not is_secure:
+                return (
+                    f"Refusing to transmit: {c.runpod_host} is outside the Tailscale mesh. "
+                    f"Prompts would leave the encrypted tunnel. "
+                    f"Fix RUNPOD_HOST, or disable ENFORCE_MESH_ONLY if this is intentional."
+                )
         return None
 
     # -- RunPod control plane ------------------------------------------------
