@@ -14,7 +14,7 @@ requirements: httpx
 #  GENERATED FILE -- DO NOT EDIT
 #
 #  Built by openwebui/build_pipe.py from:
-#      openwebui/runpod_core.py     wake / validate / poll / stream
+#      openwebui/runpod_core.py      wake / validate / poll / stream
 #      openwebui/pipe_wrapper.py    Open WebUI presentation layer
 #
 #  Edit those files and re-run:  python3 openwebui/build_pipe.py
@@ -145,7 +145,7 @@ class EndpointConfig:
 
     runpod_api_key: str = ""
     runpod_pod_id: str = ""
-    tailscale_ip: str = ""
+    runpod_host: str = ""
     vllm_port: int = 8000
     model_name: str = ""
     # Peer hostname this endpoint registers under on the tailnet. Used only to
@@ -243,8 +243,8 @@ class RunPodEndpoint:
 
     @property
     def base_url(self) -> str:
-        """Root URL of the vLLM server, e.g. http://100.x.x.x:8000"""
-        return f"http://{self.config.tailscale_ip}:{self.config.vllm_port}"
+        """Root URL of the vLLM server, e.g. http://runpod-worker.tailXXXX.ts.net:8000"""
+        return f"http://{self.config.runpod_host}:{self.config.vllm_port}"
 
     def preflight(self) -> Optional[str]:
         """
@@ -259,9 +259,9 @@ class RunPodEndpoint:
             return "RUNPOD_API_KEY is not set. Re-run ./install.sh on the Pi."
         if not c.runpod_pod_id:
             return "RUNPOD_POD_ID is not set. Re-run ./install.sh on the Pi."
-        if not c.tailscale_ip:
+        if not c.runpod_host:
             return (
-                "TAILSCALE_IP is empty. The pod has not registered on the tailnet yet. "
+                "RUNPOD_HOST is empty. The pod has not registered on the tailnet yet. "
                 "Start it once manually, then re-run ./install.sh to discover the peer."
             )
 
@@ -279,14 +279,15 @@ class RunPodEndpoint:
             return f"VLLM_PORT must be a valid port (got {c.vllm_port})."
 
         # SECURITY: validated here, at the point of use, rather than only at
-        # install time. The address is resolved from live tailnet state and can
-        # change between runs.
-        if c.enforce_mesh_only and not is_mesh_address(c.tailscale_ip):
-            return (
-                f"Refusing to transmit: {c.tailscale_ip} is outside the Tailscale mesh "
-                f"range (100.64.0.0/10). Prompts would leave the encrypted tunnel. "
-                f"Fix TAILSCALE_IP, or disable ENFORCE_MESH_ONLY if this is intentional."
-            )
+        # install time. The address is resolved from live tailnet state.
+        if c.enforce_mesh_only:
+            is_secure = is_mesh_address(c.runpod_host) or c.runpod_host.endswith(".ts.net")
+            if not is_secure:
+                return (
+                    f"Refusing to transmit: {c.runpod_host} is outside the Tailscale mesh. "
+                    f"Prompts would leave the encrypted tunnel. "
+                    f"Fix RUNPOD_HOST, or disable ENFORCE_MESH_ONLY if this is intentional."
+                )
         return None
 
     # -- RunPod control plane ------------------------------------------------
@@ -680,9 +681,9 @@ class Pipe:
             default=os.getenv("RUNPOD_POD_ID", ""),
             description="Target RunPod pod ID.",
         )
-        TAILSCALE_IP: str = Field(
-            default=os.getenv("TAILSCALE_IP", ""),
-            description="Mesh IP of the pod (100.x.x.x). Resolved by install.sh.",
+        RUNPOD_HOST: str = Field(
+            default=os.getenv("RUNPOD_HOST", ""),
+            description="MagicDNS hostname of the pod. Resolved by install.sh.",
         )
         PEER_HOSTNAME: str = Field(
             default=os.getenv("PEER_HOSTNAME", "runpod-worker"),
@@ -745,7 +746,7 @@ class Pipe:
         return EndpointConfig(
             runpod_api_key=v.RUNPOD_API_KEY,
             runpod_pod_id=v.RUNPOD_POD_ID,
-            tailscale_ip=v.TAILSCALE_IP,
+            runpod_host=v.RUNPOD_HOST,
             vllm_port=v.VLLM_PORT,
             model_name=v.MODEL_NAME,
             peer_hostname=v.PEER_HOSTNAME,
@@ -941,7 +942,7 @@ class Pipe:
                 f"The tailnet route is likely down. Verify with "
                 f"`tailscale status | grep {self.valves.PEER_HOSTNAME}` on the Pi - if "
                 f"the peer is missing entirely, the pod's ephemeral node was reaped and "
-                f"`TAILSCALE_IP` needs refreshing via `./install.sh`.\n\n"
+                f"`RUNPOD_HOST` needs refreshing via `./install.sh`.\n\n"
                 f"```\n{scrub(str(exc))[:300]}\n```"
             )
 
