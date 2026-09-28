@@ -171,7 +171,8 @@ services:
       WEBUI_AUTH: ${WEBUI_AUTH:-true}
 
       # --- Cloud GPU settings, read by openwebui/runpod_pipe.py ------------
-      TAILSCALE_IP: ${TAILSCALE_IP}
+      RUNPOD_HOST: ${RUNPOD_HOST}
+      PI_HOST: ${PI_HOST}
       # So the pipe's connection-error message names the right peer instead of
       # a hardcoded string that may not match what you called the pod.
       PEER_HOSTNAME: ${PEER_HOSTNAME:-runpod-worker}
@@ -203,6 +204,9 @@ services:
       VECTOR_DB: chroma
       CHROMA_TELEMETRY_DISABLED: "true"
       HF_HUB_DISABLE_TELEMETRY: "1"
+      
+    dns:
+      - 100.100.100.100
     extra_hosts:
       # Lets the container reach services running on the Pi itself.
       - "host.docker.internal:host-gateway"
@@ -274,10 +278,13 @@ services:
       BACKUP_LOG_PATH: /data/backup.log
       INSTALL_LOG_PATH: /data/install.log
       # Not a secret: a private mesh address, and it is masked in all output.
-      TAILSCALE_IP: ${TAILSCALE_IP}
+      RUNPOD_HOST: ${RUNPOD_HOST}
+      PI_HOST: ${PI_HOST}
       VLLM_PORT: ${VLLM_PORT:-8000}
       PYTHONDONTWRITEBYTECODE: "1"
       DO_NOT_TRACK: "true"
+    dns:
+      - 100.100.100.100
     user: "${STATUS_UID:-1000}:${DOCKER_GID:-999}"
     read_only: true
     tmpfs:
