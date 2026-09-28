@@ -415,96 +415,127 @@ prompt_secret RUNPOD_HOST    "RunPod MagicDNS (e.g., runpod-worker.tailXXXX.ts.n
 prompt_secret PI_HOST        "Raspberry Pi MagicDNS (e.g., jarvis.tailXXXX.ts.net)" 0
 
 # ---------------------------------------------------------------------------
-# STEP 6. Find the GPU pod on the Tailscale network
+# STEP 6. Find the GPU pod on the Tailscale network (with Auto-Wake support)
 # "tailscale status --json" lists every machine on your private network. We use
 # jq (a JSON query tool) to find the pod by hostname (see PEER_HOSTNAMES above)
 # and pull out its 100.x.x.x address. That address is private to your network
 # and encrypted.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# STEP 6. Find the GPU pod on the Tailscale network (with Auto-Wake support)
+# ---------------------------------------------------------------------------
 log "Querying Tailscale mesh for peer '${PEER_HOSTNAME}'..."
 
 TS_JSON=""
-if TS_JSON="$(tailscale status --json 2>/dev/null)"; then
-  BACKEND_STATE="$(printf '%s' "$TS_JSON" | jq -r '.BackendState // "Unknown"')"
-  SELF_IP="$(printf '%s' "$TS_JSON" | jq -r '.Self.TailscaleIPs[]? | select(test("^100\\."))' | head -n1)"
+DISCOVERED_IP=""
+PEER_ONLINE="false"
+MATCHED_PEER=""
 
-  if [[ "$BACKEND_STATE" != "Running" ]]; then
-    warn "Tailscale backend state is '${BACKEND_STATE}' (expected 'Running'). Run: sudo tailscale up"
-  else
-    ok "tailnet up; this node = ${SELF_IP:-unknown}"
-  fi
+query_tailnet() {
+    if TS_JSON="$(tailscale status --json 2>/dev/null)"; then
+        BACKEND_STATE="$(printf '%s' "$TS_JSON" | jq -r '.BackendState // "Unknown"')"
+        SELF_IP="$(printf '%s' "$TS_JSON" | jq -r '.Self.TailscaleIPs[]? | select(test("^100\\."))' | head -n1)"
 
-  # Match on hostname or DNS name, preferring a peer that is currently online.
-  # Try each candidate name in PEER_HOSTNAMES in order; first hit wins.
-  DISCOVERED_IP=""
-  PEER_ONLINE="false"
-  MATCHED_PEER=""
+        if [[ "$BACKEND_STATE" != "Running" ]]; then
+            warn "Tailscale backend state is '${BACKEND_STATE}' (expected 'Running'). Run: sudo tailscale up"
+        else
+            ok "tailnet up; this node = ${SELF_IP:-unknown}"
+        fi
 
-  for _peer in $PEER_HOSTNAMES; do
-    _ip="$(
-      printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
-        (.Peer // {})
-        | to_entries
-        | map(.value)
-        | map(select(
-            ((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))
-            or ((.DNSName // "") | ascii_downcase | startswith(($peer | ascii_downcase) + "."))
-          ))
-        | sort_by((.Online // false) | not)
-        | .[0].TailscaleIPs[]? // empty
-      ' | grep -E '^100\.' | head -n1 || true
-    )"
+        for _peer in $PEER_HOSTNAMES; do
+            _ip="$(
+                printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
+                    (.Peer // {})
+                    | to_entries
+                    | map(.value)
+                    | map(select(
+                        ((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))
+                        or ((.DNSName // "") | ascii_downcase | startswith(($peer | ascii_downcase) + "."))
+                      ))
+                    | sort_by((.Online // false) | not)
+                    | .[0].TailscaleIPs[]? // empty
+                  ' | grep -E '^100\.' | head -n1 || true
+            )"
 
-    [[ -z "$_ip" ]] && continue
+            [[ -z "$_ip" ]] && continue
 
-    DISCOVERED_IP="$_ip"
-    MATCHED_PEER="$_peer"
-    PEER_ONLINE="$(
-      printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
-        (.Peer // {}) | to_entries | map(.value)
-        | map(select(((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))))
-        | .[0].Online // false
-      ' 2>/dev/null || echo false
-    )"
-    break
-  done
-  unset _peer _ip
-else
-  warn "'tailscale status --json' failed. Is tailscaled running?"
-  DISCOVERED_IP=""
-  PEER_ONLINE="false"
-  MATCHED_PEER=""
+            DISCOVERED_IP="$_ip"
+            MATCHED_PEER="$_peer"
+            PEER_ONLINE="$(
+                printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
+                    (.Peer // {}) | to_entries | map(.value)
+                    | map(select(((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))))
+                    | .[0].Online // false
+                  ' 2>/dev/null || echo false
+            )"
+            break
+        done
+        unset _peer _ip
+    else
+        warn "'tailscale status --json' failed. Is tailscaled running?"
+    fi
+}
+
+query_tailnet
+
+if [[ "$PEER_ONLINE" != "true" ]]; then
+    if [[ -n "${RUNPOD_API_KEY:-}" && -n "${RUNPOD_POD_ID:-}" ]]; then
+        warn "Peer '${PEER_HOSTNAME}' is offline or missing. Checking RunPod status..."
+        
+        RUNPOD_STATUS=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -d '{"query": "query { pod(input: {podId: \"${RUNPOD_POD_ID}\"}) { id desiredStatus } }"}' \
+            https://api.runpod.io/graphql | jq -r '.data.pod.desiredStatus // "STOPPED"')
+
+        if [ "$RUNPOD_STATUS" != "RUNNING" ]; then
+            warn "RunPod worker is stopped. Sending start command for pod ${RUNPOD_POD_ID}..."
+            curl -s -X POST \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+                -d '{"query": "mutation { podResume(input: {podId: \"${RUNPOD_POD_ID}\"}) { id desiredStatus } }"}' \
+                https://api.runpod.io/graphql > /dev/null
+        fi
+
+        log "Waiting for worker to boot and join tailnet (up to 3 minutes)..."
+        RETRIES=18
+        WAIT_TIME=10
+        
+        for ((i=1; i<=RETRIES; i++)); do
+            sleep $WAIT_TIME
+            query_tailnet
+            if [[ "$PEER_ONLINE" == "true" ]]; then
+                ok "Peer '${MATCHED_PEER}' came online at ${DISCOVERED_IP}"
+                break
+            else
+                warn "Still waiting for 'runpod-worker' to register (Attempt $i of $RETRIES)..."
+            fi
+        done
+    else
+        warn "RUNPOD_API_KEY or RUNPOD_POD_ID not set in .env; skipping auto-wake."
+    fi
 fi
 
 if [[ -n "${DISCOVERED_IP:-}" ]]; then
-  TAILSCALE_IP="$DISCOVERED_IP"
-  if [[ "$PEER_ONLINE" == "true" ]]; then
-    ok "Peer '${MATCHED_PEER}' online at ${TAILSCALE_IP}"
-  else
-    # This is the normal state most of the time -- the pod is stopped to save money.
-    ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline -- pod is stopped, expected)"
-  fi
-
-  if [[ "$MATCHED_PEER" != "$PEER_HOSTNAME" ]]; then
-    warn "Pod is registered as '${MATCHED_PEER}' (legacy name)."
-    warn "Rename it: set TS_HOSTNAME=${PEER_HOSTNAME} in runpod/start.sh, then restart the pod."
-  fi
+    TAILSCALE_IP="$DISCOVERED_IP"
+    if [[ "$PEER_ONLINE" == "true" ]]; then
+        ok "Peer '${MATCHED_PEER}' online at ${TAILSCALE_IP}"
+    else
+        ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline — worker did not respond to wake)"
+    fi
 elif [[ -n "${TAILSCALE_IP:-}" ]]; then
-  warn "No peer (${PEER_HOSTNAMES}) in tailnet right now; keeping cached ${TAILSCALE_IP}"
+    warn "No peer (${PEER_HOSTNAMES}) in tailnet right now; keeping cached ${TAILSCALE_IP}"
 else
-  warn "No peer found (tried: ${PEER_HOSTNAMES}) and no cached address."
-  if (( NON_INTERACTIVE )); then
-    TAILSCALE_IP=""
-    warn "Continuing with empty TAILSCALE_IP -- the pipe will error until the pod registers."
-  else
-    read -r -p "    Enter the pod's Tailscale IP (or leave blank to fill in later): " TAILSCALE_IP < /dev/tty
-  fi
+    warn "No peer found (tried: ${PEER_HOSTNAMES}) and no cached address."
+    if (( NON_INTERACTIVE )); then
+        TAILSCALE_IP=""
+    else
+        read -r -p "    Enter the pod's Tailscale IP (or leave blank to fill in later): " TAILSCALE_IP < /dev/tty
+    fi
 fi
 
-# Sanity check: mesh addresses always start with 100. Anything else means your
-# traffic would leave the encrypted tunnel.
 if [[ -n "${TAILSCALE_IP:-}" && ! "$TAILSCALE_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]]; then
-  warn "'${TAILSCALE_IP}' does not look like a 100.x.x.x mesh address. Traffic may egress the tailnet."
+    warn "'${TAILSCALE_IP}' does not look like a 100.x.x.x mesh address."
 fi
 
 # ---------------------------------------------------------------------------
@@ -757,7 +788,7 @@ if EFFECTIVE_CTX="$(docker exec ollama sh -c 'printf "%s" "${OLLAMA_CONTEXT_LENG
     ok "Context length ${OLLAMA_CONTEXT_LENGTH} applied."
   fi
 fi
-wait_for "open-webui" "http://127.0.0.1:3000/health"    180 || HEALTH_FAILED=1
+wait_for "open-webui" "http://127.0.0.1:3000/health"    600 || HEALTH_FAILED=1
 
 # OpenHands is a maintenance convenience, not part of the serving path. Chat and
 # the cloud pipe work without it, and its image is large enough that a first pull
