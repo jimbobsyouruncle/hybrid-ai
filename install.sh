@@ -670,13 +670,30 @@ fi
 
 # Both compose files, every time. Omitting the overlay on an "up
 # --remove-orphans" would DELETE the OpenHands container as an orphan.
-COMPOSE=(docker compose
-         -f docker-compose.yml
-         -f openhands/docker-compose.openhands.yml
-         --env-file "$ENV_FILE")
 
-log "Pulling images (no-op if already current)..."
-"${COMPOSE[@]}" pull --quiet || warn "Image pull failed; using cached images."
+# 1. Extend client timeouts for slow networks/large aarch64 image extraction
+export COMPOSE_HTTP_TIMEOUT=600
+export DOCKER_CLIENT_TIMEOUT=600
+
+log "Pulling images (with resume support)..."
+MAX_RETRIES=5
+ATTEMPT=1
+
+# 2. Retry loop for pulling images using your predefined COMPOSE array
+while [ $ATTEMPT -le $MAX_RETRIES ]; do
+    if "${COMPOSE[@]}" pull; then
+        log "All images pulled successfully."
+        break
+    else
+        warn "Pull timed out or failed (Attempt $ATTEMPT of $MAX_RETRIES). Retrying in 10 seconds..."
+        sleep 10
+        ATTEMPT=$((ATTEMPT + 1))
+    fi
+done
+
+if [ $ATTEMPT -gt $MAX_RETRIES ]; then
+    die "Failed to pull images after $MAX_RETRIES attempts. Please check network routing."
+fi
 
 log "Starting control plane..."
 # "up -d" starts in the background. "--remove-orphans" cleans up containers
