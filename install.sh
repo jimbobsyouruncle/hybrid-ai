@@ -411,6 +411,8 @@ prompt_secret() {
 log "Resolving cloud inference credentials..."
 prompt_secret RUNPOD_API_KEY "RunPod API key" 1
 prompt_secret RUNPOD_POD_ID  "RunPod pod ID"  0
+prompt_secret RUNPOD_HOST    "RunPod MagicDNS (e.g., runpod-worker.tailXXXX.ts.net)" 0
+prompt_secret PI_HOST        "Raspberry Pi MagicDNS (e.g., jarvis.tailXXXX.ts.net)" 0
 
 # ---------------------------------------------------------------------------
 # STEP 6. Find the GPU pod on the Tailscale network
@@ -597,6 +599,8 @@ RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v
 ENABLE_OPENAI_API=${ENABLE_OPENAI_API:-false}
 
 # --- Cloud inference plane -------------------------------------------------
+RUNPOD_HOST=${RUNPOD_HOST}
+PI_HOST=${PI_HOST}
 TAILSCALE_IP=${TAILSCALE_IP:-}
 # Role-based peer name. Adding a second pod later means adding a name to
 # PEER_HOSTNAMES, not renaming this one. doctor.sh and the pipe read
