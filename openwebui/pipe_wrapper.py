@@ -1,25 +1,6 @@
-# ---------------------------------------------------------------------------
-# FILE: openwebui/pipe_wrapper.py
-# PURPOSE (plain English):
-#   The Open WebUI half of the cloud-model bridge. This file is ONLY about
-#   presentation: reading settings from the Valves panel, showing progress in
-#   the chat window, and turning the core's structured events into markdown.
-#
-#   All the actual work -- validating the address, waking the pod, waiting for
-#   the model, streaming -- lives in runpod_core.py and is not repeated here.
-#
-# THE RULE TO PRESERVE:
-#   If you find yourself adding an HTTP call, a retry loop, or a RunPod API
-#   query to this file, it belongs in runpod_core.py instead. Anything in here
-#   is unavailable to a future shim, and duplicating it is how two
-#   implementations start to drift.
-#
-# HOW TO INSTALL IT:
-#   Do not paste THIS file into Open WebUI. Paste the generated runpod_pipe.py,
-#   which build_pipe.py produces by concatenating runpod_core.py with this one.
-#   Open WebUI -> Workspace -> Functions -> "+" -> paste -> Save -> enable.
-# ---------------------------------------------------------------------------
-
+# -------------------------------------------------------------------------
+# OPEN WEBUI PRESENTATION LAYER  (from pipe_wrapper.py)
+# -------------------------------------------------------------------------
 # --- imports used only by the wrapper --------------------------------------
 # (runpod_core.py, prepended by build_pipe.py, supplies asyncio, logging, os,
 #  time, httpx, the typing names, and its own helpers.)
@@ -49,9 +30,9 @@ class Pipe:
             default=os.getenv("RUNPOD_POD_ID", ""),
             description="Target RunPod pod ID.",
         )
-        TAILSCALE_IP: str = Field(
-            default=os.getenv("TAILSCALE_IP", ""),
-            description="Mesh IP of the pod (100.x.x.x). Resolved by install.sh.",
+        RUNPOD_HOST: str = Field(
+            default=os.getenv("RUNPOD_HOST", ""),
+            description="MagicDNS hostname of the pod. Resolved by install.sh.",
         )
         PEER_HOSTNAME: str = Field(
             default=os.getenv("PEER_HOSTNAME", "runpod-worker"),
@@ -114,7 +95,7 @@ class Pipe:
         return EndpointConfig(
             runpod_api_key=v.RUNPOD_API_KEY,
             runpod_pod_id=v.RUNPOD_POD_ID,
-            tailscale_ip=v.TAILSCALE_IP,
+            runpod_host=v.RUNPOD_HOST,
             vllm_port=v.VLLM_PORT,
             model_name=v.MODEL_NAME,
             peer_hostname=v.PEER_HOSTNAME,
@@ -310,7 +291,7 @@ class Pipe:
                 f"The tailnet route is likely down. Verify with "
                 f"`tailscale status | grep {self.valves.PEER_HOSTNAME}` on the Pi - if "
                 f"the peer is missing entirely, the pod's ephemeral node was reaped and "
-                f"`TAILSCALE_IP` needs refreshing via `./install.sh`.\n\n"
+                f"`RUNPOD_HOST` needs refreshing via `./install.sh`.\n\n"
                 f"```\n{scrub(str(exc))[:300]}\n```"
             )
 
