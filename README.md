@@ -399,7 +399,7 @@ Backup credentials sit outside the repository deliberately: no `git add`, no str
 ### Step 1 — Pi setup
 
 ```bash
-git clone [https://github.com/jimbobsyouruncle/hybrid-ai.git](https://github.com/jimbobsyouruncle/hybrid-ai.git)
+git clone https://github.com/jimbobsyouruncle/hybrid-ai.git
 cd hybrid-ai
 chmod +x install.sh doctor.sh collect-diagnostics.sh \
          backup/backup.sh backup/restore.sh runpod/start.sh \
