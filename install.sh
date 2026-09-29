@@ -4,7 +4,7 @@
 # PURPOSE (plain English):
 #   This is the one script you run on the Raspberry Pi to set everything up.
 #   You can run it as many times as you like -- it is "idempotent", meaning
-#   running it twice does the same thing as running it once. Nothing breaks and
+#   running it twice does the same thing as running it once[cite: 1]. Nothing breaks and
 #   no data is lost. The CI/CD pipeline runs it on every deploy for that reason.
 #
 # WHAT IT DOES, IN ORDER:
@@ -734,14 +734,31 @@ setup_backups() {
   local cf_account cf_bucket cf_key_id cf_secret
   while [[ -z "${cf_account:-}" ]]; do
     read -r -p "    Cloudflare account ID: " cf_account < /dev/tty
+
+    # --- Input Sanitization ------------------------------------------------
+    # Strip leading scheme, trailing paths/slashes, and domain suffixes
+    cf_account="${cf_account#https://}"
+    cf_account="${cf_account#http://}"
+    cf_account="${cf_account%%/*}"
+    cf_account="${cf_account%%.r2.cloudflarestorage.com*}"
+    cf_account="$(printf '%s' "$cf_account" | tr -d '[:space:]')"
+
+    if [[ -z "$cf_account" ]]; then
+      warn "Account ID cannot be empty."
+    fi
   done
+
   read -r -p "    R2 bucket name [hybrid-ai-backup]: " cf_bucket < /dev/tty
   cf_bucket="${cf_bucket:-hybrid-ai-backup}"
+  cf_bucket="$(printf '%s' "$cf_bucket" | tr -d '[:space:]')"
+
   while [[ -z "${cf_key_id:-}" ]]; do
     read -r -p "    R2 Access Key ID: " cf_key_id < /dev/tty
+    cf_key_id="$(printf '%s' "$cf_key_id" | tr -d '[:space:]')"
   done
   while [[ -z "${cf_secret:-}" ]]; do
     read -r -s -p "    R2 Secret Access Key: " cf_secret < /dev/tty; echo
+    cf_secret="$(printf '%s' "$cf_secret" | tr -d '[:space:]')"
   done
 
   if [[ ! -f "$RESTIC_PW_FILE" ]]; then
