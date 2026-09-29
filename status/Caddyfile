@@ -1,53 +1,4 @@
-# ---------------------------------------------------------------------------
-# FILE: status/Caddyfile
-# PURPOSE (plain English):
-#   Caddy is a small web server that sits in front of everything on port 80 and
-#   routes each request to the right place based on local subdomains or path 
-#   prefixes, so you have friendly addresses to remember instead of port numbers.
-#
-#   http://<domain>/             the primary chat interface (Open WebUI) 
-#   http://<domain>/hub          the hub page - links to all local services
-#   http://openhands.<domain>/   autonomous software engineering agent
-#   http://hermes.<domain>/      system orchestrator & persistent memory UI
-#   http://status.<domain>/      service health, jobs, logs, diagnostics
-#   http://<domain>/ollama/      the local model API (for internal scripts)
-#   http://<domain>/health       one-line health summary for monitoring
-#
-# ---------------------------------------------------------------------------
-# IMPORTANT: WHY /openwebui IS A REDIRECT, NOT A REWRITE
-#
-#   Open WebUI is a SvelteKit application whose asset URLs are absolute from
-#   the site root - it requests /_app/..., /static/..., /favicon.png and so on.
-#   It has no "base path" setting. If we served it under /openwebui and simply
-#   stripped the prefix, the HTML would load but every asset request would go
-#   to /_app/... at the root, miss this route, and 404. You would get a blank
-#   page. This is a known, long-standing upstream limitation, not a mistake in
-#   this configuration.
-#
-#   So: /openwebui issues a 302 redirect to /app/, which is a real path prefix
-#   that Caddy hands to Open WebUI untouched. You get the friendly, logical URL
-#   you can remember and type, and the application still gets the root-relative
-#   paths it requires. Bookmarks to :3000 keep working too.
-#
-#   If Open WebUI ever gains a base-path setting, this can become a true
-#   rewrite. Until then, a redirect is the honest implementation.
-# ---------------------------------------------------------------------------
-#
-# SECURITY -- READ BEFORE CHANGING:
-#   /status, /ollama, /openhands, and /hermes expose operational detail, 
-#   terminal execution, or unauthenticated APIs. All sensitive endpoints are
-#   restricted by source address to your own private network and Tailscale mesh
-#   using the `trusted_only` snippet.
-#
-#   The IP allowlist is the primary access control in front of these subdomains.
-#   Do not loosen it without adding authentication in its place - see the
-#   optional basic_auth section at the bottom of this file.
-# ---------------------------------------------------------------------------
-
 {
-	# Plain HTTP on the local network. Remote access goes over Tailscale, which
-	# is already encrypted end to end, so terminating TLS here would add
-	# certificate management for no real security gain.
 	auto_https off
 
 	servers {
@@ -55,16 +6,8 @@
 	}
 }
 
-# ---------------------------------------------------------------------------
-# Reusable definition of "a network I trust".
-# Defined once as a snippet so every route uses identical rules - if these
-# drifted apart, one route could silently become more permissive than the rest.
-# The CI pipeline asserts that every sensitive route imports this.
-# ---------------------------------------------------------------------------
 (trusted_only) {
 	@untrusted not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fd7a:115c:a1e0::/48
-	# `abort` closes the connection with no response body, revealing nothing
-	# about what is running here to anything scanning from outside.
 	abort @untrusted
 }
 
@@ -77,10 +20,6 @@
 	}
 }
 
-# ---------------------------------------------------------------------------
-# SUBDOMAIN ROUTING: System Diagnostics & Health Dashboard
-# ---------------------------------------------------------------------------
-# Dedicated subdomain landing for system monitoring and Docker container logs.
 http://status.{$LOCAL_DOMAIN} {
 	import trusted_only
 	import secure_headers
@@ -98,11 +37,6 @@ http://status.{$LOCAL_DOMAIN} {
 	}
 }
 
-# ---------------------------------------------------------------------------
-# SUBDOMAIN ROUTING: Software Engineering Agent (OpenHands)
-# ---------------------------------------------------------------------------
-# Subdomain routing prevents asset path conflicts (SPAs requesting root-level
-# assets). Protected strictly by trusted_only IP allowlist.
 http://openhands.{$LOCAL_DOMAIN} {
 	import trusted_only
 	import secure_headers
@@ -122,10 +56,6 @@ http://openhands.{$LOCAL_DOMAIN} {
 	}
 }
 
-# ---------------------------------------------------------------------------
-# SUBDOMAIN ROUTING: System Orchestrator (Hermes Agent UI)
-# ---------------------------------------------------------------------------
-# Connects to the Hermes Streamlit WebUI and gateway daemon.
 http://hermes.{$LOCAL_DOMAIN} {
 	import trusted_only
 	import secure_headers
@@ -145,20 +75,13 @@ http://hermes.{$LOCAL_DOMAIN} {
 	}
 }
 
-# ---------------------------------------------------------------------------
-# PRIMARY DOMAIN ROUTING: Open WebUI & Core Services
-# ---------------------------------------------------------------------------
 http://{$LOCAL_DOMAIN} {
-	# --- Hub page -----------------------------------------------------------
-	# The landing page. Served by the status service, which knows which
-	# services are actually healthy and can say so.
 	handle /hub* {
 		import trusted_only
 		import secure_headers
 		reverse_proxy hybrid-ai-status:8088
 	}
 
-	# --- Status page (legacy path alias) ------------------------------------
 	handle /status* {
 		import trusted_only
 		import secure_headers
@@ -169,16 +92,12 @@ http://{$LOCAL_DOMAIN} {
 		}
 	}
 
-	# --- Monitoring endpoint ------------------------------------------------
-	# Deliberately NOT IP-restricted: it returns only "ok", "warn" or "fail"
-	# with no detail, so it is safe for an uptime checker to poll.
 	handle /health {
 		import secure_headers
 		rewrite * /status/health-summary
 		reverse_proxy hybrid-ai-status:8088
 	}
 
-	# --- Friendly aliases for the chat interface ----------------------------
 	redir /openwebui /app/ 302
 	redir /chat /app/ 302
 
@@ -189,10 +108,6 @@ http://{$LOCAL_DOMAIN} {
 		redir * /app{uri} 302
 	}
 
-	# --- Ollama API ---------------------------------------------------------
-	# SECURITY: Ollama has NO authentication of its own. Anyone who can reach
-	# this can run inference, pull models, and fill your disk. Hence the strict
-	# allowlist.
 	handle_path /ollama/* {
 		import trusted_only
 		import secure_headers
@@ -201,8 +116,6 @@ http://{$LOCAL_DOMAIN} {
 		}
 	}
 
-	# --- Open WebUI ---------------------------------------------------------
-	# Primary interface on root domain.
 	handle_path /app/* {
 		reverse_proxy open-webui:8080 {
 			flush_interval -1
@@ -229,22 +142,3 @@ http://{$LOCAL_DOMAIN} {
 		level WARN
 	}
 }
-
-# ---------------------------------------------------------------------------
-# OPTIONAL: add a password to /status, /openhands, or /hermes
-#
-# The IP allowlist stops the internet. It does not stop a guest on your wifi,
-# or another device you own that gets compromised. If that matters to you, add
-# a password as well.
-#
-#   1. Generate a hash on the Pi:
-#        docker run --rm caddy:2-alpine caddy hash-password --plaintext 'your-password'
-#
-#   2. Add this inside any sensitive subdomain block, above `reverse_proxy`:
-#
-#        basic_auth {
-#            admin <paste-the-hash-here>
-#        }
-#
-#   3. Apply it:  ./install.sh
-# ---------------------------------------------------------------------------
