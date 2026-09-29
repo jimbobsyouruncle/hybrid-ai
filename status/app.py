@@ -46,10 +46,11 @@ SECURITY DESIGN -- please read before modifying:
     it is never directly exposed to the internet.
 
 ENDPOINTS:
-    GET  /status              the HTML page
-    GET  /status/api          the same data as JSON
-    POST /status/diagnostic   build a bundle and return it as a download
-    GET  /status/healthz      liveness probe for Docker
+    GET  /status               the HTML page
+    GET  /hub                  the hub landing page
+    GET  /status/api           the same data as JSON
+    POST /status/diagnostic    build a bundle and return it as a download
+    GET  /status/healthz       liveness probe for Docker
 """
 
 from __future__ import annotations
@@ -72,24 +73,35 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # --- Configuration (all non-secret) -----------------------------------------
 LISTEN_PORT = int(os.getenv("STATUS_PORT", "8088"))
+LOCAL_DOMAIN = os.getenv("LOCAL_DOMAIN", "yourhostname.com")
 DOCKER_SOCK = os.getenv("DOCKER_SOCKET", "/var/run/docker.sock")
+
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 WEBUI_URL = os.getenv("WEBUI_URL", "http://open-webui:8080")
+HERMES_URL = os.getenv("HERMES_URL", "http://hermes-agent:8501")
+OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://openhands:3001")
+
 TAILSCALE_IP = os.getenv("TAILSCALE_IP", "")
 VLLM_PORT = os.getenv("VLLM_PORT", "8000")
 WEBUI_DATA = os.getenv("WEBUI_DATA_PATH", "/data/webui_data")
 BACKUP_LOG = os.getenv("BACKUP_LOG_PATH", "/data/backup.log")
 INSTALL_LOG = os.getenv("INSTALL_LOG_PATH", "/data/install.log")
-WATCHED = ["ollama", "open-webui", "hybrid-ai-status", "hybrid-ai-proxy"]
+
+WATCHED = [
+    "ollama",
+    "open-webui",
+    "hermes-agent",
+    "openhands",
+    "hybrid-ai-status",
+    "hybrid-ai-proxy",
+]
 
 # ---------------------------------------------------------------------------
 # Redaction -- mirrors the patterns in collect-diagnostics.sh
-#
-# Defence in depth. This service is not given credentials, but a log line
-# produced by some other component might still contain one.
 # ---------------------------------------------------------------------------
 _REDACTIONS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"rpa_[A-Za-z0-9_-]{8,}"), "<REDACTED:runpod-key>"),
+    (re.compile(r"sk-or-v1-[A-Za-z0-9_-]{8,}"), "<REDACTED:openrouter-key>"),
     (re.compile(r"tskey-[A-Za-z0-9_-]{8,}"), "<REDACTED:tailscale-key>"),
     (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "<REDACTED:aws-key-id>"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "<REDACTED:github-token>"),
@@ -101,7 +113,6 @@ _REDACTIONS: List[Tuple[re.Pattern, str]] = [
                 r"[A-Za-z0-9._~+/=-]{8,}", re.I), r"\1<REDACTED>"),
     (re.compile(r"(https?://)[^:@\s/]+:[^@\s]+@"), r"\1<REDACTED:userinfo>@"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "<REDACTED:private-key>"),
-    # Keep the shape (is it a mesh address?) without publishing the host.
     (re.compile(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.(\d{1,3})\b"),
      r"100.x.x.\1"),
     (re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b"), "<REDACTED:mac>"),
@@ -117,9 +128,6 @@ def redact(text: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Docker API over the unix socket
-#
-# http.client cannot speak to a unix socket on its own, so we subclass it and
-# swap in a unix socket. Only GET is ever issued from this file.
 # ---------------------------------------------------------------------------
 class _UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, socket_path: str, timeout: float = 5.0):
@@ -137,7 +145,7 @@ def docker_get(path: str, timeout: float = 5.0) -> Optional[bytes]:
     """Issue a GET against the Docker API. Returns None on any failure."""
     try:
         conn = _UnixHTTPConnection(DOCKER_SOCK, timeout=timeout)
-        conn.request("GET", path)          # GET only, by design
+        conn.request("GET", path)
         resp = conn.getresponse()
         if resp.status != 200:
             conn.close()
@@ -150,12 +158,6 @@ def docker_get(path: str, timeout: float = 5.0) -> Optional[bytes]:
 
 
 def demux_docker_stream(raw: bytes) -> str:
-    """
-    Docker multiplexes stdout and stderr into one stream when the container
-    has no TTY. Each chunk is preceded by an 8-byte header: one byte for the
-    stream id, three padding bytes, then a 4-byte big-endian length.
-    Without demuxing you get control characters sprinkled through the text.
-    """
     out: List[str] = []
     i, n = 0, len(raw)
     while i + 8 <= n:
@@ -165,7 +167,7 @@ def demux_docker_stream(raw: bytes) -> str:
             break
         out.append(raw[i:i + size].decode("utf-8", errors="replace"))
         i += size
-    if not out:                              # not multiplexed after all
+    if not out:
         return raw.decode("utf-8", errors="replace")
     return "".join(out)
 
@@ -183,10 +185,6 @@ def container_logs(name: str, tail: int = 40) -> List[str]:
 
 # ---------------------------------------------------------------------------
 # Individual probes
-#
-# Every probe returns the same shape so the UI can render them uniformly:
-#   {name, state: ok|warn|fail|info, detail, hint}
-# "hint" is what the user should actually DO about it.
 # ---------------------------------------------------------------------------
 def probe_http(name: str, url: str, hint: str) -> Dict[str, Any]:
     started = time.monotonic()
@@ -208,8 +206,6 @@ def probe_containers() -> List[Dict[str, Any]]:
     for name in WATCHED:
         raw = docker_get(f"/containers/{name}/json")
         if raw is None:
-            # The status page and proxy may not be named as expected in a
-            # customised setup; not finding them is informational, not a fault.
             if name in ("hybrid-ai-status", "hybrid-ai-proxy"):
                 continue
             results.append({"name": name, "state": "fail",
@@ -251,11 +247,6 @@ def probe_containers() -> List[Dict[str, Any]]:
 
 
 def probe_pod() -> Dict[str, Any]:
-    """
-    The GPU pod is stopped most of the time on purpose. An unreachable pod is
-    therefore normal, not a fault -- so this reports 'info', never 'fail'.
-    Reporting it as an error would train you to ignore real errors.
-    """
     if not TAILSCALE_IP:
         return {"name": "GPU pod", "state": "warn",
                 "detail": "TAILSCALE_IP not configured",
@@ -338,10 +329,6 @@ def probe_models() -> Dict[str, Any]:
 
 
 def probe_backups() -> Dict[str, Any]:
-    """
-    A backup that silently stopped is one of the most damaging failure modes
-    here, because nothing looks wrong until the day you need it.
-    """
     if not os.path.exists(BACKUP_LOG):
         return {"name": "Backups", "state": "warn",
                 "detail": "no backup log found",
@@ -384,14 +371,12 @@ def probe_backups() -> Dict[str, Any]:
 
 
 def probe_data() -> Dict[str, Any]:
-    """Measures the database. Never opens a chat or a document."""
     db_path = os.path.join(WEBUI_DATA, "webui.db")
     if not os.path.exists(db_path):
         return {"name": "Data", "state": "warn", "detail": "webui.db not found",
                 "hint": "Has Open WebUI started at least once?"}
     try:
         size_mb = os.path.getsize(db_path) / (1024 ** 2)
-        # Read-only URI so this can never lock out the running application.
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
         try:
             chats = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0]
@@ -408,59 +393,44 @@ def probe_data() -> Dict[str, Any]:
                 "hint": "Check integrity: ./doctor.sh"}
 
 
-
 # ---------------------------------------------------------------------------
 # JOB HISTORY
-#
-# Scheduled and manual jobs (backups, integrity checks, installs, restores)
-# write structured "EVENT ts=... event=name key=value" lines to log files. We
-# parse the last outcome of each so the status page can answer the question
-# that actually matters: "did the thing that was supposed to run, run, and did
-# it work?"
-#
-# A job that silently stopped running is the most dangerous failure mode in
-# this system, because nothing looks wrong until you need the result.
 # ---------------------------------------------------------------------------
-
-# event name -> (job label, outcome) where outcome is ok | fail | running
 _JOB_EVENTS: Dict[str, Tuple[str, str]] = {
-    "backup_success":            ("Backup", "ok"),
-    "backup_failed":             ("Backup", "fail"),
-    "backup_run_complete":       ("Backup", "ok"),
-    "check_success":             ("Integrity check", "ok"),
-    "check_failed":              ("Integrity check", "fail"),
-    "restore_success":           ("Restore", "ok"),
-    "restore_failed":            ("Restore", "fail"),
-    "restore_test_success":      ("Restore rehearsal", "ok"),
-    "restore_test_failed":       ("Restore rehearsal", "fail"),
-    "restore_test_unverified":   ("Restore rehearsal", "warn"),
-    "retention_applied":         ("Retention prune", "ok"),
-    "retention_failed":          ("Retention prune", "fail"),
-    "install_success":           ("Install / deploy", "ok"),
-    "install_failed":            ("Install / deploy", "fail"),
-    "install_aborted":           ("Install / deploy", "fail"),
-    "repo_initialised":          ("Backup repo init", "ok"),
-    "models_repulled":           ("Model re-pull", "ok"),
+    "backup_success":          ("Backup", "ok"),
+    "backup_failed":           ("Backup", "fail"),
+    "backup_run_complete":     ("Backup", "ok"),
+    "check_success":           ("Integrity check", "ok"),
+    "check_failed":            ("Integrity check", "fail"),
+    "restore_success":         ("Restore", "ok"),
+    "restore_failed":          ("Restore", "fail"),
+    "restore_test_success":    ("Restore rehearsal", "ok"),
+    "restore_test_failed":     ("Restore rehearsal", "fail"),
+    "restore_test_unverified": ("Restore rehearsal", "warn"),
+    "retention_applied":       ("Retention prune", "ok"),
+    "retention_failed":        ("Retention prune", "fail"),
+    "install_success":         ("Install / deploy", "ok"),
+    "install_failed":          ("Install / deploy", "fail"),
+    "install_aborted":         ("Install / deploy", "fail"),
+    "repo_initialised":        ("Backup repo init", "ok"),
+    "models_repulled":         ("Model re-pull", "ok"),
 }
 
-# How stale each job may become before we complain. None = never stale.
 _JOB_MAX_AGE_H: Dict[str, Optional[int]] = {
     "Backup": 36,
-    "Integrity check": 24 * 45,      # monthly timer, with slack
-    "Restore rehearsal": 24 * 120,   # quarterly, advisory
+    "Integrity check": 24 * 45,
+    "Restore rehearsal": 24 * 120,
 }
 
 _EVENT_RE = re.compile(r"^EVENT\s+ts=(\S+)\s+event=(\S+)(.*)$")
 
 
 def _parse_events(path: str, limit: int = 4000) -> List[Tuple[str, str, str]]:
-    """Return (timestamp, event_name, remainder) for each EVENT line."""
     if not os.path.exists(path):
         return []
     out: List[Tuple[str, str, str]] = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            # Only the tail matters, and these files can grow.
             for line in fh.readlines()[-limit:]:
                 match = _EVENT_RE.match(line.strip())
                 if match:
@@ -490,7 +460,6 @@ def _humanise(hours: Optional[int]) -> str:
 
 
 def probe_jobs() -> List[Dict[str, Any]]:
-    """Last known outcome of every scheduled or manual job."""
     events: List[Tuple[str, str, str]] = []
     for path in (BACKUP_LOG, INSTALL_LOG):
         events.extend(_parse_events(path))
@@ -502,8 +471,6 @@ def probe_jobs() -> List[Dict[str, Any]]:
         if not mapped:
             continue
         label, outcome = mapped
-        # "retention_applied" always follows a backup; don't let it mask the
-        # backup's own result by overwriting a more meaningful entry.
         latest[label] = {"ts": stamp, "outcome": outcome,
                          "event": name, "detail": redact(rest)[:160]}
 
@@ -512,8 +479,6 @@ def probe_jobs() -> List[Dict[str, Any]]:
                   "Retention prune", "Install / deploy"):
         entry = latest.get(label)
         if not entry:
-            # Never-run jobs are worth surfacing, but only where a user would
-            # reasonably expect them to have run by now.
             if label in ("Backup", "Integrity check"):
                 jobs.append({"name": label, "state": "warn",
                              "detail": "never run",
@@ -539,21 +504,11 @@ def probe_jobs() -> List[Dict[str, Any]]:
                         if label == "Backup" else "./backup/backup.sh --check")
         jobs.append({"name": label, "state": state, "detail": detail, "hint": hint})
 
-    # Timers tell us whether future runs will actually happen, which log
-    # history alone cannot.
     jobs.extend(_probe_timers())
     return jobs
 
 
 def _probe_timers() -> List[Dict[str, Any]]:
-    """
-    Report the systemd timer state recorded by install.sh.
-
-    The status container is isolated from the host's systemd on purpose, so it
-    cannot query timers directly. install.sh writes what it configured into
-    install.log, and we read that back. Slightly indirect, but it avoids
-    handing this container any host access it does not otherwise need.
-    """
     out: List[Dict[str, Any]] = []
     events = _parse_events(INSTALL_LOG)
     scheduled = any(name == "backup_schedule_installed" for _, name, _ in events)
@@ -573,13 +528,6 @@ def _probe_timers() -> List[Dict[str, Any]]:
 # Aggregation
 # ---------------------------------------------------------------------------
 def _safe(fn, fallback_name: str):
-    """
-    Run a probe, converting any unexpected exception into a visible row.
-
-    AVAILABILITY: a status page that returns 500 because one probe raised is
-    useless precisely when you need it. Every probe degrades to a single
-    'could not check' line instead of taking the page down.
-    """
     try:
         return fn()
     except Exception as exc:
@@ -587,15 +535,6 @@ def _safe(fn, fallback_name: str):
                 "detail": f"check failed ({type(exc).__name__})", "hint": ""}
 
 
-# PERFORMANCE: a short result cache.
-#
-# Every page load runs ~11 probes and pulls several hundred log lines from the
-# Docker API. On a Pi that is real work, and it competes for CPU with the
-# inference you are probably waiting on. Two browser tabs open on this page
-# would otherwise double it.
-#
-# A few seconds of staleness is irrelevant for a health dashboard, so results
-# are reused briefly. STATUS_CACHE_TTL=0 disables it.
 _CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
 _CACHE_TTL = float(os.getenv("STATUS_CACHE_TTL", "10"))
 _CACHE_LOCK = threading.Lock()
@@ -615,14 +554,7 @@ def collect_status(force: bool = False) -> Dict[str, Any]:
 
 
 def _collect_status_uncached() -> Dict[str, Any]:
-    # AVAILABILITY: probes run in PARALLEL, not one after another.
-    #
-    # Each probe has its own timeout of a few seconds. Run sequentially, a
-    # total outage would make every probe wait out its timeout in turn and the
-    # page would take 20+ seconds to render -- slowest exactly when something
-    # is wrong and you are staring at it. In parallel, the page is always as
-    # slow as the single slowest probe, not the sum of all of them.
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
             "webui": pool.submit(_safe, lambda: probe_http(
                 "Open WebUI", f"{WEBUI_URL}/health",
@@ -630,6 +562,12 @@ def _collect_status_uncached() -> Dict[str, Any]:
             "ollama": pool.submit(_safe, lambda: probe_http(
                 "Ollama", f"{OLLAMA_URL}/api/tags",
                 "docker compose --env-file .env logs --tail 50 ollama"), "Ollama"),
+            "hermes": pool.submit(_safe, lambda: probe_http(
+                "Hermes Agent", HERMES_URL,
+                "docker compose --env-file .env logs --tail 50 hermes-agent"), "Hermes Agent"),
+            "openhands": pool.submit(_safe, lambda: probe_http(
+                "OpenHands", OPENHANDS_URL,
+                "docker compose --env-file .env logs --tail 50 openhands"), "OpenHands"),
             "pod": pool.submit(_safe, probe_pod, "GPU pod"),
             "containers": pool.submit(_safe, probe_containers, "Containers"),
             "resources": pool.submit(_safe, probe_resources, "Resources"),
@@ -638,7 +576,7 @@ def _collect_status_uncached() -> Dict[str, Any]:
             "data": pool.submit(_safe, probe_data, "Data"),
             "jobs": pool.submit(_safe, probe_jobs, "Jobs"),
             "logs": pool.submit(lambda: {
-                name: container_logs(name, 40) for name in ("open-webui", "ollama")}),
+                name: container_logs(name, 40) for name in ("open-webui", "ollama", "hermes-agent", "openhands")}),
             "errors": pool.submit(_safe, recent_errors, "Errors"),
         }
 
@@ -648,7 +586,7 @@ def _collect_status_uncached() -> Dict[str, Any]:
             except Exception:
                 return default
 
-        services = [get("webui", {}), get("ollama", {}), get("pod", {})]
+        services = [get("webui", {}), get("ollama", {}), get("hermes", {}), get("openhands", {}), get("pod", {})]
         containers = get("containers", [])
         resources = get("resources", [])
         checks = (containers if isinstance(containers, list) else [containers])
@@ -682,17 +620,12 @@ def _collect_status_uncached() -> Dict[str, Any]:
 
 
 def recent_errors() -> List[Dict[str, str]]:
-    """The highest-signal log lines: anything that looks like a real problem."""
     pattern = re.compile(
         r"\b(error|exception|traceback|critical|fatal|refused|timeout|denied|"
         r"failed|request_failed|request_degraded)\b", re.I)
-    # Noise that matches the pattern but never indicates a fault.
     ignore = re.compile(r"(GET /health|/api/tags|0 failed|failures=0)", re.I)
     found: List[Dict[str, str]] = []
-    for name in ("open-webui", "ollama"):
-        # PERFORMANCE: 120 lines rather than 250. Each extra line is data
-        # pulled over the Docker socket and regex-scanned on every refresh;
-        # 120 still comfortably covers recent activity.
+    for name in ("open-webui", "ollama", "hermes-agent", "openhands"):
         for line in container_logs(name, 120):
             if pattern.search(line) and not ignore.search(line):
                 found.append({"source": name, "line": line[:400]})
@@ -701,11 +634,6 @@ def recent_errors() -> List[Dict[str, str]]:
 
 # ---------------------------------------------------------------------------
 # Diagnostic bundle
-#
-# Built entirely from what this service can already see. It deliberately does
-# NOT shell out to the host or read .env, so it contains no credentials at
-# all. The richer CLI collector (collect-diagnostics.sh) covers host-level
-# detail; this is the one-click version.
 # ---------------------------------------------------------------------------
 def build_diagnostic() -> str:
     data = collect_status()
@@ -720,28 +648,11 @@ def build_diagnostic() -> str:
     add("")
     add("ABOUT THIS FILE")
     add("---------------")
-    add("Diagnostics for a self-hosted AI stack: Open WebUI + Ollama in Docker")
-    add("on a Raspberry Pi, reaching an on-demand vLLM server on a rented")
-    add("RunPod GPU over a Tailscale private network.")
+    add("Diagnostics for a self-hosted AI stack: Open WebUI, Hermes, OpenHands,")
+    add("and Ollama in Docker on a Raspberry Pi, with cloud inference fallback.")
     add("")
-    add("This bundle contains NO credentials. It was produced by a service")
-    add("that is not given any. Log lines are additionally passed through a")
-    add("redaction filter. No chat content or documents were read.")
-    add("")
-    add("IF YOU ARE AN AI ASSISTANT READING THIS")
-    add("---------------------------------------")
-    add("Please identify the root cause and give specific, runnable commands.")
-    add("Context that prevents common misdiagnosis:")
-    add("  - The GPU pod is STOPPED most of the time, deliberately, to avoid")
-    add("    billing. 'stopped' or 'connection refused' for the pod is NORMAL.")
-    add("  - The pod self-stops after 15 idle minutes via a watchdog.")
-    add("  - Cold starts legitimately take 2-5 minutes while weights load.")
-    add("  - The Pi has no GPU; local models run on CPU and are slow by nature.")
-    add("  - Tailscale addresses are masked here as 100.x.x.N.")
-    add("")
-    add("For host-level detail (OS, disk, systemd timers, tailnet peers), run")
-    add("./collect-diagnostics.sh on the Pi instead.")
-
+    add("This bundle contains NO credentials. Log lines are additionally passed")
+    add("through a redaction filter. No chat content or documents were read.")
     add("")
     add("=" * 63)
     add("  SERVICES")
@@ -891,7 +802,7 @@ def render_html(data: Dict[str, Any]) -> str:
 <nav>
   <a href="/hub">Hub</a>
   <a href="/status" class="on">Status</a>
-  <a href="/openwebui">Open WebUI</a>
+  <a href="http://{html.escape(LOCAL_DOMAIN)}">Open WebUI</a>
 </nav>
 <header>
   <h1>hybrid-ai status</h1>
@@ -908,30 +819,26 @@ def render_html(data: Dict[str, Any]) -> str:
 <div class="card"><h2>System checks</h2>{_rows(data['checks'])}</div>
 
 <div class="card"><h2>Scheduled jobs — last run</h2>{_rows(data['jobs'])}
-  <div class="note">Parsed from the structured event logs written by
+  <div class="note">Parsed from structured event logs written by
   <code>backup.sh</code> and <code>install.sh</code>.</div>
 </div>
 
 <div class="card"><h2>Recent errors</h2>
   <pre>{errors}</pre>
-  <div class="note">Filtered from the last 250 log lines of each service.</div>
+  <div class="note">Filtered from recent log lines of each service.</div>
 </div>
 
 <div class="card"><h2>Log tails</h2>{tails}</div>
 
 <div class="card"><h2>Diagnostics</h2>
   <p style="margin:0 0 12px">Download a shareable bundle of the status above,
-  recent errors, and log tails. It contains no credentials and no chat content,
-  so it is safe to paste into an AI chat or attach to an issue.</p>
+  recent errors, and log tails. Contains no credentials or chat content.</p>
   <div class="btns"><button id="dl2">Download diagnostic bundle</button></div>
-  <div class="note">For host-level detail (OS, disk, systemd timers, tailnet
-  peers) run <code>./collect-diagnostics.sh</code> on the Pi.</div>
 </div>
 
-<footer>hybrid-ai · <a href="/hub">Hub</a> · <a href="/openwebui">Open WebUI</a></footer>
+<footer>hybrid-ai · <a href="/hub">Hub</a> · <a href="http://{html.escape(LOCAL_DOMAIN)}">Open WebUI</a></footer>
 </div>
 <script>
-// Build the bundle server-side, then hand it to the browser as a download.
 async function download(btn){{
   const original = btn.textContent;
   btn.disabled = true; btn.textContent = 'Building…';
@@ -954,16 +861,13 @@ async function download(btn){{
 }}
 document.getElementById('dl').onclick  = e => download(e.target);
 document.getElementById('dl2').onclick = e => download(e.target);
-// PERFORMANCE: refresh every 60s, not 30s, and only when the tab is actually
-// visible. Each refresh costs the Pi ~11 probes plus a Docker log pull, and
-// that CPU competes with the inference you are probably waiting on.
-// A backgrounded tab refreshing forever is pure waste.
+
 let timer = null;
 function schedule(){{
   clearInterval(timer);
   timer = setInterval(() => {{
     if(document.hidden) return;
-    if(document.querySelector('button:disabled')) return;  // download running
+    if(document.querySelector('button:disabled')) return;
     location.reload();
   }}, 60000);
 }}
@@ -972,12 +876,10 @@ document.addEventListener('visibilitychange', () => {{ if(!document.hidden) sche
 </script></body></html>"""
 
 
-
 def render_hub(data: Dict[str, Any]) -> str:
     """
-    The landing page at http://<pi>/ — a directory of everything available,
-    with live health so you can see at a glance whether a link is worth
-    clicking before you click it.
+    The landing page at http://<LOCAL_DOMAIN>/hub — directory of available services
+    rendered with live status indicators and clickable subdomain URLs.
     """
     by_name = {item["name"]: item for item in data["services"] + data["checks"]}
 
@@ -988,18 +890,21 @@ def render_hub(data: Dict[str, Any]) -> str:
                 f"<span style='color:var(--dim);font-size:13px'>{html.escape(detail)}</span>")
 
     tiles = [
-        ("/openwebui", "Open WebUI", "Chat, documents, and knowledge bases.",
+        (f"http://{LOCAL_DOMAIN}", "Open WebUI", "Chat, local RAG, and document workspace.",
          badge("Open WebUI")),
-        ("/status", "Status", "Service health, scheduled jobs, logs, diagnostics.",
+        (f"http://openhands.{LOCAL_DOMAIN}", "OpenHands", "Autonomous software engineering agent.",
+         badge("OpenHands")),
+        (f"http://hermes.{LOCAL_DOMAIN}", "Hermes Agent", "System orchestrator & memory engine.",
+         badge("Hermes Agent")),
+        (f"http://status.{LOCAL_DOMAIN}", "Status Dashboard", "System diagnostics, health checks, and logs.",
          f"<span class='dot {data['overall']}'></span>"
          f"<span style='color:var(--dim);font-size:13px'>{_BANNER[data['overall']]}</span>"),
-        ("/ollama/api/tags", "Ollama API", "Local model API for scripts and tools.",
-         badge("Ollama")),
     ]
 
     cards = "".join(
-        f"<a class='tile' href='{href}'><h3>{html.escape(title)}</h3>"
-        f"<p>{html.escape(desc)}</p><p style='margin-top:10px'>{state}</p></a>"
+        f"<a class='tile' href='{href}' target='_blank'><h3>{html.escape(title)}</h3>"
+        f"<p>{html.escape(desc)}</p><p style='margin-top:10px'>{state}</p>"
+        f"<code style='display:block;margin-top:8px'>{html.escape(href)}</code></a>"
         for href, title, desc, state in tiles
     )
 
@@ -1007,22 +912,23 @@ def render_hub(data: Dict[str, Any]) -> str:
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>hybrid-ai</title><style>{_CSS}</style></head><body><div class="wrap">
+<title>hybrid-ai hub</title><style>{_CSS}</style></head><body><div class="wrap">
 <nav>
   <a href="/hub" class="on">Hub</a>
-  <a href="/status">Status</a>
-  <a href="/openwebui">Open WebUI</a>
+  <a href="http://status.{html.escape(LOCAL_DOMAIN)}">Status</a>
+  <a href="http://{html.escape(LOCAL_DOMAIN)}">Open WebUI</a>
 </nav>
-<header><h1>hybrid-ai</h1></header>
-<div class="sub">Private AI on your own hardware · {html.escape(data['generated'])}</div>
+<header><h1>hybrid-ai service hub</h1></header>
+<div class="sub">Local Domain: <strong>{html.escape(LOCAL_DOMAIN)}</strong> · {html.escape(data['generated'])}</div>
 <div class="banner {data['overall']}">{_BANNER[data['overall']]}</div>
 <div class="tiles">{cards}</div>
 <div class="card" style="margin-top:18px"><h2>Addresses</h2>
-  <div class="row"><span class="nm">Chat</span><span class="dt"><code>/openwebui</code></span></div>
-  <div class="row"><span class="nm">Status</span><span class="dt"><code>/status</code></span></div>
-  <div class="row"><span class="nm">Ollama API</span><span class="dt"><code>/ollama/</code></span></div>
-  <div class="row"><span class="nm">Health (monitoring)</span><span class="dt"><code>/health</code></span></div>
-  <div class="row"><span class="nm">Status JSON</span><span class="dt"><code>/status/api</code></span></div>
+  <div class="row"><span class="nm">Open WebUI</span><span class="dt"><code>http://{html.escape(LOCAL_DOMAIN)}</code></span></div>
+  <div class="row"><span class="nm">OpenHands</span><span class="dt"><code>http://openhands.{html.escape(LOCAL_DOMAIN)}</code></span></div>
+  <div class="row"><span class="nm">Hermes Agent</span><span class="dt"><code>http://hermes.{html.escape(LOCAL_DOMAIN)}</code></span></div>
+  <div class="row"><span class="nm">Status Page</span><span class="dt"><code>http://status.{html.escape(LOCAL_DOMAIN)}</code></span></div>
+  <div class="row"><span class="nm">Ollama API</span><span class="dt"><code>http://{html.escape(LOCAL_DOMAIN)}/ollama/</code></span></div>
+  <div class="row"><span class="nm">Health Summary</span><span class="dt"><code>http://{html.escape(LOCAL_DOMAIN)}/health</code></span></div>
 </div>
 <footer>hybrid-ai</footer>
 </div></body></html>"""
@@ -1033,10 +939,9 @@ def render_hub(data: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     server_version = "hybrid-ai-status"
-    sys_version = ""                      # do not advertise the Python version
+    sys_version = ""
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # Quiet by default; health probes every few seconds would drown the log.
         if os.getenv("STATUS_ACCESS_LOG", "0") == "1":
             super().log_message(fmt, *args)
 
@@ -1045,8 +950,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # This page renders no user-supplied content, but a strict CSP costs
-        # nothing and blocks an entire class of mistakes made later.
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; style-src 'unsafe-inline'; "
                          "script-src 'unsafe-inline'; connect-src 'self'")
@@ -1059,15 +962,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:                      # noqa: N802
-        # rstrip("/") turns "/" into "", so the fallback must be the hub --
-        # otherwise a bare "/" silently served the status page instead.
+    def do_GET(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/") or "/hub"
         if path == "/status/healthz":
             self._send(200, b"ok", "text/plain; charset=utf-8")
         elif path == "/status/health-summary":
-            # Deliberately minimal: a single word and nothing else, so this can
-            # be polled by an external monitor without disclosing anything.
             try:
                 overall = collect_status()["overall"]
             except Exception:
@@ -1090,15 +989,13 @@ class Handler(BaseHTTPRequestHandler):
                 body = render_html(collect_status()).encode()
                 self._send(200, body, "text/html; charset=utf-8")
             except Exception as exc:
-                # The status page failing is itself diagnostic information --
-                # show it rather than returning an opaque 500.
                 msg = (f"<h1>Status page error</h1><pre>{html.escape(type(exc).__name__)}: "
                        f"{html.escape(redact(str(exc)))}</pre>").encode()
                 self._send(500, msg, "text/html; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
-    def do_POST(self) -> None:                     # noqa: N802
+    def do_POST(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")
         if path == "/status/diagnostic":
             try:
