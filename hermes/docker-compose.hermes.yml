@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  hermes:
+    build:
+      context: ./hermes
+      dockerfile: Dockerfile
+    container_name: hermes-agent
+    restart: unless-stopped
+    ports:
+      - "${HERMES_PORT:-8501}:8501"
+      - "${HERMES_API_PORT:-8642}:8642"
+    volumes:
+      - ./hermes_data:/root/.hermes
+      - ./:/workspace
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - LOCAL_DOMAIN=${LOCAL_DOMAIN}
