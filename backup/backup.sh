@@ -5,33 +5,33 @@
 #   Backs up everything you would be upset to lose -- your chat history, your
 #   uploaded documents, the vector database that makes document search
 #   work, Hermes Agent memories, and OpenHands configurations -- to Cloudflare
-#   R2, encrypted before it ever leaves the Pi.
+#   R2, encrypted before it ever leaves the Pi[cite: 2].
 #
-#   It runs automatically every night via a systemd timer. You can also run it
-#   by hand at any time.
+#   It runs automatically every night via a systemd timer[cite: 2]. You can also run it
+#   by hand at any time[cite: 2].
 #
 # WHY RESTIC:
-#   - Encrypts on the Pi. Cloudflare stores ciphertext and cannot read it.
+#   - Encrypts on the Pi[cite: 2]. Cloudflare stores ciphertext and cannot read it[cite: 2].
 #   - Deduplicates at block level, so the second backup of a 2 GB database
-#     uploads only the few MB that actually changed.
-#   - Keeps snapshots, so you can go back to "last Tuesday", not just "latest".
+#     uploads only the few MB that actually changed[cite: 2].
+#   - Keeps snapshots, so you can go back to "last Tuesday", not just "latest"[cite: 2].
 #
 # WHY CLOUDFLARE R2:
-#   - No egress fees. Restoring 50 GB costs nothing in bandwidth, which is
-#     exactly when you least want a surprise bill.
-#   - Roughly $0.015/GB/month stored. A typical setup costs pennies.
+#   - No egress fees[cite: 2]. Restoring 50 GB costs nothing in bandwidth, which is
+#     exactly when you least want a surprise bill[cite: 2].
+#   - Roughly $0.015/GB/month stored[cite: 2]. A typical setup costs pennies[cite: 2].
 #
 # THE HARD PART -- WHY WE DO NOT JUST COPY THE FILES:
 #   Open WebUI keeps its data in SQLite, ChromaDB keeps vectors in SQLite,
 #   and Hermes Agent stores memory state in SQLite. Copying a SQLite file
-#   while the application is writing to it produces a CORRUPT copy. It will look
-#   fine. It will back up without error. It will fail to open when you finally
-#   need it, which is the worst possible time to discover the problem.
+#   while the application is writing to it produces a CORRUPT copy[cite: 2]. It will look
+#   fine[cite: 2]. It will back up without error[cite: 2]. It will fail to open when you finally
+#   need it, which is the worst possible time to discover the problem[cite: 2].
 #
-#   So this script does NOT copy the live database files directly. It asks SQLite to
+#   So this script does NOT copy the live database files directly[cite: 2]. It asks SQLite to
 #   produce a consistent snapshot first (see snapshot_sqlite below), backs up
-#   that snapshot, and excludes the live files entirely. This is the single
-#   most important thing this script does.
+#   that snapshot, and excludes the live files entirely[cite: 2]. This is the single
+#   most important thing this script does[cite: 2].
 #
 # WHAT GETS BACKED UP:
 #   - Consistent SQLite snapshots (Open WebUI, ChromaDB, and Hermes Agent state)
@@ -42,14 +42,14 @@
 #   - A manifest recording what was captured and from which versions
 #
 # WHAT DOES NOT:
-#   - ollama_data/ -- model weights, tens of GB, freely re-downloadable.
-#     Backing them up would dominate cost for zero benefit.
+#   - ollama_data/ -- model weights, tens of GB, freely re-downloadable[cite: 2].
+#     Backing them up would dominate cost for zero benefit[cite: 2].
 #
 # USAGE:
-#   ./backup.sh             run a backup now
-#   ./backup.sh --check     verify repository integrity (slow, reads data)
-#   ./backup.sh --init      create the repository (first-time setup)
-#   ./backup.sh --dry-run   show what would be backed up, upload nothing
+#   ./backup.sh             run a backup now[cite: 2]
+#   ./backup.sh --check     verify repository integrity (slow, reads data)[cite: 2]
+#   ./backup.sh --init      create the repository (first-time setup)[cite: 2]
+#   ./backup.sh --dry-run   show what would be backed up, upload nothing[cite: 2]
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -59,28 +59,30 @@ cd "$REPO_DIR"
 
 # Credentials live OUTSIDE the git repository, in a root-only directory, so
 # that no git operation and no careless `tar czf` of the project folder can
-# ever sweep them up.
+# ever sweep them up[cite: 2].
 BACKUP_CONF_DIR="${BACKUP_CONF_DIR:-${HOME}/.config/hybrid-ai-backup}"
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
 
 # Where consistent database snapshots are staged before upload. Deliberately
-# on local disk, deliberately wiped afterwards.
+# on local disk, deliberately wiped afterwards[cite: 2].
 STAGING_DIR="${REPO_DIR}/.backup-staging"
 
 BACKUP_LOG="${BACKUP_LOG:-${REPO_DIR}/backup.log}"
 
-# Retention. Restic keeps the most recent snapshot in each bucket.
+# Retention. Restic keeps the most recent snapshot in each bucket[cite: 2].
 KEEP_DAILY="${KEEP_DAILY:-7}"
 KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
 KEEP_MONTHLY="${KEEP_MONTHLY:-6}"
 
 MODE="backup"
+NON_INTERACTIVE=0
 for arg in "$@"; do
   case "$arg" in
-    --check)   MODE="check" ;;
-    --init)    MODE="init" ;;
-    --dry-run) MODE="dryrun" ;;
+    --check)           MODE="check" ;;
+    --init)            MODE="init" ;;
+    --dry-run)         MODE="dryrun" ;;
+    --non-interactive) NON_INTERACTIVE=1 ;;
     -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -98,7 +100,7 @@ ok()   { printf '%s[ OK ]%s %s\n' "$C_OK"  "$C_RST" "$*"; }
 warn() { printf '%s[ ! ]%s %s\n'  "$C_WRN" "$C_RST" "$*" >&2; }
 
 # Structured, greppable record of every run. METADATA ONLY -- never write a
-# credential, a filename from a user document, or any chat content here.
+# credential, a filename from a user document, or any chat content here[cite: 2].
 event() {
   local name="$1"; shift
   printf 'EVENT ts=%s event=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$*" \
@@ -111,7 +113,7 @@ die() {
   exit 1
 }
 
-# AVAILABILITY: always clean up staged database copies, even on failure.
+# AVAILABILITY: always clean up staged database copies, even on failure[cite: 2].
 cleanup() {
   local rc=$?
   if declare -F unpause_webui >/dev/null 2>&1; then unpause_webui; fi
@@ -445,7 +447,33 @@ fi
 
 # ---------------------------------------------------------------------------
 # STEP 7. Upload
+#
+# Only the staging directory is passed to restic. The live application data is
+# never uploaded directly, guaranteeing every snapshot is consistent.
 # ---------------------------------------------------------------------------
+log "Checking restic repository status..."
+
+if ! restic snapshots >/dev/null 2>&1; then
+  warn "Repository at ${RESTIC_REPOSITORY} is not initialized!"
+  
+  if (( NON_INTERACTIVE )); then
+    die "Repository uninitialized and --non-interactive requested. Run: ./backup/backup.sh --init"
+  fi
+
+  read -r -p "  Initialize repository now? [Y/n]: " _init_ans < /dev/tty
+  if [[ "${_init_ans,,}" != "n" ]]; then
+    log "Initialising restic repository..."
+    if restic init; then
+      event "repo_initialised_on_demand" "host=${BACKUP_HOST}"
+      ok "Repository initialized successfully."
+    else
+      die "Failed to initialize restic repository. Check credentials and bucket name."
+    fi
+  else
+    die "Backup aborted: repository is not initialized."
+  fi
+fi
+
 log "Uploading to R2 (${STAGED_MB} MB staged, deduplicated against previous runs)..."
 BACKUP_START=$SECONDS
 
