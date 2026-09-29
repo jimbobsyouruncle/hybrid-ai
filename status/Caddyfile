@@ -2,15 +2,16 @@
 # FILE: status/Caddyfile
 # PURPOSE (plain English):
 #   Caddy is a small web server that sits in front of everything on port 80 and
-#   routes each request to the right place, so you have ONE address to remember
-#   instead of a collection of port numbers.
+#   routes each request to the right place based on local subdomains or path 
+#   prefixes, so you have friendly addresses to remember instead of port numbers.
 #
-# 		http://<pi>/ 			  the chat interface (same as /openwebui) 
-#		http://<pi>/hub 		  the hub page - links to everything
-#       http://<pi>/status        service health, jobs, logs, diagnostics
-#       http://<pi>/openwebui     the chat interface
-#       http://<pi>/ollama/       the local model API (for scripts)
-#       http://<pi>/health        one-line health summary for monitoring
+#   http://<domain>/             the primary chat interface (Open WebUI) 
+#   http://<domain>/hub          the hub page - links to all local services
+#   http://openhands.<domain>/   autonomous software engineering agent
+#   http://hermes.<domain>/      system orchestrator & persistent memory UI
+#   http://status.<domain>/      service health, jobs, logs, diagnostics
+#   http://<domain>/ollama/      the local model API (for internal scripts)
+#   http://<domain>/health       one-line health summary for monitoring
 #
 # ---------------------------------------------------------------------------
 # IMPORTANT: WHY /openwebui IS A REDIRECT, NOT A REWRITE
@@ -33,14 +34,14 @@
 # ---------------------------------------------------------------------------
 #
 # SECURITY -- READ BEFORE CHANGING:
-#   /status and /ollama expose operational detail and an UNAUTHENTICATED model
-#   API respectively. Both are restricted by source address to your own private
-#   network and Tailscale mesh. Open WebUI is not restricted here because it
-#   has its own login.
+#   /status, /ollama, /openhands, and /hermes expose operational detail, 
+#   terminal execution, or unauthenticated APIs. All sensitive endpoints are
+#   restricted by source address to your own private network and Tailscale mesh
+#   using the `trusted_only` snippet.
 #
-#   The IP allowlist is the only access control in front of /status and
-#   /ollama. Do not loosen it without adding authentication in its place -
-#   see the optional basic_auth section at the bottom of this file.
+#   The IP allowlist is the primary access control in front of these subdomains.
+#   Do not loosen it without adding authentication in its place - see the
+#   optional basic_auth section at the bottom of this file.
 # ---------------------------------------------------------------------------
 
 {
@@ -76,7 +77,10 @@
 	}
 }
 
-:80 {
+# ---------------------------------------------------------------------------
+# PRIMARY DOMAIN ROUTING: Open WebUI & Core Services
+# ---------------------------------------------------------------------------
+http://{$LOCAL_DOMAIN} {
 	# --- Hub page -----------------------------------------------------------
 	# The landing page. Served by the status service, which knows which
 	# services are actually healthy and can say so.
@@ -86,7 +90,7 @@
 		reverse_proxy hybrid-ai-status:8088
 	}
 
-	# --- Status page --------------------------------------------------------
+	# --- Status page (legacy path alias) ------------------------------------
 	handle /status* {
 		import trusted_only
 		import secure_headers
@@ -100,19 +104,6 @@
 	# --- Monitoring endpoint ------------------------------------------------
 	# Deliberately NOT IP-restricted: it returns only "ok", "warn" or "fail"
 	# with no detail, so it is safe for an uptime checker to poll.
-	#
-	# ON THE `rewrite` PLACEMENT (this used to be a subdirective of
-	# reverse_proxy, which also works on the Caddy version we pin):
-	#
-	#   `rewrite` IS a valid reverse_proxy subdirective, but only since Caddy
-	#   v2.5.1, when it was added alongside `method` to support forward_auth.
-	#   We pin caddy:2.8-alpine, so the nested form parsed fine.
-	#
-	#   It is written as a top-level directive here anyway because that form
-	#   is valid in EVERY Caddy v2 release. If someone later pins an older
-	#   image, or copies this block into another project, the nested form
-	#   would fail to parse with "unrecognized subdirective rewrite" and take
-	#   the proxy down at boot. The portable spelling costs nothing.
 	handle /health {
 		import secure_headers
 		rewrite * /status/health-summary
@@ -120,17 +111,9 @@
 	}
 
 	# --- Friendly aliases for the chat interface ----------------------------
-	# See the long note at the top of this file for why these redirect rather
-	# than rewrite. 302 (not 301) so browsers do not cache it permanently,
-	# which keeps the door open for a real rewrite later.
 	redir /openwebui /app/ 302
 	redir /chat /app/ 302
 
-	# Deep links need the alias prefix STRIPPED before the redirect target is
-	# built. A bare `redir /openwebui/* /app{uri}` sends /openwebui/c/abc to
-	# /app/openwebui/c/abc, which handle_path below strips back to
-	# /openwebui/c/abc -- a 404 inside Open WebUI. handle_path removes the
-	# matched prefix first, so {uri} here is already the remainder.
 	handle_path /openwebui/* {
 		redir * /app{uri} 302
 	}
@@ -139,32 +122,22 @@
 	}
 
 	# --- Ollama API ---------------------------------------------------------
-	# A plain REST API, so unlike Open WebUI it works perfectly under a path
-	# prefix once the prefix is stripped.
-	#
 	# SECURITY: Ollama has NO authentication of its own. Anyone who can reach
 	# this can run inference, pull models, and fill your disk. Hence the strict
-	# allowlist. It is exposed here only so scripts on your own machines can
-	# use one consistent address.
+	# allowlist.
 	handle_path /ollama/* {
 		import trusted_only
 		import secure_headers
 		reverse_proxy ollama:11434 {
-			# Ollama streams token by token; buffering would make responses
-			# arrive all at once at the end.
 			flush_interval -1
 		}
 	}
 
 	# --- Open WebUI ---------------------------------------------------------
-	# /app/* is stripped and handed to Open WebUI, which then sees the root
-	# paths it expects. Bare "/" also lands here so existing habits and
-	# bookmarks keep working.
+	# Primary interface on root domain.
 	handle_path /app/* {
 		reverse_proxy open-webui:8080 {
-			# Required for token-by-token streaming.
 			flush_interval -1
-			# Long generations must not be cut off mid-answer.
 			transport http {
 				read_timeout 600s
 				write_timeout 600s
@@ -190,7 +163,75 @@
 }
 
 # ---------------------------------------------------------------------------
-# OPTIONAL: add a password to /status and /ollama
+# SUBDOMAIN ROUTING: Software Engineering Agent (OpenHands)
+# ---------------------------------------------------------------------------
+# Subdomain routing prevents asset path conflicts (SPAs requesting root-level
+# assets). Protected strictly by trusted_only IP allowlist.
+http://openhands.{$LOCAL_DOMAIN} {
+	import trusted_only
+	import secure_headers
+
+	reverse_proxy openhands:3001 {
+		flush_interval -1
+		transport http {
+			read_timeout 3600s
+			write_timeout 3600s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+		level WARN
+	}
+}
+
+# ---------------------------------------------------------------------------
+# SUBDOMAIN ROUTING: System Orchestrator (Hermes Agent UI)
+# ---------------------------------------------------------------------------
+# Connects to the Hermes Streamlit WebUI and gateway daemon.
+http://hermes.{$LOCAL_DOMAIN} {
+	import trusted_only
+	import secure_headers
+
+	reverse_proxy hermes-agent:8501 {
+		flush_interval -1
+		transport http {
+			read_timeout 600s
+			write_timeout 600s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+		level WARN
+	}
+}
+
+# ---------------------------------------------------------------------------
+# SUBDOMAIN ROUTING: System Diagnostics & Health Dashboard
+# ---------------------------------------------------------------------------
+# Dedicated subdomain landing for system monitoring and Docker container logs.
+http://status.{$LOCAL_DOMAIN} {
+	import trusted_only
+	import secure_headers
+
+	reverse_proxy hybrid-ai-status:8088 {
+		health_uri /status/healthz
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	log {
+		output stdout
+		format console
+		level WARN
+	}
+}
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: add a password to /status, /openhands, or /hermes
 #
 # The IP allowlist stops the internet. It does not stop a guest on your wifi,
 # or another device you own that gets compromised. If that matters to you, add
@@ -199,30 +240,11 @@
 #   1. Generate a hash on the Pi:
 #        docker run --rm caddy:2-alpine caddy hash-password --plaintext 'your-password'
 #
-#   2. Add this inside the `handle /status*` block, above `reverse_proxy`:
+#   2. Add this inside any sensitive subdomain block, above `reverse_proxy`:
 #
 #        basic_auth {
 #            admin <paste-the-hash-here>
 #        }
 #
 #   3. Apply it:  ./install.sh
-#
-# The HASH is safe to keep in this file and to commit. The plaintext password
-# is not - never paste that here.
-#
-# NOTE: this file is backed up by ./backup/backup.sh, so any customisation you
-# make here survives a rebuild onto new hardware.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# DELIBERATELY NOT ROUTED: OpenHands (127.0.0.1:3001).
-#
-# The OpenHands controller mounts the Docker socket in order to create sandbox
-# containers. Socket access is effectively root on this host. It is therefore
-# bound to loopback only and reached via an SSH tunnel over Tailscale:
-#
-#     ssh -L 3001:127.0.0.1:3001 <user>@<pi-tailnet-name>
-#
-# Do not add a handle block for it. An IP allowlist is not a sufficient control
-# for a service that can execute arbitrary code as root.
 # ---------------------------------------------------------------------------
