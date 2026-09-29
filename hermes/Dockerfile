@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     build-essential \
+    libxi6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Hermes Agent CLI system-wide
