@@ -12,7 +12,8 @@
 #      rsync, tailscale) are installed, and stops with instructions if any are
 #      missing.
 #   2. Loads your existing .env file, if there is one, so it only asks you for
-#      things it does not already know.
+#      things it does not already know. It evaluates the version to determine
+#      if the structure needs to be upgraded.
 #   3. Reads your Pi's RAM and works out a safe memory budget for Ollama.
 #   4. Generates a login-session encryption key, but only the first time.
 #   5. Prompts you for your local domain, OpenRouter key, and RunPod credentials.
@@ -41,6 +42,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 ENV_FILE="${SCRIPT_DIR}/.env"
+TARGET_ENV_VERSION="2"
 
 # Peer hostnames to search for, in priority order.
 PEER_HOSTNAMES="${PEER_HOSTNAMES:-runpod-worker runpod-vllm}"
@@ -53,7 +55,7 @@ for arg in "$@"; do
     --non-interactive) NON_INTERACTIVE=1 ;;
     --no-start)         NO_START=1 ;;
     -h|--help)
-      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
@@ -164,8 +166,15 @@ if [[ -f "$ENV_FILE" ]]; then
     fi
   done < "$ENV_FILE"
   unset _line _k _v
+
+  CURRENT_ENV_VERSION="${ENV_VERSION:-0}"
+  if [[ "$CURRENT_ENV_VERSION" != "$TARGET_ENV_VERSION" ]]; then
+    log "Upgrading .env format (v${CURRENT_ENV_VERSION} -> v${TARGET_ENV_VERSION})..."
+  else
+    log ".env is up to date (v${TARGET_ENV_VERSION})."
+  fi
 else
-  log "No .env present -- generating from scratch."
+  log "No .env present -- generating from scratch (v${TARGET_ENV_VERSION})."
 fi
 
 # ---------------------------------------------------------------------------
@@ -468,6 +477,7 @@ cat > "$TMP_ENV" <<EOF
 # Contains live credentials. Never commit. Mode 0600.
 # Re-run ./install.sh to regenerate; your values are preserved.
 # ---------------------------------------------------------------------------
+ENV_VERSION=${TARGET_ENV_VERSION}
 
 # --- Local control plane & reverse proxy -----------------------------------
 LOCAL_DOMAIN=${LOCAL_DOMAIN:-yourhostname.com}
