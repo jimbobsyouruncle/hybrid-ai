@@ -272,8 +272,11 @@ services:
       - ./install.log:/data/install.log:ro
     environment:
       STATUS_PORT: "8088"
+      LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       OLLAMA_URL: http://ollama:11434
       WEBUI_URL: http://open-webui:8080
+      HERMES_URL: http://hermes:8501
+      OPENHANDS_URL: http://openhands:3000
       WEBUI_DATA_PATH: /data/webui_data
       BACKUP_LOG_PATH: /data/backup.log
       INSTALL_LOG_PATH: /data/install.log
