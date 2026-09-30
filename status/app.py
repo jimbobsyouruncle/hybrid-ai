@@ -892,7 +892,7 @@ def render_hub(data: Dict[str, Any]) -> str:
     tiles = [
         (f"http://{LOCAL_DOMAIN}", "Open WebUI", "Chat, local RAG, and document workspace.",
          badge("Open WebUI")),
-        (f"http://openhands.{LOCAL_DOMAIN}", "OpenHands", "Autonomous software engineering agent.",
+        ("http://127.0.0.1:3001", "OpenHands", "Available through the authenticated SSH tunnel.",
          badge("OpenHands")),
         (f"http://hermes.{LOCAL_DOMAIN}", "Hermes Agent", "System orchestrator & memory engine.",
          badge("Hermes Agent")),
@@ -924,7 +924,7 @@ def render_hub(data: Dict[str, Any]) -> str:
 <div class="tiles">{cards}</div>
 <div class="card" style="margin-top:18px"><h2>Addresses</h2>
   <div class="row"><span class="nm">Open WebUI</span><span class="dt"><code>http://{html.escape(LOCAL_DOMAIN)}</code></span></div>
-  <div class="row"><span class="nm">OpenHands</span><span class="dt"><code>http://openhands.{html.escape(LOCAL_DOMAIN)}</code></span></div>
+  <div class="row"><span class="nm">OpenHands</span><span class="dt"><code>http://127.0.0.1:3001 via SSH tunnel</code></span></div>
   <div class="row"><span class="nm">Hermes Agent</span><span class="dt"><code>http://hermes.{html.escape(LOCAL_DOMAIN)}</code></span></div>
   <div class="row"><span class="nm">Status Page</span><span class="dt"><code>http://status.{html.escape(LOCAL_DOMAIN)}</code></span></div>
   <div class="row"><span class="nm">Ollama API</span><span class="dt"><code>http://{html.escape(LOCAL_DOMAIN)}/ollama/</code></span></div>
