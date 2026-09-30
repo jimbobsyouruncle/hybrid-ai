@@ -337,6 +337,7 @@ services:
       # proxy only, leaving Open WebUI reachable on :3000.
       - ./webui_data/caddy:/data
     environment:
+      LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       DO_NOT_TRACK: "true"
     security_opt:
       - no-new-privileges:true
