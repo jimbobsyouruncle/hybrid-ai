@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: hermes-agent
     restart: unless-stopped
-    command: ["python3", "bootstrap.py", "--host", "0.0.0.0", "8501"]
+    command: ["python3", "bootstrap.py", "--host", "0.0.0.0", "--foreground", "--no-browser", "8501"]
     ports:
       - "${HERMES_PORT:-8501}:8501"
       - "${HERMES_API_PORT:-8642}:8642"
@@ -15,3 +15,6 @@ services:
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - LOCAL_DOMAIN=${LOCAL_DOMAIN}
+      - HERMES_WEBUI_FOREGROUND=1
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8501
