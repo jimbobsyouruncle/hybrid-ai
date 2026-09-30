@@ -91,7 +91,7 @@ WATCHED = [
     "ollama",
     "open-webui",
     "hermes-agent",
-    "openhands",
+    "hybrid-ai-openhands",
     "hybrid-ai-status",
     "hybrid-ai-proxy",
 ]
