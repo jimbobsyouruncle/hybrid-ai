@@ -1,12 +1,14 @@
 FROM python:3.11-slim
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    curl \
-    build-essential \
-    libxi6 \
-    && rm -rf /var/lib/apt/lists/*
+# Add retry flags and quiet output to prevent mirror timeouts
+RUN apt-get update -o Acquire::Retries=5 && \
+    apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        build-essential \
+        libxi6 && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Hermes Agent CLI system-wide
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
