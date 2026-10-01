@@ -86,3 +86,6 @@ Thumbs.db
 docker-compose.override.yml
 *.tar
 *.tar.gz
+
+# Hermes runtime and persistent data
+hermes_data/
