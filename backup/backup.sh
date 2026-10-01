@@ -260,51 +260,66 @@ fi
 DB_COUNT=0
 DB_FAILED=0
 
-# --- Search and snapshot all SQLite databases across webui_data & hermes_data ---
-SEARCH_PATHS=("${REPO_DIR}/webui_data" "${REPO_DIR}/hermes_data" "${HOME}/.hermes")
+# --- Snapshot only databases containing durable application state ---
+DB_PATHS=(
+  "${REPO_DIR}/webui_data/webui.db"
+  "${REPO_DIR}/webui_data/vector_db/chroma.sqlite3"
+)
 
-for search_path in "${SEARCH_PATHS[@]}"; do
-  [[ -d "$search_path" ]] || continue
-  while IFS= read -r -d '' db; do
-    rel="${db#"${REPO_DIR}/"}"
-    rel="${rel#"${HOME}/"}"
-    target="${STAGING_DIR}/databases/${rel}"
-    if snapshot_sqlite "$db" "$target"; then
-      DB_COUNT=$(( DB_COUNT + 1 ))
-    else
-      DB_FAILED=$(( DB_FAILED + 1 ))
-      warn "Could not snapshot ${rel} via SQLite API."
-    fi
-  done < <(find "$search_path" -type f \
-             \(-name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3'\) \
-             -print0 2>/dev/null || true)
+for db in "${DB_PATHS[@]}"; do
+  [[ -f "$db" ]] || continue
+  rel="${db#"${REPO_DIR}/"}"
+  target="${STAGING_DIR}/databases/${rel}"
+  if snapshot_sqlite "$db" "$target"; then
+    DB_COUNT=$(( DB_COUNT + 1 ))
+  else
+    DB_FAILED=$(( DB_FAILED + 1 ))
+    warn "Could not snapshot ${rel} via SQLite API."
+  fi
 done
 
-# --- Copy non-database files from webui_data, hermes_data, and openhands ---
-if [[ -d "${REPO_DIR}/webui_data" ]]; then
+# --- Allow-list durable non-database state ---
+if [[ -d "${REPO_DIR}/webui_data/uploads" ]]; then
+  mkdir -p "${STAGING_DIR}/files/webui_data/uploads"
+  rsync -a "${REPO_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || \
+    warn "rsync reported issues copying Open WebUI uploads; continuing."
+fi
+
+if [[ -d "${REPO_DIR}/webui_data/vector_db" ]]; then
+  mkdir -p "${STAGING_DIR}/files/webui_data/vector_db"
   rsync -a \
     --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
     --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*.db-journal' \
     --exclude='*-wal' --exclude='*-shm' \
-    --exclude='cache/' --exclude='tmp/' \
-    "${REPO_DIR}/webui_data/" "${STAGING_DIR}/files/webui_data/" 2>/dev/null || \
-    warn "rsync reported issues copying webui_data files; continuing."
+    "${REPO_DIR}/webui_data/vector_db/" "${STAGING_DIR}/files/webui_data/vector_db/" 2>/dev/null || \
+    warn "rsync reported issues copying Open WebUI vector data; continuing."
 fi
 
-if [[ -d "${REPO_DIR}/hermes_data" ]]; then
-  rsync -a \
-    --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
-    "${REPO_DIR}/hermes_data/" "${STAGING_DIR}/files/hermes_data/" 2>/dev/null || true
-fi
+# hermes_data contains reconstructable runtimes/caches. Preserve only named durable state.
+for d in memories memory skills config configs sessions; do
+  if [[ -d "${REPO_DIR}/hermes_data/${d}" ]]; then
+    mkdir -p "${STAGING_DIR}/files/hermes_data/${d}"
+    rsync -a "${REPO_DIR}/hermes_data/${d}/" "${STAGING_DIR}/files/hermes_data/${d}/" 2>/dev/null || \
+      warn "rsync reported issues copying Hermes ${d}; continuing."
+  fi
+done
 
 if [[ -d "${HOME}/.hermes" ]]; then
+  mkdir -p "${STAGING_DIR}/hermes"
   rsync -a \
+    --exclude='cache/' --exclude='tools/' --exclude='installs/' \
+    --exclude='node_modules/' --exclude='.git/' --exclude='venv/' --exclude='.venv/' \
+    --exclude='__pycache__/' --exclude='*.pyc' \
     --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
-    "${HOME}/.hermes/" "${STAGING_DIR}/hermes/" 2>/dev/null || true
+    "${HOME}/.hermes/" "${STAGING_DIR}/hermes/" 2>/dev/null || \
+    warn "rsync reported issues copying ~/.hermes durable state; continuing."
 fi
 
 if [[ -d "${HOME}/.openhands" ]]; then
-  rsync -a "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || true
+  mkdir -p "${STAGING_DIR}/openhands"
+  rsync -a --exclude='cache/' --exclude='tmp/' --exclude='logs/' \
+    "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || \
+    warn "rsync reported issues copying OpenHands state; continuing."
 fi
 
 unpause_webui
@@ -322,16 +337,15 @@ if (( DB_FAILED > 0 )); then
     rm -rf "${STAGING_DIR}/databases"
     mkdir -p "${STAGING_DIR}/databases"
     DB_COUNT=0
-    for search_path in "${SEARCH_PATHS[@]}"; do
-      [[ -d "$search_path" ]] || continue
-      while IFS= read -r -d '' db; do
-        rel="${db#"${REPO_DIR}/"}"
-        rel="${rel#"${HOME}/"}"
-        mkdir -p "$(dirname "${STAGING_DIR}/databases/${rel}")"
-        cp -a "$db" "${STAGING_DIR}/databases/${rel}" && DB_COUNT=$(( DB_COUNT + 1 ))
-      done < <(find "$search_path" -type f \
-                 \(-name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3'\) \
-                 -print0 2>/dev/null || true)
+    for db in "${DB_PATHS[@]}"; do
+      [[ -f "$db" ]] || continue
+      rel="${db#"${REPO_DIR}/"}"
+      mkdir -p "$(dirname "${STAGING_DIR}/databases/${rel}")"
+      if cp -a "$db" "${STAGING_DIR}/databases/${rel}"; then
+        DB_COUNT=$(( DB_COUNT + 1 ))
+      else
+        die "Cold-copy fallback failed for ${rel}."
+      fi
     done
     docker compose --env-file "${REPO_DIR}/.env" start open-webui hermes-agent >/dev/null 2>&1 || \
       warn "Could not restart services automatically. Run: ./install.sh"
@@ -417,10 +431,10 @@ restic_version     : $(restic version 2>/dev/null | head -n1)
 
 Contents
 --------
-databases/   Consistent SQLite snapshots (Open WebUI, ChromaDB, Hermes Agent).
-files/       Uploaded documents, vector indexes, and persistent tool states.
-hermes/      Hermes Agent skills (~/.hermes/skills) and config files.
-openhands/   OpenHands user configs and workspace settings (~/.openhands).
+databases/   Consistent Open WebUI and Chroma SQLite snapshots.
+files/       Allow-listed uploads, vector data, and durable Hermes state.
+hermes/      Durable ~/.hermes state if present; runtime/cache content excluded.
+openhands/   OpenHands user config/state; cache, temp, and logs excluded.
 host/        Deployment configurations, Caddyfile, and host metadata.
 env/         Active .env configuration.
 
@@ -516,6 +530,6 @@ SNAP_COUNT="$(restic snapshots --host "$BACKUP_HOST" --json 2>/dev/null | jq 'le
 event "backup_run_complete" "snapshots_retained=${SNAP_COUNT}"
 
 printf '\n'
-ok "Done. ${SNAP_COUNT} snapshot(s) retained for host ${BACKUP_HOST}."
+ok "Done. ${SNAP_COUNT} snapshot(s) retained for host${BACKUP_HOST}."
 printf '    Restore with : ./backup/restore.sh\n'
 printf '    Verify with  : ./backup/backup.sh --check\n\n'
