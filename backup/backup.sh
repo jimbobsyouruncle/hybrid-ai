@@ -135,7 +135,7 @@ touch "$BACKUP_LOG" 2>/dev/null && chmod 600 "$BACKUP_LOG" 2>/dev/null || true
 
 for f in "$R2_ENV_FILE" "$RESTIC_PW_FILE"; do
   perms="$(stat -c '\%a' "$f" 2>/dev/null || echo '???')"
-  [[ "$perms" == "600" ]] \vert{}\vert{} die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600${f}"
+  [[ "$perms" == "600" ]] || die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600 ${f}"
 done
 
 while IFS= read -r _line || [[ -n "$_line" ]]; do
