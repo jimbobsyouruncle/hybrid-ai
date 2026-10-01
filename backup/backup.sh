@@ -386,7 +386,7 @@ if command -v git >/dev/null 2>&1 && [[ -d "${REPO_DIR}/.git" ]]; then
     printf 'dirty=%s\n' "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   } > "${HOST_DIR}/git-state.txt" 2>/dev/null || true
   git -C "$REPO_DIR" diff HEAD > "${HOST_DIR}/uncommitted.patch" 2>/dev/null || true
-  [[ -s "${HOST_DIR}/uncommitted.patch" ]] \vert{}\vert{} rm -f "${HOST_DIR}/uncommitted.patch"
+  [[ -s "${HOST_DIR}/uncommitted.patch" ]] || rm -f "${HOST_DIR}/uncommitted.patch"
 fi
 
 {
