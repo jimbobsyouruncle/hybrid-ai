@@ -480,7 +480,7 @@ cat > "$TMP_ENV" <<EOF
 ENV_VERSION=${TARGET_ENV_VERSION}
 
 # --- Local control plane & reverse proxy -----------------------------------
-LOCAL_DOMAIN=${LOCAL_DOMAIN:-yourhostname.com}
+LOCAL_DOMAIN=${LOCAL_DOMAIN}
 
 OLLAMA_MEM_LIMIT=${OLLAMA_MEM_LIMIT}
 WEBUI_MEM_LIMIT=${WEBUI_MEM_LIMIT}
@@ -675,7 +675,6 @@ fi
 PI_LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 DOMAINS_TO_CHECK=(
   "$LOCAL_DOMAIN"
-  "openhands.$LOCAL_DOMAIN"
   "hermes.$LOCAL_DOMAIN"
   "status.$LOCAL_DOMAIN"
 )
@@ -694,8 +693,129 @@ done
 BACKUP_CONF_DIR="${HOME}/.config/hybrid-ai-backup"
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
+BACKUP_UNITS=(
+  hybrid-ai-backup.service
+  hybrid-ai-backup.timer
+  hybrid-ai-check.service
+  hybrid-ai-check.timer
+)
+
+install_backup_scheduler() {
+  local unit_dir="${HOME}/.config/systemd/user"
+  local unit source_file target_file
+  local install_failed=0
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl is unavailable. Schedule backup/backup.sh manually."
+    event "backup_schedule_missing" "reason=systemctl_missing"
+    return 1
+  fi
+
+  mkdir -p "$unit_dir"
+  chmod 700 "${HOME}/.config" 2>/dev/null || true
+  chmod 700 "${HOME}/.config/systemd" 2>/dev/null || true
+  chmod 700 "$unit_dir" 2>/dev/null || true
+
+  log "Installing backup systemd user units..."
+  for unit in "${BACKUP_UNITS[@]}"; do
+    source_file="${SCRIPT_DIR}/backup/${unit}"
+    target_file="${unit_dir}/${unit}"
+
+    if [[ ! -f "$source_file" ]]; then
+      warn "Missing backup unit template: ${source_file}"
+      event "backup_unit_install_failed" "unit=${unit}" "reason=template_missing"
+      install_failed=1
+      continue
+    fi
+
+    if ! sed "s|__REPO_DIR__|${SCRIPT_DIR}|g" "$source_file" > "${target_file}.tmp"; then
+      warn "Could not render ${unit}."
+      rm -f "${target_file}.tmp"
+      event "backup_unit_install_failed" "unit=${unit}" "reason=render_failed"
+      install_failed=1
+      continue
+    fi
+
+    chmod 0644 "${target_file}.tmp"
+    mv -f "${target_file}.tmp" "$target_file"
+  done
+
+  if (( install_failed )); then
+    warn "One or more backup units could not be installed."
+    return 1
+  fi
+
+  if ! systemctl --user daemon-reload; then
+    warn "systemd user daemon reload failed."
+    event "backup_schedule_failed" "reason=daemon_reload"
+    return 1
+  fi
+
+  for unit in "${BACKUP_UNITS[@]}"; do
+    if systemctl --user cat "$unit" >/dev/null 2>&1; then
+      ok "${unit} installed."
+    else
+      warn "${unit} is not visible to the systemd user manager."
+      event "backup_unit_install_failed" "unit=${unit}" "reason=not_loaded"
+      install_failed=1
+    fi
+  done
+
+  if (( install_failed )); then
+    return 1
+  fi
+
+  if systemctl --user enable --now hybrid-ai-backup.timer >/dev/null 2>&1; then
+    ok "Backup timer enabled and active."
+  else
+    warn "Backup timer could not be enabled or started."
+    event "backup_timer_failed"
+    return 1
+  fi
+
+  if systemctl --user enable --now hybrid-ai-check.timer >/dev/null 2>&1; then
+    ok "Integrity-check timer enabled and active."
+  else
+    warn "Integrity-check timer could not be enabled or started."
+    event "check_timer_failed"
+    return 1
+  fi
+
+  if ! systemctl --user is-enabled hybrid-ai-backup.timer >/dev/null 2>&1 ||
+     ! systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
+    warn "Backup timer verification failed."
+    event "backup_timer_verification_failed"
+    return 1
+  fi
+
+  if ! systemctl --user is-enabled hybrid-ai-check.timer >/dev/null 2>&1 ||
+     ! systemctl --user is-active hybrid-ai-check.timer >/dev/null 2>&1; then
+    warn "Integrity-check timer verification failed."
+    event "check_timer_verification_failed"
+    return 1
+  fi
+
+  # Linger requires root. Do not invoke sudo from this installer because that
+  # would make non-interactive deployments dependent on sudo policy.
+  if command -v loginctl >/dev/null 2>&1; then
+    if loginctl show-user "$USER" 2>/dev/null | grep -q '^Linger=yes$'; then
+      ok "Linger enabled; user timers continue after logout and across boot."
+    else
+      warn "Linger is disabled; user timers may stop when no user session exists."
+      warn "Optional for unattended operation: sudo loginctl enable-linger ${USER}"
+      event "backup_linger_disabled" "user=${USER}"
+    fi
+  fi
+
+  event "backup_schedule_installed" "units=${#BACKUP_UNITS[@]}"
+  return 0
+}
 
 setup_backups() {
+  local backups_configured=0
+  local newly_configured=0
+  local cf_account="" cf_bucket="" cf_key_id="" cf_secret=""
+  local tmp_env="" pw1="" pw2="" _ans="" _gen="" _first=""
 
   if ! command -v restic >/dev/null 2>&1; then
     warn "restic is not installed. Backups cannot be configured."
@@ -704,24 +824,26 @@ setup_backups() {
     return 1
   fi
 
-  local BACKUPS_ALREADY_CONFIGURED=0
-
-  if [[ -f "$R2_ENV_FILE" && -f "$RESTIC_PW_FILE" ]]; then
-    BACKUPS_ALREADY_CONFIGURED=1
-    ok "Backup credentials already configured (${BACKUP_CONF_DIR})."
-  fi
-
-  if (( ! BACKUPS_ALREADY_CONFIGURED )) && (( NON_INTERACTIVE )); then
-    warn "Backups not configured, and --non-interactive was requested."
-    warn "Run ./install.sh interactively to set them up."
-    event "backup_setup_skipped" "reason=non_interactive"
+  if ! bash -n "${SCRIPT_DIR}/backup/backup.sh"; then
+    warn "backup/backup.sh has a syntax error. Backup scheduling was not changed."
+    event "backup_setup_failed" "reason=backup_script_syntax"
     return 1
   fi
 
-  mkdir -p "$BACKUP_CONF_DIR"
-  chmod 700 "$BACKUP_CONF_DIR"
+  if [[ -f "$R2_ENV_FILE" && -f "$RESTIC_PW_FILE" ]]; then
+    backups_configured=1
+    ok "Backup credentials already configured (${BACKUP_CONF_DIR})."
+  elif [[ -f "$R2_ENV_FILE" || -f "$RESTIC_PW_FILE" ]]; then
+    warn "Backup configuration is incomplete. Both r2.env and repo-password are required."
+    event "backup_setup_incomplete"
+  fi
 
-  if (( ! BACKUPS_ALREADY_CONFIGURED )); then
+  if (( ! backups_configured )); then
+    if (( NON_INTERACTIVE )); then
+      warn "Backups are not configured; skipping credential prompts in non-interactive mode."
+      event "backup_setup_skipped" "reason=non_interactive"
+      return 1
+    fi
 
     hr
     printf '  %sEncrypted offsite backups%s\n\n' "$C_INF" "$C_RST"
@@ -730,24 +852,22 @@ setup_backups() {
     printf '  Cloudflare stores only ciphertext and cannot read any of it.\n\n'
 
     read -r -p "  Configure backups now? [Y/n]: " _ans < /dev/tty
-
     if [[ "${_ans,,}" == "n" ]]; then
       warn "Skipping. Re-run ./install.sh at any time to configure backups."
       event "backup_setup_declined"
       return 1
     fi
 
-    local cf_account cf_bucket cf_key_id cf_secret
+    mkdir -p "$BACKUP_CONF_DIR"
+    chmod 700 "$BACKUP_CONF_DIR"
 
-    while [[ -z "${cf_account:-}" ]]; do
+    while [[ -z "$cf_account" ]]; do
       read -r -p "    Cloudflare account ID: " cf_account < /dev/tty
-
       cf_account="${cf_account#https://}"
       cf_account="${cf_account#http://}"
       cf_account="${cf_account%%/*}"
       cf_account="${cf_account%%.r2.cloudflarestorage.com*}"
       cf_account="$(printf '%s' "$cf_account" | tr -d '[:space:]')"
-
       [[ -n "$cf_account" ]] || warn "Account ID cannot be empty."
     done
 
@@ -755,53 +875,41 @@ setup_backups() {
     cf_bucket="${cf_bucket:-hybrid-ai-backup}"
     cf_bucket="$(printf '%s' "$cf_bucket" | tr -d '[:space:]')"
 
-    while [[ -z "${cf_key_id:-}" ]]; do
+    while [[ -z "$cf_key_id" ]]; do
       read -r -p "    R2 Access Key ID: " cf_key_id < /dev/tty
       cf_key_id="$(printf '%s' "$cf_key_id" | tr -d '[:space:]')"
     done
 
-    while [[ -z "${cf_secret:-}" ]]; do
+    while [[ -z "$cf_secret" ]]; do
       read -r -s -p "    R2 Secret Access Key: " cf_secret < /dev/tty
       echo
       cf_secret="$(printf '%s' "$cf_secret" | tr -d '[:space:]')"
     done
 
-    printf '\n    A repository password encrypts your backups.\n'
+    if [[ ! -f "$RESTIC_PW_FILE" ]]; then
+      printf '\n    A repository password encrypts your backups.\n'
+      read -r -p "    Generate a strong one automatically? [Y/n]: " _gen < /dev/tty
 
-    read -r -p "    Generate a strong one automatically? [Y/n]: " _gen < /dev/tty
-
-    if [[ "${_gen,,}" == "n" ]]; then
-
-      local pw1 pw2
-
-      while :; do
-        read -r -s -p "    Enter repository password: " pw1 < /dev/tty
-        echo
-        read -r -s -p "    Confirm: " pw2 < /dev/tty
-        echo
-
-        [[ "$pw1" == "$pw2" && -n "$pw1" ]] && break
-
-        warn "Passwords did not match, or were empty."
-      done
-
-      printf '%s\n' "$pw1" > "$RESTIC_PW_FILE"
-
-    else
-
-      openssl rand -base64 48 > "$RESTIC_PW_FILE"
-
+      if [[ "${_gen,,}" == "n" ]]; then
+        while :; do
+          read -r -s -p "    Enter repository password: " pw1 < /dev/tty
+          echo
+          read -r -s -p "    Confirm: " pw2 < /dev/tty
+          echo
+          [[ "$pw1" == "$pw2" && -n "$pw1" ]] && break
+          warn "Passwords did not match, or were empty."
+        done
+        printf '%s\n' "$pw1" > "$RESTIC_PW_FILE"
+      else
+        openssl rand -base64 48 > "$RESTIC_PW_FILE"
+      fi
+      chmod 600 "$RESTIC_PW_FILE"
     fi
 
-    chmod 600 "$RESTIC_PW_FILE"
-
-    local tmp_env
     tmp_env="$(mktemp "${BACKUP_CONF_DIR}/.r2.XXXXXX")"
-
     chmod 600 "$tmp_env"
-
     cat > "$tmp_env" <<EOF2
-# hybrid-ai backup credentials
+# hybrid-ai backup credentials -- generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
 RESTIC_REPOSITORY=s3:https://${cf_account}.r2.cloudflarestorage.com/${cf_bucket}
 RESTIC_PASSWORD_FILE=${RESTIC_PW_FILE}
 AWS_ACCESS_KEY_ID=${cf_key_id}
@@ -809,167 +917,58 @@ AWS_SECRET_ACCESS_KEY=${cf_secret}
 AWS_DEFAULT_REGION=auto
 RESTIC_HOST=$(hostname -s)
 EOF2
-
     mv -f "$tmp_env" "$R2_ENV_FILE"
     chmod 600 "$R2_ENV_FILE"
-
-    unset cf_secret
-
+    unset cf_secret pw1 pw2
     ok "Credentials written to ${R2_ENV_FILE} (0600)."
 
     log "Initialising the encrypted repository..."
-
     if "${SCRIPT_DIR}/backup/backup.sh" --init; then
+      newly_configured=1
       event "backup_repo_ready" "bucket=${cf_bucket}"
     else
-      warn "Repository initialisation failed."
+      warn "Repository initialisation failed. Check credentials and bucket name."
       event "backup_setup_failed" "reason=init"
       return 1
     fi
   fi
 
-  #
-  # Always repair scheduler installation
-  #
+  # Scheduler repair runs on every installation, even when credentials already exist.
+  install_backup_scheduler || warn "Backup credentials exist, but scheduler installation needs attention."
 
-  local unit_dir="${HOME}/.config/systemd/user"
-
-  mkdir -p "$unit_dir"
-
-  log "Installing backup systemd user services..."
-
-  local installed=0
-
-  for unit in \
-      hybrid-ai-backup.service \
-      hybrid-ai-backup.timer \
-      hybrid-ai-check.service \
-      hybrid-ai-check.timer
-  do
-
-    if [[ -f "${SCRIPT_DIR}/backup/${unit}" ]]; then
-
-      sed "s|__REPO_DIR__|${SCRIPT_DIR}|g" \
-        "${SCRIPT_DIR}/backup/${unit}" \
-        > "${unit_dir}/${unit}"
-
-      chmod 0644 "${unit_dir}/${unit}"
-
-      installed=$((installed + 1))
-
-    else
-
-      warn "Missing unit file: ${unit}"
-
-    fi
-
-  done
-
-  if (( installed == 4 )) && command -v systemctl >/dev/null 2>&1; then
-
-    systemctl --user daemon-reload
-
-    for unit in \
-      hybrid-ai-backup.service \
-      hybrid-ai-backup.timer \
-      hybrid-ai-check.service \
-      hybrid-ai-check.timer
-    do
-
-      if systemctl --user cat "$unit" >/dev/null 2>&1; then
-        ok "$unit installed."
+  if (( newly_configured )); then
+    read -r -p "  Run the first backup now? [Y/n]: " _first < /dev/tty
+    if [[ "${_first,,}" != "n" ]]; then
+      if "${SCRIPT_DIR}/backup/backup.sh"; then
+        ok "First backup completed successfully."
+        event "backup_validation_success"
       else
-        warn "$unit failed to install."
-        event "backup_unit_install_failed" "unit=${unit}"
+        warn "First backup failed. See backup.log."
+        event "backup_validation_failed"
       fi
-
-    done
-
-    systemctl --user enable hybrid-ai-backup.timer >/dev/null 2>&1
-    systemctl --user start  hybrid-ai-backup.timer  >/dev/null 2>&1
-
-    systemctl --user enable hybrid-ai-check.timer >/dev/null 2>&1
-    systemctl --user start  hybrid-ai-check.timer  >/dev/null 2>&1
-
-    if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
-      ok "Backup timer active."
-    else
-      warn "Backup timer failed to start."
-      event "backup_timer_failed"
     fi
 
-    if systemctl --user is-enabled hybrid-ai-backup.timer >/dev/null 2>&1; then
-      ok "Backup timer enabled."
-    else
-      warn "Backup timer not enabled."
-      event "backup_timer_not_enabled"
-    fi
-
-    if command -v loginctl >/dev/null 2>&1; then
-
-      if loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
-
-        ok "Linger already enabled."
-
-      else
-
-        if sudo -n loginctl enable-linger "$USER" 2>/dev/null; then
-          ok "Enabled linger so backups run while logged out."
-        else
-          warn "Run manually:"
-          printf '      sudo loginctl enable-linger %s\n' "$USER"
-        fi
-
-      fi
-
-    fi
-
-    log "Running backup validation test..."
-
-    if systemctl --user start hybrid-ai-backup.service >/dev/null 2>&1; then
-
-      sleep 5
-
-      if grep -q 'event=backup_success' "${SCRIPT_DIR}/backup.log" 2>/dev/null; then
-        ok "Backup validation successful."
-      else
-        warn "Backup validation completed but no success event was found."
-      fi
-
-    fi
-
-    event "backup_schedule_installed" "units=${installed}"
-
-  else
-
-    warn "systemd user units unavailable. Schedule backup.sh manually."
-    event "backup_schedule_missing"
-
+    hr
+    printf '  %sSTORE YOUR REPOSITORY PASSWORD SOMEWHERE OFF THIS PI.%s\n\n' "$C_WRN" "$C_RST"
+    printf '    cat %s\n\n' "$RESTIC_PW_FILE"
+    hr
   fi
-
-  read -r -p "  Run the first backup now? [Y/n]: " _first < /dev/tty
-
-  if [[ "${_first,,}" != "n" ]]; then
-    "${SCRIPT_DIR}/backup/backup.sh" || warn "First backup failed. See backup.log."
-  fi
-
-  hr
-  printf '  %sSTORE YOUR REPOSITORY PASSWORD SOMEWHERE OFF THIS PI.%s\n\n' "$C_WRN" "$C_RST"
-  printf '    cat %s\n\n' "$RESTIC_PW_FILE"
-  hr
 
   return 0
 }
 
 setup_backups || true
 
-event "install_success" "ollama_limit=${OLLAMA_MEM_LIMIT}" "peer_resolved=${TAILSCALE_IP:+yes}" "backups=$([[ -f "$R2_ENV_FILE" ]] && echo configured || echo none)"
+event "install_success" \
+  "ollama_limit=${OLLAMA_MEM_LIMIT}" \
+  "peer_resolved=${TAILSCALE_IP:+yes}" \
+  "backups=$([[ -f "$R2_ENV_FILE" && -f "$RESTIC_PW_FILE" ]] && echo configured || echo none)"
 
 hr
 ok "Control plane stack is up."
 printf '\n    Service Hub  : http://%s/hub\n' "${LOCAL_DOMAIN}"
 printf '    Open WebUI   : http://%s\n' "${LOCAL_DOMAIN}"
-printf '    OpenHands    : http://openhands.%s\n' "${LOCAL_DOMAIN}"
+printf '    OpenHands    : SSH tunnel to http://127.0.0.1:%s\n' "${OPENHANDS_PORT:-3001}"
 printf '    Hermes Agent : http://hermes.%s\n' "${LOCAL_DOMAIN}"
 printf '    Status Page  : http://status.%s\n' "${LOCAL_DOMAIN}"
 printf '    Ollama API   : http://%s/ollama/\n' "${LOCAL_DOMAIN}"
@@ -988,11 +987,13 @@ if ((${#MISSING_DNS[@]} > 0)); then
   done
   hr
 else
-  ok "All local subdomains resolve successfully via local DNS!"
+  ok "All required local hostnames resolve successfully via local DNS!"
 fi
 
 printf '\n  Next steps:\n'
 printf '    1. Open http://%s and log in / set up admin\n' "${LOCAL_DOMAIN}"
 printf '    2. Open http://hermes.%s to view persistent memories and skills\n' "${LOCAL_DOMAIN}"
-printf '    3. Open http://openhands.%s for agentic code refactoring\n' "${LOCAL_DOMAIN}"
-printf '    4. Check stack health anytime at http://status.%s or run ./doctor.sh\n\n' "${LOCAL_DOMAIN}"
+printf '    3. From your client, run: ssh -N -L 127.0.0.1:%s:127.0.0.1:%s %s@%s\n' \
+  "${OPENHANDS_PORT:-3001}" "${OPENHANDS_PORT:-3001}" "${USER}" "${PI_HOST}"
+printf '       Then open http://127.0.0.1:%s for OpenHands\n' "${OPENHANDS_PORT:-3001}"
+printf '    4. Check stack health at http://status.%s or run ./doctor.sh\n\n' "${LOCAL_DOMAIN}"
