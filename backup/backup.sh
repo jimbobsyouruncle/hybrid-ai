@@ -108,7 +108,7 @@ event() {
 }
 
 die() {
-  event "backup_failed" "detail=$(printf '\%s' "$*" | tr -d '\n' | cut -c1-160)"
+  event "backup_failed" "detail=$(printf '%s' "$*" | tr -d '\n' | cut -c1-160)"
   printf '%s[ X ]%s %s\n' "$C_ERR" "$C_RST" "$*" >&2
   exit 1
 }
@@ -134,7 +134,7 @@ touch "$BACKUP_LOG" 2>/dev/null && chmod 600 "$BACKUP_LOG" 2>/dev/null || true
 [[ -f "$RESTIC_PW_FILE" ]] || die "No repository password at ${RESTIC_PW_FILE}."
 
 for f in "$R2_ENV_FILE" "$RESTIC_PW_FILE"; do
-  perms="$(stat -c '\%a' "$f" 2>/dev/null || echo '???')"
+  perms="$(stat -c '%a' "$f" 2>/dev/null || echo '???')"
   [[ "$perms" == "600" ]] || die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600 ${f}"
 done
 
@@ -143,8 +143,8 @@ while IFS= read -r _line || [[ -n "$_line" ]]; do
   [[ "$_line" =~ ^[[:space:]]*$ ]] && continue
   if [[ "$_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
     _k="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
-    _v="${_v\%\"}"; _v="${_v#\"}"; _v="${_v\%\'}"; _v="${_v#\'}"
-    printf -v "$_k" '\%s' "$_v"
+    _v="${_v%\"}"; _v="${_v#\"}"; _v="${_v%\'}"; _v="${_v#\'}"
+    printf -v "$_k" '%s' "$_v"
     export "${_k?}"
   fi
 done < "$R2_ENV_FILE"
@@ -516,6 +516,6 @@ SNAP_COUNT="$(restic snapshots --host "$BACKUP_HOST" --json 2>/dev/null | jq 'le
 event "backup_run_complete" "snapshots_retained=${SNAP_COUNT}"
 
 printf '\n'
-ok "Done. ${SNAP_COUNT} snapshot(s) retained for host${BACKUP_HOST}."
+ok "Done. ${SNAP_COUNT} snapshot(s) retained for host ${BACKUP_HOST}."
 printf '    Restore with : ./backup/restore.sh\n'
 printf '    Verify with  : ./backup/backup.sh --check\n\n'
