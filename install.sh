@@ -808,34 +808,123 @@ EOF2
 
   local unit_dir="${HOME}/.config/systemd/user"
   mkdir -p "$unit_dir"
+
+  log "Installing backup systemd user services..."
+
   local installed=0
-  for unit in hybrid-ai-backup.service hybrid-ai-backup.timer \
-              hybrid-ai-check.service hybrid-ai-check.timer; do
+  for unit in \
+    hybrid-ai-backup.service \
+    hybrid-ai-backup.timer \
+    hybrid-ai-check.service \
+    hybrid-ai-check.timer
+  do
     if [[ -f "${SCRIPT_DIR}/backup/${unit}" ]]; then
-      sed "s|__REPO_DIR__|${SCRIPT_DIR}|g" "${SCRIPT_DIR}/backup/${unit}" > "${unit_dir}/${unit}"
-      installed=$(( installed + 1 ))
+      sed "s|__REPO_DIR__|${SCRIPT_DIR}|g" \
+        "${SCRIPT_DIR}/backup/${unit}" \
+        > "${unit_dir}/${unit}"
+
+      chmod 0644 "${unit_dir}/${unit}"
+
+      installed=$((installed + 1))
+    else
+      warn "Missing unit file: ${SCRIPT_DIR}/backup/${unit}"
     fi
   done
 
-  if (( installed > 0 )) && command -v systemctl >/dev/null 2>&1; then
-    systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user enable --now hybrid-ai-backup.timer 2>/dev/null || true
-    systemctl --user enable --now hybrid-ai-check.timer  2>/dev/null || true
+  if (( installed == 4 )) && command -v systemctl >/dev/null 2>&1; then
+
+    systemctl --user daemon-reload
+
+    for unit in \
+      hybrid-ai-backup.service \
+      hybrid-ai-backup.timer \
+      hybrid-ai-check.service \
+      hybrid-ai-check.timer
+    do
+      if systemctl --user cat "$unit" >/dev/null 2>&1; then
+        ok "$unit installed."
+      else
+        warn "$unit failed to install."
+        event "backup_unit_install_failed" "unit=${unit}"
+      fi
+    done
+
+    systemctl --user enable --now hybrid-ai-backup.timer
+    systemctl --user enable --now hybrid-ai-check.timer
+
+    if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
+      ok "Backup timer active."
+    else
+      warn "Backup timer failed to start."
+      warn "Run: systemctl --user status hybrid-ai-backup.timer"
+      event "backup_timer_failed"
+    fi
+
+    if systemctl --user is-active hybrid-ai-check.timer >/dev/null 2>&1; then
+      ok "Integrity check timer active."
+    else
+      warn "Integrity check timer failed to start."
+      event "check_timer_failed"
+    fi
 
     if command -v loginctl >/dev/null 2>&1; then
-      if ! loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
+
+      if loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
+
+        ok "Linger already enabled."
+
+      else
+
         if sudo -n loginctl enable-linger "$USER" 2>/dev/null; then
-          ok "Enabled linger so backups run without an active login."
+
+          if loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
+            ok "Enabled linger so backups run without an active login."
+          else
+            warn "enable-linger returned success but linger is still disabled."
+            event "linger_verification_failed"
+          fi
+
         else
-          warn "Run this so backups happen when you are not logged in:"
+
+          warn "Backups will stop when you log out."
+          warn "Run manually:"
           printf '      sudo loginctl enable-linger %s\n' "$USER"
+
+          event "linger_enable_failed"
         fi
       fi
     fi
+
     ok "Nightly backup scheduled (03:15) and monthly verification enabled."
     event "backup_schedule_installed" "units=${installed}"
+
+    log "Running backup validation test..."
+
+    if systemctl --user start hybrid-ai-backup.service 2>/dev/null; then
+
+      sleep 5
+
+      if grep -q 'event=backup_success' "${SCRIPT_DIR}/backup.log" 2>/dev/null; then
+        ok "Backup validation successful."
+        event "backup_validation_success"
+      else
+        warn "Backup validation completed but no success event was found."
+        warn "Review backup.log for details."
+        event "backup_validation_warning"
+      fi
+
+    else
+
+      warn "Unable to start backup service for validation."
+      event "backup_validation_failed"
+
+    fi
+
   else
+
     warn "systemd user units unavailable. Schedule backup.sh manually via cron."
+    event "backup_schedule_missing"
+
   fi
 
   read -r -p "  Run the first backup now? [Y/n]: " _first < /dev/tty
