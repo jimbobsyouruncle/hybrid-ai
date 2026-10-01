@@ -696,6 +696,7 @@ R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
 
 setup_backups() {
+
   if ! command -v restic >/dev/null 2>&1; then
     warn "restic is not installed. Backups cannot be configured."
     printf '    Install it with: sudo apt-get install -y restic\n'
@@ -703,88 +704,104 @@ setup_backups() {
     return 1
   fi
 
+  local BACKUPS_ALREADY_CONFIGURED=0
+
   if [[ -f "$R2_ENV_FILE" && -f "$RESTIC_PW_FILE" ]]; then
-    ok "Backups already configured (${BACKUP_CONF_DIR})."
-    return 0
+    BACKUPS_ALREADY_CONFIGURED=1
+    ok "Backup credentials already configured (${BACKUP_CONF_DIR})."
   fi
 
-  if (( NON_INTERACTIVE )); then
+  if (( ! BACKUPS_ALREADY_CONFIGURED )) && (( NON_INTERACTIVE )); then
     warn "Backups not configured, and --non-interactive was requested."
     warn "Run ./install.sh interactively to set them up."
     event "backup_setup_skipped" "reason=non_interactive"
     return 1
   fi
 
-  hr
-  printf '  %sEncrypted offsite backups%s\n\n' "$C_INF" "$C_RST"
-  printf '  Your chat history, documents, and vector database can be backed up\n'
-  printf '  nightly to Cloudflare R2, encrypted on this Pi before upload.\n'
-  printf '  Cloudflare stores only ciphertext and cannot read any of it.\n\n'
-
-  read -r -p "  Configure backups now? [Y/n]: " _ans < /dev/tty
-  if [[ "${_ans,,}" == "n" ]]; then
-    warn "Skipping. Re-run ./install.sh at any time to configure backups."
-    event "backup_setup_declined"
-    return 1
-  fi
-
   mkdir -p "$BACKUP_CONF_DIR"
   chmod 700 "$BACKUP_CONF_DIR"
 
-  local cf_account cf_bucket cf_key_id cf_secret
-  while [[ -z "${cf_account:-}" ]]; do
-    read -r -p "    Cloudflare account ID: " cf_account < /dev/tty
+  if (( ! BACKUPS_ALREADY_CONFIGURED )); then
 
-    # --- Input Sanitization ------------------------------------------------
-    # Strip leading scheme, trailing paths/slashes, and domain suffixes
-    cf_account="${cf_account#https://}"
-    cf_account="${cf_account#http://}"
-    cf_account="${cf_account%%/*}"
-    cf_account="${cf_account%%.r2.cloudflarestorage.com*}"
-    cf_account="$(printf '%s' "$cf_account" | tr -d '[:space:]')"
+    hr
+    printf '  %sEncrypted offsite backups%s\n\n' "$C_INF" "$C_RST"
+    printf '  Your chat history, documents, and vector database can be backed up\n'
+    printf '  nightly to Cloudflare R2, encrypted on this Pi before upload.\n'
+    printf '  Cloudflare stores only ciphertext and cannot read any of it.\n\n'
 
-    if [[ -z "$cf_account" ]]; then
-      warn "Account ID cannot be empty."
+    read -r -p "  Configure backups now? [Y/n]: " _ans < /dev/tty
+
+    if [[ "${_ans,,}" == "n" ]]; then
+      warn "Skipping. Re-run ./install.sh at any time to configure backups."
+      event "backup_setup_declined"
+      return 1
     fi
-  done
 
-  read -r -p "    R2 bucket name [hybrid-ai-backup]: " cf_bucket < /dev/tty
-  cf_bucket="${cf_bucket:-hybrid-ai-backup}"
-  cf_bucket="$(printf '%s' "$cf_bucket" | tr -d '[:space:]')"
+    local cf_account cf_bucket cf_key_id cf_secret
 
-  while [[ -z "${cf_key_id:-}" ]]; do
-    read -r -p "    R2 Access Key ID: " cf_key_id < /dev/tty
-    cf_key_id="$(printf '%s' "$cf_key_id" | tr -d '[:space:]')"
-  done
-  while [[ -z "${cf_secret:-}" ]]; do
-    read -r -s -p "    R2 Secret Access Key: " cf_secret < /dev/tty; echo
-    cf_secret="$(printf '%s' "$cf_secret" | tr -d '[:space:]')"
-  done
+    while [[ -z "${cf_account:-}" ]]; do
+      read -r -p "    Cloudflare account ID: " cf_account < /dev/tty
 
-  if [[ ! -f "$RESTIC_PW_FILE" ]]; then
+      cf_account="${cf_account#https://}"
+      cf_account="${cf_account#http://}"
+      cf_account="${cf_account%%/*}"
+      cf_account="${cf_account%%.r2.cloudflarestorage.com*}"
+      cf_account="$(printf '%s' "$cf_account" | tr -d '[:space:]')"
+
+      [[ -n "$cf_account" ]] || warn "Account ID cannot be empty."
+    done
+
+    read -r -p "    R2 bucket name [hybrid-ai-backup]: " cf_bucket < /dev/tty
+    cf_bucket="${cf_bucket:-hybrid-ai-backup}"
+    cf_bucket="$(printf '%s' "$cf_bucket" | tr -d '[:space:]')"
+
+    while [[ -z "${cf_key_id:-}" ]]; do
+      read -r -p "    R2 Access Key ID: " cf_key_id < /dev/tty
+      cf_key_id="$(printf '%s' "$cf_key_id" | tr -d '[:space:]')"
+    done
+
+    while [[ -z "${cf_secret:-}" ]]; do
+      read -r -s -p "    R2 Secret Access Key: " cf_secret < /dev/tty
+      echo
+      cf_secret="$(printf '%s' "$cf_secret" | tr -d '[:space:]')"
+    done
+
     printf '\n    A repository password encrypts your backups.\n'
+
     read -r -p "    Generate a strong one automatically? [Y/n]: " _gen < /dev/tty
+
     if [[ "${_gen,,}" == "n" ]]; then
+
       local pw1 pw2
+
       while :; do
-        read -r -s -p "    Enter repository password: " pw1 < /dev/tty; echo
-        read -r -s -p "    Confirm: " pw2 < /dev/tty; echo
+        read -r -s -p "    Enter repository password: " pw1 < /dev/tty
+        echo
+        read -r -s -p "    Confirm: " pw2 < /dev/tty
+        echo
+
         [[ "$pw1" == "$pw2" && -n "$pw1" ]] && break
+
         warn "Passwords did not match, or were empty."
       done
-      printf '%s\n' "$pw1" > "$RESTIC_PW_FILE"
-      unset pw1 pw2
-    else
-      openssl rand -base64 48 > "$RESTIC_PW_FILE"
-    fi
-    chmod 600 "$RESTIC_PW_FILE"
-  fi
 
-  local tmp_env
-  tmp_env="$(mktemp "${BACKUP_CONF_DIR}/.r2.XXXXXX")"
-  chmod 600 "$tmp_env"
-  cat > "$tmp_env" <<EOF2
-# hybrid-ai backup credentials -- generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
+      printf '%s\n' "$pw1" > "$RESTIC_PW_FILE"
+
+    else
+
+      openssl rand -base64 48 > "$RESTIC_PW_FILE"
+
+    fi
+
+    chmod 600 "$RESTIC_PW_FILE"
+
+    local tmp_env
+    tmp_env="$(mktemp "${BACKUP_CONF_DIR}/.r2.XXXXXX")"
+
+    chmod 600 "$tmp_env"
+
+    cat > "$tmp_env" <<EOF2
+# hybrid-ai backup credentials
 RESTIC_REPOSITORY=s3:https://${cf_account}.r2.cloudflarestorage.com/${cf_bucket}
 RESTIC_PASSWORD_FILE=${RESTIC_PW_FILE}
 AWS_ACCESS_KEY_ID=${cf_key_id}
@@ -792,33 +809,46 @@ AWS_SECRET_ACCESS_KEY=${cf_secret}
 AWS_DEFAULT_REGION=auto
 RESTIC_HOST=$(hostname -s)
 EOF2
-  mv -f "$tmp_env" "$R2_ENV_FILE"
-  chmod 600 "$R2_ENV_FILE"
-  unset cf_secret
-  ok "Credentials written to ${R2_ENV_FILE} (0600)."
 
-  log "Initialising the encrypted repository..."
-  if "${SCRIPT_DIR}/backup/backup.sh" --init; then
-    event "backup_repo_ready" "bucket=${cf_bucket}"
-  else
-    warn "Repository initialisation failed. Check credentials and bucket name."
-    event "backup_setup_failed" "reason=init"
-    return 1
+    mv -f "$tmp_env" "$R2_ENV_FILE"
+    chmod 600 "$R2_ENV_FILE"
+
+    unset cf_secret
+
+    ok "Credentials written to ${R2_ENV_FILE} (0600)."
+
+    log "Initialising the encrypted repository..."
+
+    if "${SCRIPT_DIR}/backup/backup.sh" --init; then
+      event "backup_repo_ready" "bucket=${cf_bucket}"
+    else
+      warn "Repository initialisation failed."
+      event "backup_setup_failed" "reason=init"
+      return 1
+    fi
   fi
 
+  #
+  # Always repair scheduler installation
+  #
+
   local unit_dir="${HOME}/.config/systemd/user"
+
   mkdir -p "$unit_dir"
 
   log "Installing backup systemd user services..."
 
   local installed=0
+
   for unit in \
-    hybrid-ai-backup.service \
-    hybrid-ai-backup.timer \
-    hybrid-ai-check.service \
-    hybrid-ai-check.timer
+      hybrid-ai-backup.service \
+      hybrid-ai-backup.timer \
+      hybrid-ai-check.service \
+      hybrid-ai-check.timer
   do
+
     if [[ -f "${SCRIPT_DIR}/backup/${unit}" ]]; then
+
       sed "s|__REPO_DIR__|${SCRIPT_DIR}|g" \
         "${SCRIPT_DIR}/backup/${unit}" \
         > "${unit_dir}/${unit}"
@@ -826,9 +856,13 @@ EOF2
       chmod 0644 "${unit_dir}/${unit}"
 
       installed=$((installed + 1))
+
     else
-      warn "Missing unit file: ${SCRIPT_DIR}/backup/${unit}"
+
+      warn "Missing unit file: ${unit}"
+
     fi
+
   done
 
   if (( installed == 4 )) && command -v systemctl >/dev/null 2>&1; then
@@ -841,30 +875,34 @@ EOF2
       hybrid-ai-check.service \
       hybrid-ai-check.timer
     do
+
       if systemctl --user cat "$unit" >/dev/null 2>&1; then
         ok "$unit installed."
       else
         warn "$unit failed to install."
         event "backup_unit_install_failed" "unit=${unit}"
       fi
+
     done
 
-    systemctl --user enable --now hybrid-ai-backup.timer
-    systemctl --user enable --now hybrid-ai-check.timer
+    systemctl --user enable hybrid-ai-backup.timer >/dev/null 2>&1
+    systemctl --user start  hybrid-ai-backup.timer  >/dev/null 2>&1
+
+    systemctl --user enable hybrid-ai-check.timer >/dev/null 2>&1
+    systemctl --user start  hybrid-ai-check.timer  >/dev/null 2>&1
 
     if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
       ok "Backup timer active."
     else
       warn "Backup timer failed to start."
-      warn "Run: systemctl --user status hybrid-ai-backup.timer"
       event "backup_timer_failed"
     fi
 
-    if systemctl --user is-active hybrid-ai-check.timer >/dev/null 2>&1; then
-      ok "Integrity check timer active."
+    if systemctl --user is-enabled hybrid-ai-backup.timer >/dev/null 2>&1; then
+      ok "Backup timer enabled."
     else
-      warn "Integrity check timer failed to start."
-      event "check_timer_failed"
+      warn "Backup timer not enabled."
+      event "backup_timer_not_enabled"
     fi
 
     if command -v loginctl >/dev/null 2>&1; then
@@ -876,58 +914,41 @@ EOF2
       else
 
         if sudo -n loginctl enable-linger "$USER" 2>/dev/null; then
-
-          if loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
-            ok "Enabled linger so backups run without an active login."
-          else
-            warn "enable-linger returned success but linger is still disabled."
-            event "linger_verification_failed"
-          fi
-
+          ok "Enabled linger so backups run while logged out."
         else
-
-          warn "Backups will stop when you log out."
           warn "Run manually:"
           printf '      sudo loginctl enable-linger %s\n' "$USER"
-
-          event "linger_enable_failed"
         fi
-      fi
-    fi
 
-    ok "Nightly backup scheduled (03:15) and monthly verification enabled."
-    event "backup_schedule_installed" "units=${installed}"
+      fi
+
+    fi
 
     log "Running backup validation test..."
 
-    if systemctl --user start hybrid-ai-backup.service 2>/dev/null; then
+    if systemctl --user start hybrid-ai-backup.service >/dev/null 2>&1; then
 
       sleep 5
 
       if grep -q 'event=backup_success' "${SCRIPT_DIR}/backup.log" 2>/dev/null; then
         ok "Backup validation successful."
-        event "backup_validation_success"
       else
         warn "Backup validation completed but no success event was found."
-        warn "Review backup.log for details."
-        event "backup_validation_warning"
       fi
-
-    else
-
-      warn "Unable to start backup service for validation."
-      event "backup_validation_failed"
 
     fi
 
+    event "backup_schedule_installed" "units=${installed}"
+
   else
 
-    warn "systemd user units unavailable. Schedule backup.sh manually via cron."
+    warn "systemd user units unavailable. Schedule backup.sh manually."
     event "backup_schedule_missing"
 
   fi
 
   read -r -p "  Run the first backup now? [Y/n]: " _first < /dev/tty
+
   if [[ "${_first,,}" != "n" ]]; then
     "${SCRIPT_DIR}/backup/backup.sh" || warn "First backup failed. See backup.log."
   fi
@@ -936,6 +957,7 @@ EOF2
   printf '  %sSTORE YOUR REPOSITORY PASSWORD SOMEWHERE OFF THIS PI.%s\n\n' "$C_WRN" "$C_RST"
   printf '    cat %s\n\n' "$RESTIC_PW_FILE"
   hr
+
   return 0
 }
 
