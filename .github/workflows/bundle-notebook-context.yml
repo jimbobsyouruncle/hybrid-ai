@@ -1,0 +1,56 @@
+name: Generate NotebookLM RAG Bundle
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'CONSOLIDATED_CODE.md'
+      - '.github/workflows/**'
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate CONSOLIDATED_CODE.md
+        run: |
+          OUTPUT_FILE="CONSOLIDATED_CODE.md"
+          
+          echo "# Hybrid AI Repository Codebase Context" > "$OUTPUT_FILE"
+          echo "Generated on: $(date -u)" >> "$OUTPUT_FILE"
+          echo "Repository: ${{ github.repository }}" >> "$OUTPUT_FILE"
+          echo -e "\n---\n" >> "$OUTPUT_FILE"
+
+          # Find and bundle all non-excluded text files
+          git ls-files | grep -vE '(\.env|CONSOLIDATED_CODE\.md|\.png$|\.jpg$\vert{}\.ico$|\.tar$\vert{}\.gz$|\.zip$\vert{}package-lock\.json$|\.sqlite$\vert{}\.db$)' | while read -r FILE; do
+            if [ -f "$FILE" ]; then
+              echo "Bundling $FILE..."
+              LANG="text"
+              case "$FILE" in
+                *.sh) LANG="bash" ;;
+                *.yml|*.yaml) LANG="yaml" ;;
+                *.py) LANG="python" ;;
+                *.md) LANG="markdown" ;;
+                Caddyfile) LANG="caddy" ;;
+                *.json) LANG="json" ;;
+              esac
+
+              echo "## File: \`$FILE\`" >> "$OUTPUT_FILE"
+              echo "\`\`\`$LANG" >> "$OUTPUT_FILE"
+              cat "$FILE" >> "$OUTPUT_FILE"
+              echo -e "\n\`\`\`\n" >> "$OUTPUT_FILE"
+            fi
+          done
+
+      - name: Commit and Push Updated Bundle
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update CONSOLIDATED_CODE.md for NotebookLM RAG [skip ci]"
+          file_pattern: 'CONSOLIDATED_CODE.md'
