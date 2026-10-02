@@ -1,4 +1,4 @@
-name: Consolidate Code for RAG
+name: Consolidate Markdown for RAG
 
 on:
   push:
