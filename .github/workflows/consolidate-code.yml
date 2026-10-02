@@ -1,0 +1,74 @@
+name: Consolidate Code for RAG
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.py'
+      - '**/*.sh'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '**/Dockerfile'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  consolidate-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Consolidated Code Markdown
+        run: |
+          OUTPUT_FILE="CONSOLIDATED_CODE.md"
+          TMP_FILE="consolidated_code.tmp"
+
+          echo "# Repository Codebase Context" > "$TMP_FILE"
+          echo "Generated on $(date -u)" >> "$TMP_FILE"
+          echo "" >> "$TMP_FILE"
+
+          # Find code files, ignoring hidden directories (like .git) and the output file
+          find . -type f \( -name "*.py" -o -name "*.sh" -o -name "*.yml" -o -name "*.yaml" -o -name "Dockerfile*" \) ! -path '*/.*' | sort | while read -r file; do
+            clean_path="${file#./}"
+            filename=$(basename "$clean_path")
+            directory=$(dirname "$clean_path")
+            
+            # Determine markdown language tag for formatting
+            lang=""
+            case "$filename" in
+              *.py) lang="python" ;;
+              *.sh) lang="bash" ;;
+              *.yml|*.yaml) lang="yaml" ;;
+              Dockerfile*) lang="dockerfile" ;;
+            esac
+
+            {
+              echo "## File: $clean_path"
+              echo "---"
+              echo "Directory: \`$directory\`"
+              echo "---"
+              echo '```'"$lang"
+              cat "$file"
+              echo '```'
+              echo -e "\n"
+            } >> "$TMP_FILE"
+          done
+
+          # Safely overwrite the final markdown file
+          mv "$TMP_FILE" "$OUTPUT_FILE"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add CONSOLIDATED_CODE.md
+          if git diff --staged --quiet; then
+            echo "No changes in consolidated code."
+          else
+            git commit -m "chore: update consolidated code markdown [skip ci]"
+            git push
+          fi
