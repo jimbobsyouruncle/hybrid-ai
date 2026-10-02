@@ -1,0 +1,65 @@
+name: Consolidate Markdown for RAG
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Consolidated Markdown with Frontmatter
+        run: |
+          OUTPUT_FILE="consolidated_docs.md"
+          echo "# Repository RAG Corpus" > "$OUTPUT_FILE"
+          echo "Generated on $(date -u)" >> "$OUTPUT_FILE"
+          echo "" >> "$OUTPUT_FILE"
+
+          find . -type f -name "*.md" ! -name "$OUTPUT_FILE" ! -path '*/.*' | sort | while read -r file; do
+            clean_path="${file#./}"
+            filename=$(basename "$clean_path")
+            directory=$(dirname "$clean_path")
+            word_count=$(wc -w < "$file" | tr -d ' ')
+            line_count=$(wc -l < "$file" | tr -d ' ')
+            
+            title=$(grep -m 1 '^# ' "$file" | sed 's/^# //' | sed 's/"/\\"/g')
+            if [ -z "$title" ]; then
+              title="$filename"
+            fi
+
+            {
+              echo "---"
+              echo "source_path: \"$clean_path\""
+              echo "filename: \"$filename\""
+              echo "directory: \"$directory\""
+              echo "title: \"$title\""
+              echo "word_count: $word_count"
+              echo "line_count: $line_count"
+              echo "---"
+              echo ""
+              cat "$file"
+              echo -e "\n"
+            } >> "$OUTPUT_FILE"
+          done
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add consolidated_docs.md
+          if git diff --staged --quiet; then
+            echo "No changes in consolidated file."
+          else
+            git commit -m "chore: update consolidated RAG markdown [skip ci]"
+            git push
+          fi
