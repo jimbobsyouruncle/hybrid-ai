@@ -12,7 +12,10 @@ on:
       - '**/Dockerfile'
   workflow_dispatch:
 
+# FIXED: Explicitly grant write access so the bot can commit the new file
+permissions:
+  contents: write
+
 jobs:
   consolidate:
-    # Update 'jimbobsyouruncle/shared-actions' to your actual central repo name
     uses: jimbobsyouruncle/shared-actions/.github/workflows/consolidate-code.yml@main
