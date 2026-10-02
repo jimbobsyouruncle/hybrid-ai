@@ -15,15 +15,18 @@ jobs:
   consolidate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4 # FIXED: v7 does not exist
 
       - name: Generate Consolidated Markdown with Frontmatter
         run: |
           OUTPUT_FILE="consolidated_docs.md"
-          echo "# Repository RAG Corpus" > "$OUTPUT_FILE"
-          echo "Generated on $(date -u)" >> "$OUTPUT_FILE"
-          echo "" >> "$OUTPUT_FILE"
+          TMP_FILE="consolidated_docs.tmp"
+          
+          echo "# Repository RAG Corpus" > "$TMP_FILE"
+          echo "Generated on $(date -u)" >> "$TMP_FILE"
+          echo "" >> "$TMP_FILE"
 
+          # Write to a temporary file first to avoid truncation
           find . -type f -name "*.md" ! -name "$OUTPUT_FILE" ! -path '*/.*' | sort | while read -r file; do
             clean_path="${file#./}"
             filename=$(basename "$clean_path")
@@ -48,8 +51,11 @@ jobs:
               echo ""
               cat "$file"
               echo -e "\n"
-            } >> "$OUTPUT_FILE"
+            } >> "$TMP_FILE"
           done
+          
+          # Safely rename the tmp file to the final markdown file
+          mv "$TMP_FILE" "$OUTPUT_FILE"
 
       - name: Commit and push
         run: |
