@@ -19,8 +19,8 @@ jobs:
 
       - name: Generate Consolidated Markdown with Frontmatter
         run: |
-          OUTPUT_FILE="consolidated_docs.md"
-          TMP_FILE="consolidated_docs.tmp"
+          OUTPUT_FILE="CONSOLIDATED_DOCS.md"
+          TMP_FILE="CONSOLIDATED_DOCS.tmp"
           
           echo "# Repository RAG Corpus" > "$TMP_FILE"
           echo "Generated on $(date -u)" >> "$TMP_FILE"
