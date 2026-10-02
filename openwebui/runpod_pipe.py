@@ -14,7 +14,7 @@ requirements: httpx
 #  GENERATED FILE -- DO NOT EDIT
 #
 #  Built by openwebui/build_pipe.py from:
-#      openwebui/runpod_core.py      wake / validate / poll / stream
+#      openwebui/runpod_core.py     wake / validate / poll / stream
 #      openwebui/pipe_wrapper.py    Open WebUI presentation layer
 #
 #  Edit those files and re-run:  python3 openwebui/build_pipe.py
