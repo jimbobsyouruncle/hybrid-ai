@@ -18,25 +18,47 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate Consolidated Markdown
+      - name: Generate Consolidated Markdown with Frontmatter
         run: |
           OUTPUT_FILE="consolidated_docs.md"
-          echo "# Repository Documentation Index" > "$OUTPUT_FILE"
+          
+          # Initialize output file
+          echo "# Repository RAG Corpus" > "$OUTPUT_FILE"
           echo "Generated on $(date -u)" >> "$OUTPUT_FILE"
           echo "" >> "$OUTPUT_FILE"
 
-          # Find all .md files excluding the output file itself
-          find . -type f -name "*.md" ! -name "$OUTPUT_FILE" | sort | while read -r file; do
+          # Process each markdown file, excluding output file and hidden files
+          find . -type f -name "*.md" ! -name "$OUTPUT_FILE" ! -path '*/.*' | sort | while read -r file; do
             clean_path="${file#./}"
             
-            echo "Processing $clean_path..."
+            # Extract metadata attributes
+            filename=$(basename "$clean_path")
+            directory=$(dirname "$clean_path")
+            word_count=$(wc -w < "$file" | tr -d ' ')
+            line_count=$(wc -l < "$file" | tr -d ' ')
             
-            echo "---" >> "$OUTPUT_FILE"
-            echo "## File: $clean_path" >> "$OUTPUT_FILE"
-            echo "" >> "$OUTPUT_FILE"
-            
-            cat "$file" >> "$OUTPUT_FILE"
-            echo -e "\n\n" >> "$OUTPUT_FILE"
+            # Extract first heading or fallback to filename
+            title=$(grep -m 1 '^# ' "$file" | sed 's/^# //' | sed 's/"/\\"/g')
+            if [ -z "$title" ]; then
+              title="$filename"
+            fi
+
+            echo "Appending $clean_path..."
+
+            # Append section divider and frontmatter metadata block
+            {
+              echo "---"
+              echo "source_path: \"$clean_path\""
+              echo "filename: \"$filename\""
+              echo "directory: \"$directory\""
+              echo "title: \"$title\""
+              echo "word_count: $word_count"
+              echo "line_count: $line_count"
+              echo "---"
+              echo ""
+              cat "$file"
+              echo -e "\n"
+            } >> "$OUTPUT_FILE"
           done
 
       - name: Commit and push consolidated file
@@ -48,6 +70,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes detected in consolidated documentation."
           else
-            git commit -m "chore: update consolidated RAG markdown documentation [skip ci]"
+            git commit -m "chore: update consolidated RAG markdown with frontmatter [skip ci]"
             git push
           fi
