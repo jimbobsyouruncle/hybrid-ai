@@ -1,3 +1,18 @@
+name: Consolidate Code for RAG
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.py'
+      - '**/*.sh'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '**/Dockerfile'
+  workflow_dispatch:
+
 jobs:
   consolidate:
+    # Update 'jimbobsyouruncle/shared-actions' to your actual central repo name
     uses: jimbobsyouruncle/shared-actions/.github/workflows/consolidate-markdown.yml@main
