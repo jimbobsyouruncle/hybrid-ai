@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 02:00:26 UTC 2026
+Generated on Tue Oct  6 02:03:13 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -3709,11 +3709,26 @@ services:
       LOG_ALL_EVENTS: ${OPENHANDS_LOG_ALL_EVENTS:-false}
 
       OH_PERSISTENCE_DIR: /.openhands
+      # NOTE: agent-server 1.26.0 ignores this and runs as 'openhands' (UID 10001).
+      # install.sh grants that UID access to the workspace via ACLs instead.
       SANDBOX_USER_ID: ${STATUS_UID:-1000}
 
       # The isolated clone -- NOT this directory. See note 2 above.
       # No default: fail loudly rather than fall back to something unsafe.
       SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:rw
+
+      # --- Sandbox connectivity --------------------------------------------
+      # Legacy names are deliberate: this build's fallback config path reads
+      # SANDBOX_HOST_PORT, not OH_SANDBOX_HOST_PORT. Without it, sandbox
+      # webhooks go to host port 3000 (Open WebUI) and fail with 405.
+      SANDBOX_HOST_PORT: ${OPENHANDS_PORT:-3001}
+      # The browser connects directly to each sandbox's random host port.
+      # Must be a host/IP the browser can reach (Pi LAN IP or DNS name), not localhost.
+      SANDBOX_CONTAINER_URL_PATTERN: http://${OPENHANDS_SANDBOX_HOST:?OPENHANDS_SANDBOX_HOST must be set - run ./install.sh}:{port}
+      # Browser origins when the UI is reached through an SSH tunnel.
+      # Browsers treat localhost and 127.0.0.1 as different origins, so allow both.
+      OH_PERMITTED_CORS_ORIGINS_0: http://localhost:${OPENHANDS_PORT:-3001}
+      OH_PERMITTED_CORS_ORIGINS_1: http://127.0.0.1:${OPENHANDS_PORT:-3001}
 
       # --- Cloud GPU settings & MagicDNS -----------------------------------
       RUNPOD_HOST: ${RUNPOD_HOST}
