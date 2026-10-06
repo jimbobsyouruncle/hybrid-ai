@@ -92,8 +92,9 @@ fi
 # Expand a leading ~ ourselves: a value read from a file is not tilde-expanded
 # by the shell, and mounting a literal "~/hybrid-ai-agent" directory is a
 # genuinely confusing failure to diagnose.
-case "$WORKSPACE" in
+# A value read from .env is not tilde-expanded, so match a literal ~ on purpose.
 # shellcheck disable=SC2088
+case "$WORKSPACE" in
   "~/"*) WORKSPACE="${HOME}/${WORKSPACE#\~/}" ;;
   "~")   WORKSPACE="${HOME}" ;;
 esac
