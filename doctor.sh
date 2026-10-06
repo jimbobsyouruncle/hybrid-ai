@@ -75,7 +75,7 @@ container_env() {
 # Every compose command must use the same project, env file and BOTH compose
 # files. Running with only the OpenHands file makes Compose try to recreate the
 # shared network and stops OpenHands -- so remedies always print the full form.
-COMPOSE_CMD="docker compose -p hybrid-ai --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml"
+COMPOSE_CMD="docker compose -p hybrid-ai --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml"
 
 (( QUIET )) || {
   printf '%s\n' "============================================================"
