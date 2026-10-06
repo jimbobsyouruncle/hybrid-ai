@@ -64,6 +64,7 @@ import socket
 import sqlite3
 import threading
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -118,6 +119,11 @@ _REDACTIONS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b"), "<REDACTED:mac>"),
 ]
 
+def _http_get(url: str, timeout: float):
+    """Open only http(s) URLs; urllib would otherwise honour file://."""
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http URL scheme: {url!r}")
+    return _http_get(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
 
 def redact(text: str) -> str:
     """Strip anything credential-shaped. Applied to every log line we emit."""
@@ -189,7 +195,7 @@ def container_logs(name: str, tail: int = 40) -> List[str]:
 def probe_http(name: str, url: str, hint: str) -> Dict[str, Any]:
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with _http_get(url, timeout=5) as resp:
             ms = int((time.monotonic() - started) * 1000)
             if resp.status == 200:
                 return {"name": name, "state": "ok",
@@ -258,7 +264,7 @@ def probe_pod() -> Dict[str, Any]:
                 "hint": "The pipe will refuse to send prompts. Re-run ./install.sh."}
     try:
         url = f"http://{TAILSCALE_IP}:{VLLM_PORT}/v1/models"
-        with urllib.request.urlopen(url, timeout=6) as resp:
+        with _http_get(url, timeout=6) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = [m.get("id", "?") for m in body.get("data", [])]
             return {"name": "GPU pod", "state": "ok",
@@ -312,7 +318,7 @@ def probe_resources() -> List[Dict[str, Any]]:
 
 def probe_models() -> Dict[str, Any]:
     try:
-        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=5) as resp:
+        with _http_get(f"{OLLAMA_URL}/api/tags", timeout=5) as resp:
             models = json.loads(resp.read()).get("models", [])
         if not models:
             return {"name": "Local models", "state": "warn",
