@@ -1,17 +1,17 @@
 # Repository RAG Corpus
-Generated on Tue Oct  6 03:38:27 UTC 2026
+Generated on Tue Oct  6 03:50:48 UTC 2026
 
 ---
 source_path: "CONSOLIDATED_CODE.md"
 filename: "CONSOLIDATED_CODE.md"
 directory: "."
 title: "Repository Codebase Context"
-word_count: 36083
-line_count: 7722
+word_count: 36073
+line_count: 7724
 ---
 
 # Repository Codebase Context
-Generated on Tue Oct  6 03:12:23 UTC 2026
+Generated on Tue Oct  6 03:41:56 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1079,7 +1079,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: one failed probe must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" \|\| exit 1
+cd "$SCRIPT_DIR" || exit 1
 
 LOG_LINES=100
 REDACT=1
@@ -2044,7 +2044,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" \|\| exit 1
+cd "$SCRIPT_DIR" || exit 1
 QUIET=0
 NO_CLOUD=0
 for arg in "$@"; do
@@ -6612,13 +6612,15 @@ fi
 
 # --- Check mode ------------------------------------------------------------
 if (( CHECK_ONLY )); then
-  [[ -d "$WORKSPACE/.git" ]] \
-  if [[ -d "$WORKSPACE/.git" ]]; then ok "Agent workspace present: ${WORKSPACE}"
-  else die "Agent workspace missing: ${WORKSPACE}"; fi
-    || die "Agent workspace missing: ${WORKSPACE}"
+  if [[ -d "$WORKSPACE/.git" ]]; then
+    ok "Agent workspace present: ${WORKSPACE}"
+  else
+    die "Agent workspace missing: ${WORKSPACE}"
+  fi
   for f in .env .env.local install.log backup.log; do
-    [[ -e "$WORKSPACE/$f" ]] \
-      && die "SECURITY: ${f} found inside the agent workspace. Remove it."
+    if [[ -e "$WORKSPACE/$f" ]]; then
+      die "SECURITY: ${f} found inside the agent workspace. Remove it."
+    fi
   done
   ok "No credential files in the agent workspace"
   exit 0
@@ -6819,7 +6821,7 @@ def _http_get(url: str, timeout: float):
     """Open only http(s) URLs; urllib would otherwise honour file://."""
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"refusing non-http URL scheme: {url!r}")
-    return _http_get(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
+    return urllib.request.urlopen(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
 
 def redact(text: str) -> str:
     """Strip anything credential-shaped. Applied to every log line we emit."""
