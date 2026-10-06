@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 02:41:25 UTC 2026
+Generated on Tue Oct  6 02:48:14 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1066,7 +1066,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: one failed probe must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" \|\| exit 1
 
 LOG_LINES=100
 REDACT=1
@@ -2025,7 +2025,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" \|\| exit 1
 
 QUIET=0
 NO_CLOUD=0
