@@ -21,4 +21,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8501 8642
 
 # Launch gateway daemon in background and WebUI in foreground
+# nosemgrep: dockerfile.security.missing-user.missing-user
+# TODO(security): runs as root; tracked in SECURITY.md. Remove once a non-root USER is added.
 CMD ["bash", "-c", "source ~/.bashrc && hermes gateway & python3 bootstrap.py --port 8501 --host 0.0.0.0"]
