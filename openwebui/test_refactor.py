@@ -28,7 +28,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 def cfg(**kw):
     base = dict(runpod_api_key="rpa_test", runpod_pod_id="pod123",
-                tailscale_ip="100.90.1.5", model_name="test-model")
+                runpod_host="100.90.1.5", model_name="test-model")
     base.update(kw)
     return core.EndpointConfig(**base)
 
@@ -46,14 +46,18 @@ for ip, expected in [
           core.is_mesh_address(ip) is expected)
 
 print("\n--- preflight refuses non-mesh transmission ---")
-e = core.RunPodEndpoint(cfg(tailscale_ip="8.8.8.8"))
+e = core.RunPodEndpoint(cfg(runpod_host="8.8.8.8"))
 err = e.preflight()
 check("public IP rejected", err is not None and "Refusing to transmit" in err)
-check("error names the range", err is not None and "100.64.0.0/10" in err)
+check("error names the mesh", err is not None and "Tailscale mesh" in err)
 check("override allows opt-out",
-      core.RunPodEndpoint(cfg(tailscale_ip="8.8.8.8",
+      core.RunPodEndpoint(cfg(runpod_host="8.8.8.8",
                               enforce_mesh_only=False)).preflight() is None)
 check("valid mesh IP passes", core.RunPodEndpoint(cfg()).preflight() is None)
+check("MagicDNS .ts.net name passes",
+      core.RunPodEndpoint(cfg(runpod_host="runpod-worker.tail1234.ts.net")).preflight() is None)
+check("lookalike hostname rejected",
+      core.RunPodEndpoint(cfg(runpod_host="runpod.ts.net.evil.com")).preflight() is not None)
 
 print("\n--- preflight bounds ---")
 for field, value, word in [
@@ -67,7 +71,7 @@ for field, value, word in [
 
 for field, word in [("runpod_api_key", "RUNPOD_API_KEY"),
                     ("runpod_pod_id", "RUNPOD_POD_ID"),
-                    ("tailscale_ip", "TAILSCALE_IP")]:
+                    ("runpod_host", "RUNPOD_HOST")]:
     err = core.RunPodEndpoint(cfg(**{field: ""})).preflight()
     check(f"missing {field} rejected", err is not None and word in err)
 
