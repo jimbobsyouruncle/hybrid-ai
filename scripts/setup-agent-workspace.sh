@@ -93,6 +93,7 @@ fi
 # by the shell, and mounting a literal "~/hybrid-ai-agent" directory is a
 # genuinely confusing failure to diagnose.
 case "$WORKSPACE" in
+# shellcheck disable=SC2088
   "~/"*) WORKSPACE="${HOME}/${WORKSPACE#\~/}" ;;
   "~")   WORKSPACE="${HOME}" ;;
 esac
