@@ -125,7 +125,8 @@ fi
 # --- Check mode ------------------------------------------------------------
 if (( CHECK_ONLY )); then
   [[ -d "$WORKSPACE/.git" ]] \
-    && ok "Agent workspace present: ${WORKSPACE}" \
+  if [[ -d "$WORKSPACE/.git" ]]; then ok "Agent workspace present: ${WORKSPACE}"
+  else die "Agent workspace missing: ${WORKSPACE}"; fi
     || die "Agent workspace missing: ${WORKSPACE}"
   for f in .env .env.local install.log backup.log; do
     [[ -e "$WORKSPACE/$f" ]] \
