@@ -1,17 +1,17 @@
 # Repository RAG Corpus
-Generated on Tue Oct  6 02:47:57 UTC 2026
+Generated on Tue Oct  6 02:52:53 UTC 2026
 
 ---
 source_path: "CONSOLIDATED_CODE.md"
 filename: "CONSOLIDATED_CODE.md"
 directory: "."
 title: "Repository Codebase Context"
-word_count: 35989
-line_count: 7704
+word_count: 36013
+line_count: 7705
 ---
 
 # Repository Codebase Context
-Generated on Tue Oct  6 02:41:25 UTC 2026
+Generated on Tue Oct  6 02:51:06 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1078,7 +1078,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: one failed probe must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" \|\| exit 1
 
 LOG_LINES=100
 REDACT=1
@@ -2037,7 +2037,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" \|\| exit 1
 
 QUIET=0
 NO_CLOUD=0
@@ -2279,7 +2279,7 @@ if [[ -f .env ]]; then
     if [[ "$OH_PERMS" == "700" ]]; then
       pass "~/.openhands permissions correct (700)"
     else
-      fail "~/.openhands is ${OH_PERMS}, expected 700" \
+      fail "${HOME}/.openhands is ${OH_PERMS}, expected 700" \
            "Fix: chmod 700 ${HOME}/.openhands"
     fi
   fi
@@ -3020,7 +3020,8 @@ for _s in scripts/setup-agent-workspace.sh openhands/scripts/openhands-control.s
   [[ -f "$_f" ]] || continue
   if [[ ! -x "$_f" ]]; then
     chmod +x "$_f" 2>/dev/null \
-      && ok "Made ${_s} executable." \
+    if chmod +x "$_f" 2>/dev/null; then ok "Made ${_s} executable."
+    else warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"; fi
       || warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"
   fi
 done
