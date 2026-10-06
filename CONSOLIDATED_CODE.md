@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 03:12:23 UTC 2026
+Generated on Tue Oct  6 03:40:08 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1067,7 +1067,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: one failed probe must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" \|\| exit 1
+cd "$SCRIPT_DIR" || exit 1
 
 LOG_LINES=100
 REDACT=1
@@ -2032,7 +2032,7 @@ Directory: `.`
 set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" \|\| exit 1
+cd "$SCRIPT_DIR" || exit 1
 QUIET=0
 NO_CLOUD=0
 for arg in "$@"; do
@@ -6600,13 +6600,15 @@ fi
 
 # --- Check mode ------------------------------------------------------------
 if (( CHECK_ONLY )); then
-  [[ -d "$WORKSPACE/.git" ]] \
-  if [[ -d "$WORKSPACE/.git" ]]; then ok "Agent workspace present: ${WORKSPACE}"
-  else die "Agent workspace missing: ${WORKSPACE}"; fi
-    || die "Agent workspace missing: ${WORKSPACE}"
+  if [[ -d "$WORKSPACE/.git" ]]; then
+    ok "Agent workspace present: ${WORKSPACE}"
+  else
+    die "Agent workspace missing: ${WORKSPACE}"
+  fi
   for f in .env .env.local install.log backup.log; do
-    [[ -e "$WORKSPACE/$f" ]] \
-      && die "SECURITY: ${f} found inside the agent workspace. Remove it."
+    if [[ -e "$WORKSPACE/$f" ]]; then
+      die "SECURITY: ${f} found inside the agent workspace. Remove it."
+    fi
   done
   ok "No credential files in the agent workspace"
   exit 0
