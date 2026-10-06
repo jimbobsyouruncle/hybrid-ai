@@ -1,17 +1,17 @@
 # Repository RAG Corpus
-Generated on Tue Oct  6 02:38:29 UTC 2026
+Generated on Tue Oct  6 02:47:57 UTC 2026
 
 ---
 source_path: "CONSOLIDATED_CODE.md"
 filename: "CONSOLIDATED_CODE.md"
 directory: "."
 title: "Repository Codebase Context"
-word_count: 35944
-line_count: 7699
+word_count: 35989
+line_count: 7704
 ---
 
 # Repository Codebase Context
-Generated on Tue Oct  6 02:37:44 UTC 2026
+Generated on Tue Oct  6 02:41:25 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1112,6 +1112,7 @@ fi
 COMPOSE=(docker compose
          -f docker-compose.yml
          -f openhands/docker-compose.openhands.yml
+         -f hermes/docker-compose.hermes.yml
          --env-file .env)
 
 # ---------------------------------------------------------------------------
@@ -2089,7 +2090,7 @@ container_env() {
 # Every compose command must use the same project, env file and BOTH compose
 # files. Running with only the OpenHands file makes Compose try to recreate the
 # shared network and stops OpenHands -- so remedies always print the full form.
-COMPOSE_CMD="docker compose -p hybrid-ai --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml"
+COMPOSE_CMD="docker compose -p hybrid-ai --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml"
 
 (( QUIET )) || {
   printf '%s\n' "============================================================"
@@ -2860,7 +2861,10 @@ services:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
       - ./hermes_data:/root/.hermes
-      - ./:/workspace
+      # The agent clone, NOT the deployment directory. The deployment directory
+      # holds .env (RunPod key, WebUI secret) and the logs. Read-only: Hermes
+      # reads code here; changes go through OpenHands or you.
+      - ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:ro
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - LOCAL_DOMAIN=${LOCAL_DOMAIN}
@@ -4076,6 +4080,7 @@ cd "$ROOT"
 COMPOSE=(docker compose
          -f docker-compose.yml
          -f openhands/docker-compose.openhands.yml
+         -f hermes/docker-compose.hermes.yml
          --env-file .env)
 
 # Read the configured workspace for display. Parsed line by line, never
