@@ -544,6 +544,8 @@ SUSPECT=0
       # "0" and the variable becomes "0\n0" -- which then blows up the
       # numeric comparison and silently disables this entire audit.
       # Count lines from the match output instead.
+      AUDIT_TMP="$(mktemp)"
+      {
       n="$(grep -oE "${CHECKS[$name]}" "$OUTFILE" 2>/dev/null | wc -l | tr -d ' ')"
       n="${n:-0}"
       if (( n > 0 )); then
@@ -552,6 +554,8 @@ SUSPECT=0
       else
         printf '  [ok] %-21s clean\n' "$name"
       fi
+      } > "$AUDIT_TMP"
+      cat "$AUDIT_TMP" >> "$OUTFILE"; rm -f "$AUDIT_TMP"
     done
     printf '\n'
     if (( SUSPECT > 0 )); then
