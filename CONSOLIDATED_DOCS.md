@@ -1,17 +1,17 @@
 # Repository RAG Corpus
-Generated on Tue Oct  6 03:10:36 UTC 2026
+Generated on Tue Oct  6 03:35:41 UTC 2026
 
 ---
 source_path: "CONSOLIDATED_CODE.md"
 filename: "CONSOLIDATED_CODE.md"
 directory: "."
 title: "Repository Codebase Context"
-word_count: 36036
-line_count: 7710
+word_count: 36083
+line_count: 7722
 ---
 
 # Repository Codebase Context
-Generated on Tue Oct  6 02:56:22 UTC 2026
+Generated on Tue Oct  6 03:12:23 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1493,6 +1493,7 @@ sub "GPU pod reachability"
   fi
 } 2>&1 | redact >> "$OUTFILE"
 
+# shellcheck disable=SC2016
 run "Local service probes" bash -c '
   printf "ollama     : "; curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING"
   printf "open-webui : "; curl -fsS --max-time 5 http://127.0.0.1:3000/health >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING"
@@ -1580,6 +1581,8 @@ SUSPECT=0
       # "0" and the variable becomes "0\n0" -- which then blows up the
       # numeric comparison and silently disables this entire audit.
       # Count lines from the match output instead.
+      AUDIT_TMP="$(mktemp)"
+      {
       n="$(grep -oE "${CHECKS[$name]}" "$OUTFILE" 2>/dev/null | wc -l | tr -d ' ')"
       n="${n:-0}"
       if (( n > 0 )); then
@@ -1588,6 +1591,8 @@ SUSPECT=0
       else
         printf '  [ok] %-21s clean\n' "$name"
       fi
+      } > "$AUDIT_TMP"
+      cat "$AUDIT_TMP" >> "$OUTFILE"; rm -f "$AUDIT_TMP"
     done
     printf '\n'
     if (( SUSPECT > 0 )); then
@@ -2040,7 +2045,6 @@ set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" \|\| exit 1
-
 QUIET=0
 NO_CLOUD=0
 for arg in "$@"; do
@@ -2279,7 +2283,7 @@ if [[ -f .env ]]; then
   if [[ -d "${HOME}/.openhands" ]]; then
     OH_PERMS="$(stat -c '%a' "${HOME}/.openhands" 2>/dev/null)"
     if [[ "$OH_PERMS" == "700" ]]; then
-      pass "~/.openhands permissions correct (700)"
+      pass "${HOME}/.openhands permissions correct (700)"
     else
       fail "${HOME}/.openhands is ${OH_PERMS}, expected 700" \
            "Fix: chmod 700 ${HOME}/.openhands"
@@ -3022,10 +3026,11 @@ for _s in scripts/setup-agent-workspace.sh openhands/scripts/openhands-control.s
   _f="${SCRIPT_DIR}/${_s}"
   [[ -f "$_f" ]] || continue
   if [[ ! -x "$_f" ]]; then
-    chmod +x "$_f" 2>/dev/null \
-    if chmod +x "$_f" 2>/dev/null; then ok "Made ${_s} executable."
-    else warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"; fi
-      || warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"
+    if chmod +x "$_f" 2>/dev/null; then
+      ok "Made ${_s} executable."
+    else
+      warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"
+    fi
   fi
 done
 unset _s _f
@@ -6573,8 +6578,9 @@ fi
 # Expand a leading ~ ourselves: a value read from a file is not tilde-expanded
 # by the shell, and mounting a literal "~/hybrid-ai-agent" directory is a
 # genuinely confusing failure to diagnose.
-case "$WORKSPACE" in
+# A value read from .env is not tilde-expanded, so match a literal ~ on purpose.
 # shellcheck disable=SC2088
+case "$WORKSPACE" in
   "~/"*) WORKSPACE="${HOME}/${WORKSPACE#\~/}" ;;
   "~")   WORKSPACE="${HOME}" ;;
 esac
@@ -6754,6 +6760,7 @@ import socket
 import sqlite3
 import threading
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -6808,6 +6815,11 @@ _REDACTIONS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b"), "<REDACTED:mac>"),
 ]
 
+def _http_get(url: str, timeout: float):
+    """Open only http(s) URLs; urllib would otherwise honour file://."""
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError(f"refusing non-http URL scheme: {url!r}")
+    return _http_get(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
 
 def redact(text: str) -> str:
     """Strip anything credential-shaped. Applied to every log line we emit."""
@@ -6879,7 +6891,7 @@ def container_logs(name: str, tail: int = 40) -> List[str]:
 def probe_http(name: str, url: str, hint: str) -> Dict[str, Any]:
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with _http_get(url, timeout=5) as resp:
             ms = int((time.monotonic() - started) * 1000)
             if resp.status == 200:
                 return {"name": name, "state": "ok",
@@ -6948,7 +6960,7 @@ def probe_pod() -> Dict[str, Any]:
                 "hint": "The pipe will refuse to send prompts. Re-run ./install.sh."}
     try:
         url = f"http://{TAILSCALE_IP}:{VLLM_PORT}/v1/models"
-        with urllib.request.urlopen(url, timeout=6) as resp:
+        with _http_get(url, timeout=6) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = [m.get("id", "?") for m in body.get("data", [])]
             return {"name": "GPU pod", "state": "ok",
@@ -7002,7 +7014,7 @@ def probe_resources() -> List[Dict[str, Any]]:
 
 def probe_models() -> Dict[str, Any]:
     try:
-        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=5) as resp:
+        with _http_get(f"{OLLAMA_URL}/api/tags", timeout=5) as resp:
             models = json.loads(resp.read()).get("models", [])
         if not models:
             return {"name": "Local models", "state": "warn",
