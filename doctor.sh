@@ -716,6 +716,7 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   fi
 
   if (( ! NO_CLOUD )); then
+    # shellcheck disable=SC2016
     if timeout 30 bash -c '
         set -a; while IFS= read -r l; do
           [[ "$l" =~ ^[[:space:]]*[#] ]] && continue
