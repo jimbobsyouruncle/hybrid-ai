@@ -23,7 +23,6 @@ set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" \|\| exit 1
-
 QUIET=0
 NO_CLOUD=0
 for arg in "$@"; do
