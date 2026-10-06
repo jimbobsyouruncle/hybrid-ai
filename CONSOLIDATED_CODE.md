@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 02:17:54 UTC 2026
+Generated on Tue Oct  6 02:37:44 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -3298,6 +3298,21 @@ if [[ -n "${TAILSCALE_IP:-}" && ! "$TAILSCALE_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9
     warn "'${TAILSCALE_IP}' does not look like a 100.x.x.x mesh address."
 fi
 
+# --- OpenHands: workspace path and browser-reachable sandbox host ----------
+OPENHANDS_WORKSPACE="${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}"
+if [[ -z "${OPENHANDS_SANDBOX_HOST:-}" ]]; then
+  _default_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
+  if (( NON_INTERACTIVE )); then
+    OPENHANDS_SANDBOX_HOST="$_default_ip"
+    warn "OPENHANDS_SANDBOX_HOST defaulted to ${OPENHANDS_SANDBOX_HOST}"
+  else
+    read -r -p "    Host your browser uses to reach this Pi (e.g. jarvis.lan) [${_default_ip}]: " OPENHANDS_SANDBOX_HOST < /dev/tty
+    OPENHANDS_SANDBOX_HOST="${OPENHANDS_SANDBOX_HOST:-$_default_ip}"
+  fi
+  unset _default_ip
+fi
+[[ -n "$OPENHANDS_SANDBOX_HOST" ]] || die "OPENHANDS_SANDBOX_HOST could not be determined."
+
 # ---------------------------------------------------------------------------
 # STEP 7. Data folders
 # ---------------------------------------------------------------------------
@@ -3400,7 +3415,8 @@ HERMES_CPUS=${HERMES_CPUS:-1.5}
 
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
-OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}
+OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE}
+OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR:-${HOME}/.openhands}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
 OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
@@ -3432,6 +3448,23 @@ else
   "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" \
     || warn "Agent workspace setup failed; OpenHands will not start until it exists."
 fi
+
+prepare_openhands_workspace() {
+  command -v setfacl >/dev/null 2>&1 || sudo apt-get install -y acl || return 1
+  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}"
+  docker pull -q "$img" >/dev/null || return 1
+  local uid; uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
+  [[ -d "$OPENHANDS_WORKSPACE/.git" ]] || return 1
+  mkdir -p "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
+  sudo chown -R "$(id -u):$(id -g)" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
+  sudo setfacl -R -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE"
+  sudo setfacl -R -d -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE"
+  # Keep agent runtime folders out of the clone's git status
+  local ex="$OPENHANDS_WORKSPACE/.git/info/exclude" d
+  for d in conversations/ project/; do grep -qxF "$d" "$ex" 2>/dev/null || echo "$d" >> "$ex"; done
+  ok "OpenHands workspace ready for sandbox uid ${uid}."
+}
+prepare_openhands_workspace || warn "OpenHands workspace ACLs not applied; sandboxes may fail to start. Run ./doctor.sh"
 
 if (( NO_START )); then
   hr; ok "--no-start requested. Environment prepared; Docker untouched."; hr
@@ -3476,30 +3509,6 @@ if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
   die "Control plane did not start."
 fi
 event "stack_started"
-
-# --- OpenHands sandbox prerequisites ---------------------------------------
-command -v setfacl >/dev/null || sudo apt-get install -y acl
-
-# Sandbox host: default to the Pi's LAN IP on the default route, allow override
-if [ -z "${OPENHANDS_SANDBOX_HOST:-}" ]; then
-  default_ip=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
-  read -rp "Host/IP your browser uses to reach this Pi [${default_ip}]: " OPENHANDS_SANDBOX_HOST
-  OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST:-$default_ip}
-  grep -q '^OPENHANDS_SANDBOX_HOST=' .env \
-    && sed -i "s|^OPENHANDS_SANDBOX_HOST=.*|OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}|" .env \
-    || echo "OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}" >> .env
-fi
-
-# Get the sandbox UID from the image instead of hard-coding 10001
-AGENT_IMAGE="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}"
-docker pull -q "$AGENT_IMAGE" >/dev/null
-OH_SANDBOX_UID=$(docker run --rm --entrypoint id "$AGENT_IMAGE" -u openhands)
-
-# Workspace + project dir owned by the install user, with ACLs for the sandbox user
-mkdir -p "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
-sudo chown -R "$(id -u):$(id -g)" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
-sudo setfacl -R -m "u:${OH_SANDBOX_UID}:rwx" "$OPENHANDS_WORKSPACE"
-sudo setfacl -R -d -m "u:${OH_SANDBOX_UID}:rwx" "$OPENHANDS_WORKSPACE"
 
 # ---------------------------------------------------------------------------
 # STEP 10. Verify service health and check local DNS resolution
