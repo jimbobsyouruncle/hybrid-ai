@@ -525,6 +525,10 @@ run "Backup service journal" bash -c "journalctl --user -u hybrid-ai-backup.serv
 # ---------------------------------------------------------------------------
 sec "10. REDACTION SELF-AUDIT"
 SUSPECT=0
+# Write the audit results to a temp file, then append them once at the end.
+# Writing straight to $OUTFILE would mean grep reads the file while we're
+# appending to it (ShellCheck SC2094).
+AUDIT_TMP="$(mktemp)"
 {
   if (( REDACT )); then
     printf 'Scanning the finished report for anything that still looks secret.\n\n'
@@ -542,11 +546,9 @@ SUSPECT=0
     for name in "${!CHECKS[@]}"; do
       # CAREFUL: `grep -c ... || echo 0` is wrong. When grep finds nothing it
       # PRINTS "0" and ALSO exits non-zero, so the fallback appends a second
-      # "0" and the variable becomes "0\n0" -- which then blows up the
-      # numeric comparison and silently disables this entire audit.
+      # "0" and the variable becomes "0\n0". That breaks the numeric
+      # comparison and silently disables this entire audit.
       # Count lines from the match output instead.
-      AUDIT_TMP="$(mktemp)"
-      {
       n="$(grep -oE "${CHECKS[$name]}" "$OUTFILE" 2>/dev/null | wc -l | tr -d ' ')"
       n="${n:-0}"
       if (( n > 0 )); then
@@ -555,8 +557,6 @@ SUSPECT=0
       else
         printf '  [ok] %-21s clean\n' "$name"
       fi
-      } > "$AUDIT_TMP"
-      cat "$AUDIT_TMP" >> "$OUTFILE"; rm -f "$AUDIT_TMP"
     done
     printf '\n'
     if (( SUSPECT > 0 )); then
@@ -572,7 +572,9 @@ SUSPECT=0
     printf 'This file CONTAINS SECRETS. Do not share it with anyone.\n'
     SUSPECT=-1
   fi
-} >> "$OUTFILE"
+} > "$AUDIT_TMP"
+cat "$AUDIT_TMP" >> "$OUTFILE"
+rm -f "$AUDIT_TMP"
 
 printf '\n\n===============================================================\n  END OF REPORT\n===============================================================\n' >> "$OUTFILE"
 chmod 600 "$OUTFILE"
