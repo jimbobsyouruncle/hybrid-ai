@@ -554,6 +554,7 @@ mv -f "$TMP_ENV" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 ok ".env written (0600)."
 
+
 # ---------------------------------------------------------------------------
 # STEP 9. Launch
 # ---------------------------------------------------------------------------
@@ -610,6 +611,30 @@ if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
   die "Control plane did not start."
 fi
 event "stack_started"
+
+# --- OpenHands sandbox prerequisites ---------------------------------------
+command -v setfacl >/dev/null || sudo apt-get install -y acl
+
+# Sandbox host: default to the Pi's LAN IP on the default route, allow override
+if [ -z "${OPENHANDS_SANDBOX_HOST:-}" ]; then
+  default_ip=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+  read -rp "Host/IP your browser uses to reach this Pi [${default_ip}]: " OPENHANDS_SANDBOX_HOST
+  OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST:-$default_ip}
+  grep -q '^OPENHANDS_SANDBOX_HOST=' .env \
+    && sed -i "s|^OPENHANDS_SANDBOX_HOST=.*|OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}|" .env \
+    || echo "OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}" >> .env
+fi
+
+# Get the sandbox UID from the image instead of hard-coding 10001
+AGENT_IMAGE="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}"
+docker pull -q "$AGENT_IMAGE" >/dev/null
+OH_SANDBOX_UID=$(docker run --rm --entrypoint id "$AGENT_IMAGE" -u openhands)
+
+# Workspace + project dir owned by the install user, with ACLs for the sandbox user
+mkdir -p "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
+sudo chown -R "$(id -u):$(id -g)" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
+sudo setfacl -R -m "u:${OH_SANDBOX_UID}:rwx" "$OPENHANDS_WORKSPACE"
+sudo setfacl -R -d -m "u:${OH_SANDBOX_UID}:rwx" "$OPENHANDS_WORKSPACE"
 
 # ---------------------------------------------------------------------------
 # STEP 10. Verify service health and check local DNS resolution
