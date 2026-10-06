@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 04:09:48 UTC 2026
+Generated on Tue Oct  6 04:11:10 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -3497,21 +3497,27 @@ else
 fi
 
 prepare_openhands_workspace() {
-  command -v setfacl >/dev/null 2>&1 || sudo apt-get install -y acl || return 1
+  # -n: fail instead of prompting for a password, so CI never hangs.
+  local SUDO=(sudo)
+  if (( NON_INTERACTIVE )); then SUDO=(sudo -n); fi
+  if ! command -v setfacl >/dev/null 2>&1; then
+    "${SUDO[@]}" apt-get install -y acl || return 1
+  fi
   local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}"
   docker pull -q "$img" >/dev/null || return 1
-  local uid; uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
+  local uid
+  uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
   [[ -d "$OPENHANDS_WORKSPACE/.git" ]] || return 1
   mkdir -p "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
-  sudo chown -R "$(id -u):$(id -g)" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
-  sudo setfacl -R -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE"
-  sudo setfacl -R -d -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE"
+  "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations" || return 1
+  "${SUDO[@]}" setfacl -R -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
+  "${SUDO[@]}" setfacl -R -d -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   # Keep agent runtime folders out of the clone's git status
   local ex="$OPENHANDS_WORKSPACE/.git/info/exclude" d
   for d in conversations/ project/; do grep -qxF "$d" "$ex" 2>/dev/null || echo "$d" >> "$ex"; done
   ok "OpenHands workspace ready for sandbox uid ${uid}."
 }
-prepare_openhands_workspace || warn "OpenHands workspace ACLs not applied; sandboxes may fail to start. Run ./doctor.sh"
+prepare_openhands_workspace || warn "OpenHands workspace ACLs not applied (needs sudo). Re-run ./install.sh interactively, then check with ./doctor.sh"
 
 if (( NO_START )); then
   hr; ok "--no-start requested. Environment prepared; Docker untouched."; hr
