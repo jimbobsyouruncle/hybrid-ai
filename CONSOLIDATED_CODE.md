@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 03:40:08 UTC 2026
+Generated on Tue Oct  6 03:41:56 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -6809,7 +6809,7 @@ def _http_get(url: str, timeout: float):
     """Open only http(s) URLs; urllib would otherwise honour file://."""
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"refusing non-http URL scheme: {url!r}")
-    return _http_get(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
+    return urllib.request.urlopen(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
 
 def redact(text: str) -> str:
     """Strip anything credential-shaped. Applied to every log line we emit."""
