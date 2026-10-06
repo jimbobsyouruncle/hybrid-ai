@@ -4,76 +4,89 @@
 # PURPOSE (plain English):
 #   Backs up everything you would be upset to lose -- your chat history, your
 #   uploaded documents, the vector database that makes document search
-#   work, Hermes Agent memories, and OpenHands configurations -- to Cloudflare
-#   R2, encrypted before it ever leaves the Pi[cite: 2].
+#   work, Hermes Agent memories, and OpenHands configuration -- to Cloudflare
+#   R2, encrypted before it ever leaves the Pi.
 #
-#   It runs automatically every night via a systemd timer[cite: 2]. You can also run it
-#   by hand at any time[cite: 2].
+#   It runs automatically every night via a systemd timer. You can also run it
+#   by hand at any time.
 #
 # WHY RESTIC:
-#   - Encrypts on the Pi[cite: 2]. Cloudflare stores ciphertext and cannot read it[cite: 2].
+#   - Encrypts on the Pi. Cloudflare stores ciphertext and cannot read it.
 #   - Deduplicates at block level, so the second backup of a 2 GB database
-#     uploads only the few MB that actually changed[cite: 2].
-#   - Keeps snapshots, so you can go back to "last Tuesday", not just "latest"[cite: 2].
+#     uploads only the few MB that actually changed.
+#   - Keeps snapshots, so you can go back to "last Tuesday", not just "latest".
 #
 # WHY CLOUDFLARE R2:
-#   - No egress fees[cite: 2]. Restoring 50 GB costs nothing in bandwidth, which is
-#     exactly when you least want a surprise bill[cite: 2].
-#   - Roughly $0.015/GB/month stored[cite: 2]. A typical setup costs pennies[cite: 2].
+#   - No egress fees. Restoring 50 GB costs nothing in bandwidth, which is
+#     exactly when you least want a surprise bill.
+#   - Roughly $0.015/GB/month stored. A typical setup costs pennies.
 #
 # THE HARD PART -- WHY WE DO NOT JUST COPY THE FILES:
-#   Open WebUI keeps its data in SQLite, ChromaDB keeps vectors in SQLite,
-#   and Hermes Agent stores memory state in SQLite. Copying a SQLite file
-#   while the application is writing to it produces a CORRUPT copy[cite: 2]. It will look
-#   fine[cite: 2]. It will back up without error[cite: 2]. It will fail to open when you finally
-#   need it, which is the worst possible time to discover the problem[cite: 2].
+#   Open WebUI keeps its data in SQLite and ChromaDB keeps vectors in SQLite.
+#   Copying a SQLite file while the application is writing to it produces a
+#   CORRUPT copy. It will look fine. It will back up without error. It will
+#   fail to open when you finally need it.
 #
-#   So this script does NOT copy the live database files directly[cite: 2]. It asks SQLite to
-#   produce a consistent snapshot first (see snapshot_sqlite below), backs up
-#   that snapshot, and excludes the live files entirely[cite: 2]. This is the single
-#   most important thing this script does[cite: 2].
+#   So this script does NOT copy the live database files directly. It asks
+#   SQLite to produce a consistent snapshot first (see snapshot_sqlite), backs
+#   up that snapshot, and excludes the live files entirely.
 #
-# WHAT GETS BACKED UP:
-#   - Consistent SQLite snapshots (Open WebUI, ChromaDB, and Hermes Agent state)
-#   - Uploaded documents and any other non-database files in webui_data
-#   - Hermes Agent memories (~/.hermes/) and acquired skill definitions
-#   - OpenHands state (~/.openhands/) and maintenance workspace settings
-#   - Your .env configuration and local reverse proxy rules (status/Caddyfile)
-#   - A manifest recording what was captured and from which versions
+# CONTAINER CONTROL:
+#   Containers are paused/stopped by CONTAINER NAME with plain docker
+#   commands, never via 'docker compose'. hermes-agent lives in an overlay
+#   compose file, so a compose call without every -f file cannot see it and
+#   fails silently -- which once meant the "cold copy" ran against live DBs.
+#   Anything this script pauses or stops is resumed by the EXIT trap, even if
+#   the script fails part-way.
+#
+# WHAT GETS BACKED UP (staging paths are relative to the repo directory):
+#   - databases/   Consistent SQLite snapshots (Open WebUI, Chroma)
+#   - files/       Uploads, non-DB vector data, durable hermes_data state
+#   - hermes/      Durable ~/.hermes state (caches/runtimes excluded)
+#   - openhands/   ~/.openhands state (cache/tmp/logs excluded)
+#   - host/        Compose files, scripts, Caddyfile, model list, metadata
+#   - env/         Your .env configuration
 #
 # WHAT DOES NOT:
-#   - ollama_data/ -- model weights, tens of GB, freely re-downloadable[cite: 2].
-#     Backing them up would dominate cost for zero benefit[cite: 2].
+#   - ollama_data/ -- model weights, tens of GB, freely re-downloadable.
 #
 # USAGE:
-#   ./backup.sh             run a backup now[cite: 2]
-#   ./backup.sh --check     verify repository integrity (slow, reads data)[cite: 2]
-#   ./backup.sh --init      create the repository (first-time setup)[cite: 2]
-#   ./backup.sh --dry-run   show what would be backed up, upload nothing[cite: 2]
+#   ./backup.sh                    run a backup now
+#   ./backup.sh --check            verify repository integrity (slow)
+#   ./backup.sh --init             create the repository (first-time setup)
+#   ./backup.sh --dry-run          show what would be backed up, upload nothing
+#   ./backup.sh --non-interactive  never prompt (used by the systemd timer)
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-cd "$REPO_DIR"
+cd "$REPO_DIR" || exit 1
 
-# Credentials live OUTSIDE the git repository, in a root-only directory, so
-# that no git operation and no careless `tar czf` of the project folder can
-# ever sweep them up[cite: 2].
+# Credentials live OUTSIDE the git repository so that no git operation and no
+# careless 'tar czf' of the project folder can ever sweep them up.
 BACKUP_CONF_DIR="${BACKUP_CONF_DIR:-${HOME}/.config/hybrid-ai-backup}"
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
 
-# Where consistent database snapshots are staged before upload. Deliberately
-# on local disk, deliberately wiped afterwards[cite: 2].
+# Where consistent snapshots are staged before upload. Wiped afterwards.
 STAGING_DIR="${REPO_DIR}/.backup-staging"
-
 BACKUP_LOG="${BACKUP_LOG:-${REPO_DIR}/backup.log}"
 
-# Retention. Restic keeps the most recent snapshot in each bucket[cite: 2].
 KEEP_DAILY="${KEEP_DAILY:-7}"
 KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
 KEEP_MONTHLY="${KEEP_MONTHLY:-6}"
+
+# Every compose file, so 'config --images' reports the full stack.
+COMPOSE=(docker compose -p hybrid-ai --env-file "${REPO_DIR}/.env"
+         -f "${REPO_DIR}/docker-compose.yml"
+         -f "${REPO_DIR}/openhands/docker-compose.openhands.yml"
+         -f "${REPO_DIR}/hermes/docker-compose.hermes.yml")
+
+# Container names (not compose service names) that write durable state.
+APP_CONTAINERS=(open-webui hermes-agent)
+PAUSED_CONTAINERS=()
+STOPPED_CONTAINERS=()
 
 MODE="backup"
 NON_INTERACTIVE=0
@@ -83,7 +96,7 @@ for arg in "$@"; do
     --init)            MODE="init" ;;
     --dry-run)         MODE="dryrun" ;;
     --non-interactive) NON_INTERACTIVE=1 ;;
-    -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -100,7 +113,7 @@ ok()   { printf '%s[ OK ]%s %s\n' "$C_OK"  "$C_RST" "$*"; }
 warn() { printf '%s[ ! ]%s %s\n'  "$C_WRN" "$C_RST" "$*" >&2; }
 
 # Structured, greppable record of every run. METADATA ONLY -- never write a
-# credential, a filename from a user document, or any chat content here[cite: 2].
+# credential, a user document filename, or any chat content here.
 event() {
   local name="$1"; shift
   printf 'EVENT ts=%s event=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$*" \
@@ -113,17 +126,50 @@ die() {
   exit 1
 }
 
-# AVAILABILITY: always clean up staged database copies, even on failure[cite: 2].
+# --- Container control -----------------------------------------------------
+is_running() { [[ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" == "running" ]]; }
+
+unpause_webui() {
+  local c
+  for c in "${PAUSED_CONTAINERS[@]}"; do
+    docker unpause "$c" >/dev/null 2>&1 || warn "Could not unpause ${c}. Run: docker unpause ${c}"
+  done
+  PAUSED_CONTAINERS=()
+}
+
+restart_stopped() {
+  if (( ${#STOPPED_CONTAINERS[@]} > 0 )); then
+    docker start "${STOPPED_CONTAINERS[@]}" >/dev/null 2>&1 \
+      || warn "Could not restart ${STOPPED_CONTAINERS[*]}. Run: docker start ${STOPPED_CONTAINERS[*]}"
+    STOPPED_CONTAINERS=()
+  fi
+}
+
+pause_webui() {
+  [[ "${BACKUP_NO_PAUSE:-0}" == "1" ]] && return 1
+  command -v docker >/dev/null 2>&1 || return 1
+  local c
+  for c in "${APP_CONTAINERS[@]}"; do
+    is_running "$c" || continue
+    if docker pause "$c" >/dev/null 2>&1; then
+      PAUSED_CONTAINERS+=("$c")
+    fi
+  done
+  (( ${#PAUSED_CONTAINERS[@]} > 0 ))
+}
+
+# AVAILABILITY: always resume services and clean staged copies, even on failure.
 cleanup() {
   local rc=$?
-  if declare -F unpause_webui >/dev/null 2>&1; then unpause_webui; fi
+  unpause_webui
+  restart_stopped
   if [[ -d "$STAGING_DIR" ]]; then
     rm -rf "$STAGING_DIR" 2>/dev/null || true
   fi
   return $rc
 }
 trap cleanup EXIT
-trap 'die "Failed at line ${LINENO}:${BASH_COMMAND}"' ERR
+trap 'die "Failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
 
 touch "$BACKUP_LOG" 2>/dev/null && chmod 600 "$BACKUP_LOG" 2>/dev/null || true
 
@@ -138,6 +184,7 @@ for f in "$R2_ENV_FILE" "$RESTIC_PW_FILE"; do
   [[ "$perms" == "600" ]] || die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600 ${f}"
 done
 
+# SECURITY: parsed line by line, never sourced. 'source' would execute $(...).
 while IFS= read -r _line || [[ -n "$_line" ]]; do
   [[ "$_line" =~ ^[[:space:]]*# ]] && continue
   [[ "$_line" =~ ^[[:space:]]*$ ]] && continue
@@ -149,14 +196,12 @@ while IFS= read -r _line || [[ -n "$_line" ]]; do
   fi
 done < "$R2_ENV_FILE"
 unset _line _k _v
-
 export RESTIC_PASSWORD_FILE="$RESTIC_PW_FILE"
 
-[[ -n "${RESTIC_REPOSITORY:-}" ]]    || die "RESTIC_REPOSITORY not set in ${R2_ENV_FILE}"
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]]    || die "AWS_ACCESS_KEY_ID not set in ${R2_ENV_FILE}"
-[[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]|| die "AWS_SECRET_ACCESS_KEY not set in ${R2_ENV_FILE}"
-
-command -v restic >/dev/null 2>&1 || die "restic is not installed. Run ./install.sh, or: sudo apt-get install -y restic"
+[[ -n "${RESTIC_REPOSITORY:-}" ]]     || die "RESTIC_REPOSITORY not set in ${R2_ENV_FILE}"
+[[ -n "${AWS_ACCESS_KEY_ID:-}" ]]     || die "AWS_ACCESS_KEY_ID not set in ${R2_ENV_FILE}"
+[[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || die "AWS_SECRET_ACCESS_KEY not set in ${R2_ENV_FILE}"
+command -v restic >/dev/null 2>&1 || die "restic is not installed. Run: sudo apt-get install -y restic"
 
 BACKUP_HOST="${RESTIC_HOST:-$(hostname -s)}"
 
@@ -172,15 +217,15 @@ if [[ "$MODE" == "init" ]]; then
   restic init || die "restic init failed. Check your R2 credentials and bucket name."
   event "repo_initialised" "host=${BACKUP_HOST}"
   ok "Repository created."
-  cat <<'EOF'
+  cat <<'MSG'
 
   IMPORTANT -- do this now, not later:
 
   Store your repository password somewhere OFF this Pi. A password manager is
-  ideal. If the SD card dies and the password died with it, your backups are
+  ideal. If the disk dies and the password died with it, your backups are
   permanently unreadable. Restic has no recovery mechanism, by design.
 
-EOF
+MSG
   exit 0
 fi
 
@@ -202,35 +247,9 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 4. Capture application data consistently
 # ---------------------------------------------------------------------------
-PAUSED=0
-
-unpause_webui() {
-  if (( PAUSED )); then
-    docker compose --env-file "${REPO_DIR}/.env" unpause open-webui hermes-agent >/dev/null 2>&1 || \
-      docker unpause open-webui hermes-agent >/dev/null 2>&1 || true
-    PAUSED=0
-  fi
-}
-
-pause_webui() {
-  [[ "${BACKUP_NO_PAUSE:-0}" == "1" ]] && return 1
-  command -v docker >/dev/null 2>&1 || return 1
-  [[ -f "${REPO_DIR}/.env" ]] || return 1
-
-  docker ps --format '{{.Names}}' 2>/dev/null | grep -qE 'open-webui|hermes-agent' || return 1
-
-  if docker compose --env-file "${REPO_DIR}/.env" pause open-webui hermes-agent >/dev/null 2>&1 || \
-     docker pause open-webui hermes-agent >/dev/null 2>&1; then
-    PAUSED=1
-    return 0
-  fi
-  return 1
-}
-
 snapshot_sqlite() {
   local src="$1" dest="$2"
   mkdir -p "$(dirname "$dest")"
-
   if command -v sqlite3 >/dev/null 2>&1; then
     if sqlite3 "file:${src}?mode=ro" ".timeout 10000" "VACUUM INTO '${dest}'" 2>/dev/null; then
       return 0
@@ -244,14 +263,14 @@ snapshot_sqlite() {
 }
 
 [[ "$MODE" == "dryrun" ]] || log "Capturing application state..."
-
 rm -rf "$STAGING_DIR"
-mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" "${STAGING_DIR}/host" "${STAGING_DIR}/hermes" "${STAGING_DIR}/openhands"
+mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" \
+         "${STAGING_DIR}/host" "${STAGING_DIR}/hermes" "${STAGING_DIR}/openhands"
 chmod 700 "$STAGING_DIR"
 
 if pause_webui; then
   CONSISTENCY="paused"
-  [[ "$MODE" == "dryrun" ]] || ok "Open WebUI & Hermes Agent paused for point-in-time capture."
+  [[ "$MODE" == "dryrun" ]] || ok "Paused for point-in-time capture: ${PAUSED_CONTAINERS[*]}"
 else
   CONSISTENCY="online"
   [[ "$MODE" == "dryrun" ]] || warn "Could not pause containers; capturing live (see BACKUP_NO_PAUSE)."
@@ -260,7 +279,8 @@ fi
 DB_COUNT=0
 DB_FAILED=0
 
-# --- Snapshot only databases containing durable application state ---
+# Paths are staged RELATIVE TO THE REPO (e.g. databases/webui_data/webui.db).
+# restore.sh relies on this layout.
 DB_PATHS=(
   "${REPO_DIR}/webui_data/webui.db"
   "${REPO_DIR}/webui_data/vector_db/chroma.sqlite3"
@@ -278,7 +298,7 @@ for db in "${DB_PATHS[@]}"; do
   fi
 done
 
-# --- Allow-list durable non-database state ---
+# --- Allow-list durable non-database state ---------------------------------
 if [[ -d "${REPO_DIR}/webui_data/uploads" ]]; then
   mkdir -p "${STAGING_DIR}/files/webui_data/uploads"
   rsync -a "${REPO_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || \
@@ -295,7 +315,7 @@ if [[ -d "${REPO_DIR}/webui_data/vector_db" ]]; then
     warn "rsync reported issues copying Open WebUI vector data; continuing."
 fi
 
-# hermes_data contains reconstructable runtimes/caches. Preserve only named durable state.
+# hermes_data contains reconstructable runtimes/caches. Keep only durable state.
 for d in memories memory skills config configs sessions; do
   if [[ -d "${REPO_DIR}/hermes_data/${d}" ]]; then
     mkdir -p "${STAGING_DIR}/files/hermes_data/${d}"
@@ -305,7 +325,6 @@ for d in memories memory skills config configs sessions; do
 done
 
 if [[ -d "${HOME}/.hermes" ]]; then
-  mkdir -p "${STAGING_DIR}/hermes"
   rsync -a \
     --exclude='cache/' --exclude='tools/' --exclude='installs/' \
     --exclude='node_modules/' --exclude='.git/' --exclude='venv/' --exclude='.venv/' \
@@ -316,7 +335,6 @@ if [[ -d "${HOME}/.hermes" ]]; then
 fi
 
 if [[ -d "${HOME}/.openhands" ]]; then
-  mkdir -p "${STAGING_DIR}/openhands"
   rsync -a --exclude='cache/' --exclude='tmp/' --exclude='logs/' \
     "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || \
     warn "rsync reported issues copying OpenHands state; continuing."
@@ -325,14 +343,21 @@ fi
 unpause_webui
 [[ "$MODE" == "dryrun" ]] || ok "Capture complete; application services resumed."
 
+# --- Cold-copy fallback ----------------------------------------------------
 if (( DB_FAILED > 0 )); then
   warn "${DB_FAILED} database(s) could not be snapshotted online."
-  if command -v docker >/dev/null 2>&1 && [[ -f "${REPO_DIR}/.env" ]]; then
+  if command -v docker >/dev/null 2>&1; then
     warn "Falling back to a cold copy. Services will be briefly unavailable."
     event "cold_copy_fallback" "failed_dbs=${DB_FAILED}"
     CONSISTENCY="cold"
-
-    docker compose --env-file "${REPO_DIR}/.env" stop open-webui hermes-agent >/dev/null 2>&1 || true
+    for c in "${APP_CONTAINERS[@]}"; do
+      is_running "$c" || continue
+      if docker stop "$c" >/dev/null 2>&1; then
+        STOPPED_CONTAINERS+=("$c")
+      else
+        die "Could not stop ${c}; refusing to copy a database that is still being written."
+      fi
+    done
     sleep 3
     rm -rf "${STAGING_DIR}/databases"
     mkdir -p "${STAGING_DIR}/databases"
@@ -347,8 +372,7 @@ if (( DB_FAILED > 0 )); then
         die "Cold-copy fallback failed for ${rel}."
       fi
     done
-    docker compose --env-file "${REPO_DIR}/.env" start open-webui hermes-agent >/dev/null 2>&1 || \
-      warn "Could not restart services automatically. Run: ./install.sh"
+    restart_stopped
   else
     die "Cannot produce consistent database copies and cannot fall back."
   fi
@@ -360,10 +384,10 @@ fi
 # STEP 4b. Capture host and platform state
 # ---------------------------------------------------------------------------
 [[ "$MODE" == "dryrun" ]] || log "Capturing host and platform state..."
-
 HOST_DIR="${STAGING_DIR}/host"
 
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'ollama'; then
+OLLAMA_MODEL_COUNT=0
+if is_running ollama; then
   docker exec ollama ollama list 2>/dev/null \
     | awk 'NR>1 {print $1}' > "${HOST_DIR}/ollama-models.txt" || true
   mkdir -p "${HOST_DIR}/modelfiles"
@@ -373,16 +397,17 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'ollama'; then
     docker exec ollama ollama show --modelfile "$m" \
       > "${HOST_DIR}/modelfiles/${safe}.Modelfile" 2>/dev/null || true
   done < "${HOST_DIR}/ollama-models.txt"
-  OLLAMA_MODEL_COUNT="$(wc -l < "${HOST_DIR}/ollama-models.txt" 2>/dev/null | tr -d ' ' || echo 0)"
-else
-  OLLAMA_MODEL_COUNT=0
+  OLLAMA_MODEL_COUNT="$(wc -l < "${HOST_DIR}/ollama-models.txt" 2>/dev/null | tr -d ' ')"
 fi
 
-docker compose --env-file "${REPO_DIR}/.env" config --images 2>/dev/null \
-  > "${HOST_DIR}/container-images.txt" || true
+if [[ -f "${REPO_DIR}/.env" ]]; then
+  "${COMPOSE[@]}" config --images > "${HOST_DIR}/container-images.txt" 2>/dev/null || true
+fi
 
 for f in docker-compose.yml docker-compose.override.yml; do
-  [[ -f "${REPO_DIR}/${f}" ]] && cp -a "${REPO_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
+  if [[ -f "${REPO_DIR}/${f}" ]]; then
+    cp -a "${REPO_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
+  fi
 done
 
 for d in openwebui openhands hermes scripts status; do
@@ -397,22 +422,22 @@ if command -v git >/dev/null 2>&1 && [[ -d "${REPO_DIR}/.git" ]]; then
     printf 'commit=%s\n' "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
     printf 'branch=%s\n' "$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
     printf 'remote=%s\n' "$(git -C "$REPO_DIR" config --get remote.origin.url 2>/dev/null || echo none)"
-    printf 'dirty=%s\n' "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    printf 'dirty=%s\n'  "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   } > "${HOST_DIR}/git-state.txt" 2>/dev/null || true
   git -C "$REPO_DIR" diff HEAD > "${HOST_DIR}/uncommitted.patch" 2>/dev/null || true
   [[ -s "${HOST_DIR}/uncommitted.patch" ]] || rm -f "${HOST_DIR}/uncommitted.patch"
 fi
 
 {
-  printf 'hostname=%s\n'        "$(hostname -s 2>/dev/null)"
+  printf 'hostname=%s\n'       "$(hostname -s 2>/dev/null)"
   # shellcheck source=/dev/null
-  printf 'os=%s\n'              "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
-  printf 'kernel=%s\n'          "$(uname -r 2>/dev/null)"
-  printf 'arch=%s\n'            "$(uname -m 2>/dev/null)"
-  printf 'total_ram_mb=%s\n'    "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
-  printf 'docker=%s\n'          "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo n/a)"
-  printf 'tailscale_host=%s\n'  "$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // "unknown"' 2>/dev/null || echo unknown)"
-  printf 'backup_timer=%s\n'    "$(systemctl --user is-enabled hybrid-ai-backup.timer 2>/dev/null || echo unknown)"
+  printf 'os=%s\n'             "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
+  printf 'kernel=%s\n'         "$(uname -r 2>/dev/null)"
+  printf 'arch=%s\n'           "$(uname -m 2>/dev/null)"
+  printf 'total_ram_mb=%s\n'   "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+  printf 'docker=%s\n'         "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo n/a)"
+  printf 'tailscale_host=%s\n' "$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // "unknown"' 2>/dev/null || echo unknown)"
+  printf 'backup_timer=%s\n'   "$(systemctl --user is-enabled hybrid-ai-backup.timer 2>/dev/null || echo unknown)"
 } > "${HOST_DIR}/platform.txt" 2>/dev/null || true
 
 chmod -R go-rwx "$HOST_DIR" 2>/dev/null || true
@@ -420,7 +445,7 @@ chmod -R go-rwx "$HOST_DIR" 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # STEP 5. Write a manifest
 # ---------------------------------------------------------------------------
-cat > "${STAGING_DIR}/MANIFEST.txt" <<EOF
+cat > "${STAGING_DIR}/MANIFEST.txt" <<MANIFEST
 hybrid-ai backup manifest
 =========================
 created_utc        : $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -429,18 +454,19 @@ consistency_method : ${CONSISTENCY}
 databases_captured : ${DB_COUNT}
 ollama_models      : ${OLLAMA_MODEL_COUNT:-0} (names only; weights not backed up)
 restic_version     : $(restic version 2>/dev/null | head -n1)
+layout             : repo-relative (v2)
 
 Contents
 --------
-databases/   Consistent Open WebUI and Chroma SQLite snapshots.
-files/       Allow-listed uploads, vector data, and durable Hermes state.
-hermes/      Durable ~/.hermes state if present; runtime/cache content excluded.
-openhands/   OpenHands user config/state; cache, temp, and logs excluded.
-host/        Deployment configurations, Caddyfile, and host metadata.
+databases/   Consistent SQLite snapshots, repo-relative (webui_data/...).
+files/       Uploads, vector data, durable hermes_data, repo-relative.
+hermes/      Durable ~/.hermes state; runtime/cache content excluded.
+openhands/   ~/.openhands state; cache, temp, and logs excluded.
+host/        Compose files, scripts, Caddyfile, model list, host metadata.
 env/         Active .env configuration.
 
 To restore, see backup/restore.sh in the hybrid-ai repository.
-EOF
+MANIFEST
 
 # ---------------------------------------------------------------------------
 # STEP 6. Stage the configuration file
@@ -450,12 +476,13 @@ if [[ -f "${REPO_DIR}/.env" ]]; then
   chmod 600 "${STAGING_DIR}/env/.env"
 fi
 
-STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1 || echo '?')"
+STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1)"
+STAGED_MB="${STAGED_MB:-?}"
 
 if [[ "$MODE" == "dryrun" ]]; then
   log "Dry run -- nothing will be uploaded."
   printf '\n  Staged %s MB:\n\n' "$STAGED_MB"
-  find "$STAGING_DIR" -maxdepth 2 -mindepth 1 -printf '    %y %p\n' 2>/dev/null | head -40
+  find "$STAGING_DIR" -maxdepth 3 -mindepth 1 -printf '    %y %P\n' 2>/dev/null | head -40
   printf '\n  Repository: %s\n\n' "${RESTIC_REPOSITORY}"
   exit 0
 fi
@@ -463,18 +490,15 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 7. Upload
 #
-# Only the staging directory is passed to restic. The live application data is
+# Only the staging directory is passed to restic. Live application data is
 # never uploaded directly, guaranteeing every snapshot is consistent.
 # ---------------------------------------------------------------------------
 log "Checking restic repository status..."
-
 if ! restic snapshots >/dev/null 2>&1; then
   warn "Repository at ${RESTIC_REPOSITORY} is not initialized!"
-  
-  if (( NON_INTERACTIVE )); then
-    die "Repository uninitialized and --non-interactive requested. Run: ./backup/backup.sh --init"
+  if (( NON_INTERACTIVE )) || [[ ! -t 0 ]]; then
+    die "Repository uninitialized. Run: ./backup/backup.sh --init"
   fi
-
   read -r -p "  Initialize repository now? [Y/n]: " _init_ans < /dev/tty
   if [[ "${_init_ans,,}" != "n" ]]; then
     log "Initialising restic repository..."
@@ -513,6 +537,7 @@ fi
 log "Applying retention policy (${KEEP_DAILY}d / ${KEEP_WEEKLY}w / ${KEEP_MONTHLY}m)..."
 if restic forget \
       --host "$BACKUP_HOST" \
+      --tag hybrid-ai \
       --keep-daily "$KEEP_DAILY" \
       --keep-weekly "$KEEP_WEEKLY" \
       --keep-monthly "$KEEP_MONTHLY" \
@@ -527,10 +552,10 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 9. Report
 # ---------------------------------------------------------------------------
-SNAP_COUNT="$(restic snapshots --host "$BACKUP_HOST" --json 2>/dev/null | jq 'length' 2>/dev/null || echo '?')"
+SNAP_COUNT="$(restic snapshots --host "$BACKUP_HOST" --tag hybrid-ai --json 2>/dev/null | jq 'length' 2>/dev/null || echo '?')"
 event "backup_run_complete" "snapshots_retained=${SNAP_COUNT}"
 
 printf '\n'
-ok "Done. ${SNAP_COUNT} snapshot(s) retained for host${BACKUP_HOST}."
+ok "Done. ${SNAP_COUNT} snapshot(s) retained for host ${BACKUP_HOST}."
 printf '    Restore with : ./backup/restore.sh\n'
 printf '    Verify with  : ./backup/backup.sh --check\n\n'
