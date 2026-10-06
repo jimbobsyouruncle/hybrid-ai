@@ -172,7 +172,6 @@ services:
 
       # --- Cloud GPU settings, read by openwebui/runpod_pipe.py ------------
       RUNPOD_HOST: ${RUNPOD_HOST}
-      TAILSCALE_IP: ${TAILSCALE_IP:-}
       PI_HOST: ${PI_HOST}
       # So the pipe's connection-error message names the right peer instead of
       # a hardcoded string that may not match what you called the pod.
@@ -272,6 +271,7 @@ services:
       - ./backup.log:/data/backup.log:ro
       - ./install.log:/data/install.log:ro
     environment:
+      TAILSCALE_IP: ${TAILSCALE_IP:-}
       STATUS_PORT: "8088"
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       OLLAMA_URL: http://ollama:11434
