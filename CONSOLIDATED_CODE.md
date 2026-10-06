@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 03:11:14 UTC 2026
+Generated on Tue Oct  6 03:12:23 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1481,6 +1481,7 @@ sub "GPU pod reachability"
   fi
 } 2>&1 | redact >> "$OUTFILE"
 
+# shellcheck disable=SC2016
 run "Local service probes" bash -c '
   printf "ollama     : "; curl -fsS --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING"
   printf "open-webui : "; curl -fsS --max-time 5 http://127.0.0.1:3000/health >/dev/null 2>&1 && echo "responding" || echo "NOT RESPONDING"
