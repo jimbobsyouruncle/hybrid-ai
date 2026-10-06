@@ -43,7 +43,7 @@
 set -uo pipefail   # deliberately NOT -e: one failed probe must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" \|\| exit 1
+cd "$SCRIPT_DIR" || exit 1
 
 LOG_LINES=100
 REDACT=1
