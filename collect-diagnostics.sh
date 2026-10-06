@@ -202,6 +202,7 @@ fi
 # ---------------------------------------------------------------------------
 printf '  %s[2/9]%s System information...\n' "$C_INF" "$C_RST"
 sec "2. HOST SYSTEM"
+# shellcheck disable=SC2016
 run "OS"                  bash -c '. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}"'
 run "Kernel / arch"       uname -a
 run "Model"               bash -c 'cat /proc/device-tree/model 2>/dev/null || echo "not a Raspberry Pi / unknown"'
