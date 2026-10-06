@@ -138,10 +138,11 @@ for _s in scripts/setup-agent-workspace.sh openhands/scripts/openhands-control.s
   _f="${SCRIPT_DIR}/${_s}"
   [[ -f "$_f" ]] || continue
   if [[ ! -x "$_f" ]]; then
-    chmod +x "$_f" 2>/dev/null \
-    if chmod +x "$_f" 2>/dev/null; then ok "Made ${_s} executable."
-    else warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"; fi
-      || warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"
+    if chmod +x "$_f" 2>/dev/null; then
+      ok "Made ${_s} executable."
+    else
+      warn "Could not chmod +x ${_s}. Run it manually: chmod +x ${_s}"
+    fi
   fi
 done
 unset _s _f
