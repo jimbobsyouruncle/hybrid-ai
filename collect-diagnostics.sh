@@ -77,6 +77,7 @@ fi
 COMPOSE=(docker compose
          -f docker-compose.yml
          -f openhands/docker-compose.openhands.yml
+         -f hermes/docker-compose.hermes.yml
          --env-file .env)
 
 # ---------------------------------------------------------------------------
