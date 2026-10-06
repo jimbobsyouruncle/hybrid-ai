@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Fri Oct  2 10:24:26 UTC 2026
+Generated on Tue Oct  6 02:00:26 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -3697,6 +3697,8 @@ services:
     # publish arbitrary code execution as root to your LAN.
     ports:
       - "127.0.0.1:${OPENHANDS_PORT:-3001}:3000"
+      # Docker bridge only, so sandboxes can post webhooks. Not exposed to the LAN.
+      - "172.17.0.1:${OPENHANDS_PORT:-3001}:3000"
 
     environment:
       AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
