@@ -405,6 +405,7 @@ fi
 
 {
   printf 'hostname=%s\n'        "$(hostname -s 2>/dev/null)"
+  # shellcheck source=/dev/null
   printf 'os=%s\n'              "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
   printf 'kernel=%s\n'          "$(uname -r 2>/dev/null)"
   printf 'arch=%s\n'            "$(uname -m 2>/dev/null)"
