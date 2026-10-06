@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 04:17:04 UTC 2026
+Generated on Tue Oct  6 04:31:49 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -3295,7 +3295,7 @@ if [[ "$PEER_ONLINE" != "true" ]]; then
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
             -d "{\"query\": \"query { pod(input: {podId: \\\"${RUNPOD_POD_ID}\\\"}) { id desiredStatus } }\"}" \
-            https://api.runpod.io/graphql | jq -r '.data.pod.desiredStatus // "STOPPED"')
+            https://api.runpod.io/graphql | jq -r '.data.pod.desiredStatus // "STOPPED"' 2>/dev/null || echo "UNKNOWN")
 
         if [ "$RUNPOD_STATUS" != "RUNNING" ]; then
             warn "RunPod worker is stopped. Sending start command for pod ${RUNPOD_POD_ID}..."
@@ -3303,7 +3303,7 @@ if [[ "$PEER_ONLINE" != "true" ]]; then
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
                 -d "{\"query\": \"mutation { podResume(input: {podId: \\\"${RUNPOD_POD_ID}\\\"}) { id desiredStatus } }\"}" \
-                https://api.runpod.io/graphql > /dev/null
+                https://api.runpod.io/graphql > /dev/null || warn "RunPod resume request failed; continuing."
         fi
 
         log "Waiting for worker to boot and join tailnet (up to 3 minutes)..."
@@ -3542,7 +3542,7 @@ MAX_RETRIES=5
 ATTEMPT=1
 
 while [ $ATTEMPT -le $MAX_RETRIES ]; do
-    if "${COMPOSE[@]}" pull; then
+    if "${COMPOSE[@]}" pull --ignore-buildable; then
         log "All images pulled successfully."
         break
     else
@@ -6855,7 +6855,7 @@ def _http_get(url: str, timeout: float):
     """Open only http(s) URLs; urllib would otherwise honour file://."""
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"refusing non-http URL scheme: {url!r}")
-    return urllib.request.urlopen(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected
+    return urllib.request.urlopen(url, timeout=timeout)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
 
 def redact(text: str) -> str:
     """Strip anything credential-shaped. Applied to every log line we emit."""
