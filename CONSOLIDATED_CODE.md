@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 04:11:10 UTC 2026
+Generated on Tue Oct  6 04:17:04 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -2868,6 +2868,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8501 8642
 
 # Launch gateway daemon in background and WebUI in foreground
+# nosemgrep: dockerfile.security.missing-user.missing-user
+# TODO(security): runs as root; tracked in SECURITY.md. Remove once a non-root USER is added.
 CMD ["bash", "-c", "source ~/.bashrc && hermes gateway & python3 bootstrap.py --port 8501 --host 0.0.0.0"]
 ```
 
