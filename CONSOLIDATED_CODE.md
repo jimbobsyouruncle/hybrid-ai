@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 02:51:06 UTC 2026
+Generated on Tue Oct  6 02:56:22 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -413,6 +413,7 @@ fi
 
 {
   printf 'hostname=%s\n'        "$(hostname -s 2>/dev/null)"
+  # shellcheck source=/dev/null
   printf 'os=%s\n'              "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
   printf 'kernel=%s\n'          "$(uname -r 2>/dev/null)"
   printf 'arch=%s\n'            "$(uname -m 2>/dev/null)"
@@ -1225,6 +1226,7 @@ fi
 # ---------------------------------------------------------------------------
 printf '  %s[2/9]%s System information...\n' "$C_INF" "$C_RST"
 sec "2. HOST SYSTEM"
+# shellcheck disable=SC2016
 run "OS"                  bash -c '. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}"'
 run "Kernel / arch"       uname -a
 run "Model"               bash -c 'cat /proc/device-tree/model 2>/dev/null || echo "not a Raspberry Pi / unknown"'
@@ -2719,6 +2721,7 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   fi
 
   if (( ! NO_CLOUD )); then
+    # shellcheck disable=SC2016
     if timeout 30 bash -c '
         set -a; while IFS= read -r l; do
           [[ "$l" =~ ^[[:space:]]*[#] ]] && continue
@@ -6559,6 +6562,7 @@ fi
 # by the shell, and mounting a literal "~/hybrid-ai-agent" directory is a
 # genuinely confusing failure to diagnose.
 case "$WORKSPACE" in
+# shellcheck disable=SC2088
   "~/"*) WORKSPACE="${HOME}/${WORKSPACE#\~/}" ;;
   "~")   WORKSPACE="${HOME}" ;;
 esac
@@ -6591,7 +6595,8 @@ fi
 # --- Check mode ------------------------------------------------------------
 if (( CHECK_ONLY )); then
   [[ -d "$WORKSPACE/.git" ]] \
-    && ok "Agent workspace present: ${WORKSPACE}" \
+  if [[ -d "$WORKSPACE/.git" ]]; then ok "Agent workspace present: ${WORKSPACE}"
+  else die "Agent workspace missing: ${WORKSPACE}"; fi
     || die "Agent workspace missing: ${WORKSPACE}"
   for f in .env .env.local install.log backup.log; do
     [[ -e "$WORKSPACE/$f" ]] \
