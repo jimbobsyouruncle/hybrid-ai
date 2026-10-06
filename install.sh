@@ -383,7 +383,7 @@ if [[ "$PEER_ONLINE" != "true" ]]; then
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
             -d "{\"query\": \"query { pod(input: {podId: \\\"${RUNPOD_POD_ID}\\\"}) { id desiredStatus } }\"}" \
-            https://api.runpod.io/graphql | jq -r '.data.pod.desiredStatus // "STOPPED"')
+            https://api.runpod.io/graphql | jq -r '.data.pod.desiredStatus // "STOPPED"' 2>/dev/null || echo "UNKNOWN")
 
         if [ "$RUNPOD_STATUS" != "RUNNING" ]; then
             warn "RunPod worker is stopped. Sending start command for pod ${RUNPOD_POD_ID}..."
@@ -391,7 +391,7 @@ if [[ "$PEER_ONLINE" != "true" ]]; then
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
                 -d "{\"query\": \"mutation { podResume(input: {podId: \\\"${RUNPOD_POD_ID}\\\"}) { id desiredStatus } }\"}" \
-                https://api.runpod.io/graphql > /dev/null
+                https://api.runpod.io/graphql > /dev/null || warn "RunPod resume request failed; continuing."
         fi
 
         log "Waiting for worker to boot and join tailnet (up to 3 minutes)..."
@@ -630,7 +630,7 @@ MAX_RETRIES=5
 ATTEMPT=1
 
 while [ $ATTEMPT -le $MAX_RETRIES ]; do
-    if "${COMPOSE[@]}" pull; then
+    if "${COMPOSE[@]}" pull --ignore-buildable; then
         log "All images pulled successfully."
         break
     else
