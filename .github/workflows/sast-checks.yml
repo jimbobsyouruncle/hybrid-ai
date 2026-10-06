@@ -1,0 +1,31 @@
+name: Security & SAST Checks
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '**/*.py'
+      - '**/*.sh'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '**/Dockerfile'
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: ShellCheck (Bash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+
+  semgrep:
+    name: Semgrep (SAST)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep Rules
+        run: semgrep scan --config auto --error
