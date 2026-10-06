@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 02:48:14 UTC 2026
+Generated on Tue Oct  6 02:49:04 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -2267,7 +2267,7 @@ if [[ -f .env ]]; then
     if [[ "$OH_PERMS" == "700" ]]; then
       pass "~/.openhands permissions correct (700)"
     else
-      fail "~/.openhands is ${OH_PERMS}, expected 700" \
+      fail "${HOME}/.openhands is ${OH_PERMS}, expected 700" \
            "Fix: chmod 700 ${HOME}/.openhands"
     fi
   fi
