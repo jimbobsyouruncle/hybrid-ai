@@ -264,7 +264,7 @@ if [[ -f .env ]]; then
     if [[ "$OH_PERMS" == "700" ]]; then
       pass "~/.openhands permissions correct (700)"
     else
-      fail "~/.openhands is ${OH_PERMS}, expected 700" \
+      fail "${HOME}/.openhands is ${OH_PERMS}, expected 700" \
            "Fix: chmod 700 ${HOME}/.openhands"
     fi
   fi
