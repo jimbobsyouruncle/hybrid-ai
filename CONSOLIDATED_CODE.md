@@ -1,5 +1,5 @@
 # Repository Codebase Context
-Generated on Tue Oct  6 02:40:18 UTC 2026
+Generated on Tue Oct  6 02:41:25 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -1100,6 +1100,7 @@ fi
 COMPOSE=(docker compose
          -f docker-compose.yml
          -f openhands/docker-compose.openhands.yml
+         -f hermes/docker-compose.hermes.yml
          --env-file .env)
 
 # ---------------------------------------------------------------------------
