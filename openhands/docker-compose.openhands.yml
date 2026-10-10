@@ -98,6 +98,18 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
 
+    # Two networks, deliberately:
+    #   default   -- the shared `hybrid-ai` stack network (unchanged).
+    #   coder-net -- the internal network shared only with `hermes`, so Hermes
+    #                can reach this API at http://openhands:3000 by service
+    #                name without a host port. `coder-net` is `internal: true`
+    #                and defined in docker-compose.yml.
+    # Listing `default` explicitly keeps OpenHands on the shared network; the
+    # later phase that removes it will delete this line, not add one.
+    networks:
+      - default
+      - coder-net
+
     security_opt:
       - no-new-privileges:true
 

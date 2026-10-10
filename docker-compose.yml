@@ -358,5 +358,22 @@ services:
 # contract note at the top of this file for why.
 
 networks:
+  # The shared stack network. Every service in this file (and the OpenHands
+  # overlay) joins it implicitly, so containers can reach each other by service
+  # name. It is NOT isolated from the host.
   default:
     name: hybrid-ai
+
+  # coder-net :: the private path between the two code-aware services.
+  #
+  # `internal: true` means Docker gives this network no route off the host: a
+  # container on it can reach the other containers on it, and nothing else --
+  # no LAN, no internet, no published host ports. Only `openhands` (in the
+  # overlay) and `hermes` (in the Hermes overlay) attach to it. Hermes uses it
+  # to reach the OpenHands API at http://openhands:3000 by service name.
+  #
+  # This adds no host port binds. The existing OpenHands binds on 127.0.0.1 and
+  # 172.17.0.1 are unchanged and unrelated to this network.
+  coder-net:
+    name: coder-net
+    internal: true

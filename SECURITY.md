@@ -119,6 +119,74 @@ Accepted, with rationale:
 
 ---
 
+## Container networking: the OpenHands 172.17.0.1 exception
+
+OpenHands is a controller that creates a **sandbox** container per conversation. OpenHands V1
+starts those sandboxes on Docker's default bridge and hardcodes each sandbox's webhook to
+`http://host.docker.internal:<host_port>/api/v1/webhooks`, where `host.docker.internal`
+resolves to the bridge gateway `172.17.0.1`.
+
+For a sandbox to deliver its webhook, the OpenHands app server must be reachable at that
+address. That is why the service publishes a second bind:
+
+```
+- "172.17.0.1:${OPENHANDS_PORT:-3001}:3000"
+```
+
+**This is an accepted, pre-existing exception to the loopback-only rule** (added in commit
+`018bbb6`), not a weakening of it:
+
+- `172.17.0.1` is the host's own address on the Docker bridge. It is reachable from
+  containers on that bridge, and **not from the LAN or tailnet**.
+- The UI bind `127.0.0.1:${OPENHANDS_PORT:-3001}` is unchanged and remains loopback-only.
+- `doctor.sh` fails the run if the `172.17.0.1` binding is missing, because sandboxes then
+  cannot deliver webhooks.
+
+Do not widen this bind, and do not change the webhook path. It is required by the current
+OpenHands release; removing the need for it is a separate change.
+
+### The internal `coder-net` network
+
+A second network, `coder-net`, is defined in `docker-compose.yml` with `internal: true`. It
+has exactly two members — `openhands` and `hermes` — and no route off the host: no LAN, no
+internet, no published ports.
+
+Its purpose is to let Hermes reach the OpenHands API at `http://openhands:3000` by service
+name without a host port. It **adds no host bindings** and does not affect the loopback-only
+posture of the OpenHands UI. `doctor.sh` checks that `coder-net` is internal and that it
+carries no member other than those two containers.
+
+### The read-only agent-repo mount
+
+The OpenHands working clone (`${OPENHANDS_WORKSPACE}`) is mounted into the Hermes container
+**read-only** at `/agent-repo`, in addition to the pre-existing read-only `/workspace` mount.
+Hermes reads the code OpenHands is working on; it cannot modify it. Writes to `/agent-repo`
+fail inside the container.
+
+Two properties keep this safe:
+
+- **`:ro` is enforced by Docker.** The mount is not writable from inside the container.
+- **The clone is never the deployment directory.** `scripts/setup-agent-workspace.sh` refuses
+  a workspace that is, or is inside, the deployment directory, so the read-only mount cannot
+  expose `.env` or the log files.
+
+`doctor.sh` checks that the `/agent-repo` mount exists and is read-only.
+
+### Pre-existing gaps, flagged but not fixed here
+
+Recorded so they are not mistaken for properties of the changes above. All are addressed in a
+later phase.
+
+| Gap | Detail |
+|---|---|
+| Hermes ports bind all interfaces | `HERMES_PORT` (default `8501`) and `HERMES_API_PORT` (default `8642`) are published on `0.0.0.0`. |
+| Hermes mounts the deployment directory read-write | `./hermes_data`, inside the deployment directory, is writable at `/root/.hermes`. |
+| Hermes runs as root | `hermes/Dockerfile` has no `USER` directive; a tracked `TODO(security)`. |
+| OpenHands sandbox ports publish on all interfaces | Sandboxes publish their agent-server port on the host. |
+| Hermes has no Docker socket | Good — listed for contrast: the read-only mount gives Hermes code visibility, not control. |
+
+---
+
 ## Required action for existing deployments
 
 **1. Add the SSH host key secret.** On the Pi:

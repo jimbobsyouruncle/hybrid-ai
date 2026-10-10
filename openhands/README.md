@@ -55,6 +55,24 @@ and fails if a `.env` or log file is found in the clone.
 
 ---
 
+## The clone is also visible to Hermes, read-only
+
+Hermes reads the same clone at `/agent-repo`, mounted read-only
+(`${OPENHANDS_WORKSPACE}:/agent-repo:ro`). It is never the deployment directory — the same
+script above refuses that — and `:ro` means Hermes can read the code OpenHands is working on
+but cannot modify it. Writes to `/agent-repo` fail inside the Hermes container.
+
+OpenHands and Hermes share one dedicated Docker network, `coder-net`, defined in
+`docker-compose.yml` with `internal: true`. It has exactly two members — `openhands` and
+`hermes` — and no route off the host: no LAN, no internet, no published ports. Hermes uses it
+to reach the OpenHands API at `http://openhands:3000` by service name.
+
+This adds no host port bindings. OpenHands keeps its existing `127.0.0.1` bind for the UI and
+its `172.17.0.1` bind for sandbox webhooks, both unchanged (see the note in
+"Security summary" below).
+
+---
+
 ## Access
 
 Loopback only, by design. From your workstation:
@@ -138,7 +156,10 @@ Verify redaction before exposing a bundle to any cloud-hosted model.
 | Control | Mechanism |
 |---|---|
 | No credential access | Workspace is a clone; `.env` is not in it |
-| Not internet-reachable | Binds `127.0.0.1` only; no Caddy route |
+| Not internet-reachable | Binds `127.0.0.1` (UI) and `172.17.0.1` (sandbox webhooks) only; no Caddy route |
+| Sandboxes can reach the API without a public port | `172.17.0.1:${OPENHANDS_PORT:-3001}` bind, reachable from the Docker bridge only, never the LAN |
+| Hermes reads the clone without being able to change it | `${OPENHANDS_WORKSPACE}:/agent-repo:ro` |
+| Hermes-only API path, no host port | internal `coder-net`, members `openhands` and `hermes` |
 | No automatic merge | Agent stops after commit; branch protection on `main` |
 | Injection resistance | `AGENTS.md` classifies repo text and logs as untrusted data |
 | Resource bounded | Memory and CPU limits so agent work cannot starve chat |
