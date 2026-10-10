@@ -80,6 +80,33 @@ Your RunPod prompts travel over an encrypted private network. The cloud server k
 
 Cold starts are the honest cost of this design. Subsequent messages in the same session are immediate, because the pod is already warm and the watchdog counter keeps resetting while you work. If you prefer to bypass the cold start entirely for a quick query, the OpenRouter fallback provides instant access to cloud models on a per-token basis.
 
+### Networks and ports
+
+All containers join one shared Docker network, `hybrid-ai`, and reach each other by service name (for example, Open WebUI talks to Ollama at `http://ollama:11434`).
+
+This project adds a second, private network for the two code-aware services:
+
+| Network | Defined in | Members | Reachable from | Purpose |
+|---|---|---|---|---|
+| `hybrid-ai` | `docker-compose.yml` (the compose default) | every service | the host and each other | normal service-to-service traffic |
+| `coder-net` | `docker-compose.yml`, `internal: true` | `openhands` and `hermes` only | each other only — no host, LAN, or internet route | Hermes reaches the OpenHands API at `http://openhands:3000` by service name |
+
+`coder-net` is `internal: true`, so Docker gives it no route off the host. It publishes no ports, and adding it does not create any host port binding. The OpenHands UI keeps its existing binds on `127.0.0.1` and `172.17.0.1` — see [openhands/README.md](openhands/README.md) and [SECURITY.md](SECURITY.md).
+
+Host ports, and who can reach them:
+
+| Service | Host bind | Reached by |
+|---|---|---|
+| Open WebUI | `3000` on all interfaces | your browser, on the LAN and tailnet |
+| Hermes Agent UI | `${HERMES_PORT:-8501}` on all interfaces | your browser, on the LAN and tailnet |
+| Hermes Agent API | `${HERMES_API_PORT:-8642}` on all interfaces | your browser, on the LAN and tailnet |
+| Ollama | `127.0.0.1:11434` | the Pi only |
+| OpenHands | `127.0.0.1:${OPENHANDS_PORT:-3001}` | you, over an SSH tunnel |
+| OpenHands | `172.17.0.1:${OPENHANDS_PORT:-3001}` | Docker sandboxes only, for webhooks |
+| Status page, proxy | none (behind Caddy) | the proxy |
+
+The Hermes binds on all interfaces and the OpenHands sandbox ports are pre-existing gaps, recorded in [SECURITY.md](SECURITY.md) and [hermes/README.md](hermes/README.md); a later phase narrows them. This change adds no host binds.
+
 ---
 
 ## Performance on a Raspberry Pi 5
@@ -147,11 +174,15 @@ During setup, `install.sh` configures a local domain (e.g., `yourhostname.com`).
 
 The project includes **Hermes Agent**, a persistent memory and skill orchestration engine. Hermes sits alongside Open WebUI, managing long-term user context, storing explicit memories in `hermes_data/`, and providing a framework for custom tool skills. It operates independently of the chat interface, ensuring that your AI assistant retains knowledge of your preferences, environment, and ongoing projects across distinct chat sessions.
 
+Hermes reads the OpenHands working clone at `/agent-repo` (mounted read-only) and reaches the OpenHands API at `http://openhands:3000` over the internal `coder-net` network. See [hermes/README.md](hermes/README.md).
+
 ## OpenHands code-maintenance agent
 
 The project includes a separate OpenHands service for natural-language code maintenance. It works in a separate clone at `~/hybrid-ai-agent`; the deployment directory is not visible to the agent, creates isolated agent-server containers, and supports an inspect, branch, edit, test, and commit workflow. 
 
 The OpenHands controller uses the Docker socket to create sandboxes. Docker-socket access is effectively host-level control. Keep human review and branch protection enabled. See [openhands/README.md](openhands/README.md).
+
+The same clone is mounted read-only into Hermes at `/agent-repo`, and OpenHands joins the internal `coder-net` network so Hermes can call its API by service name. Neither change adds a host port.
 
 ## Prerequisites
 
@@ -406,7 +437,7 @@ Put that in a password manager. Rehearse a restore before you need one:
 | `openwebui/` | The Python bridge to the cloud GPU | [`openwebui/README.md`](openwebui/README.md) |
 | `status/` | Status page and reverse proxy | [`status/README.md`](status/README.md) |
 | `runpod/` | Everything that runs on the rented GPU | [`runpod/README.md`](runpod/README.md) |
-| `hermes/` | Hermes Agent system orchestrator | Commented inline |
+| `hermes/` | Hermes Agent system orchestrator | [hermes/README.md](hermes/README.md) |
 | `openhands/` | Natural-language code-maintenance agent | [openhands/README.md](openhands/README.md) |
 | `backup/` | Encrypted backups to Cloudflare R2 | [`backup/README.md`](backup/README.md) |
 | `webui_data/` | **Your data.** Chats, documents, vectors | Created at runtime, never committed |

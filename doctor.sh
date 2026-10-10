@@ -343,6 +343,61 @@ for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy hybrid-ai-openhand
   esac
 done
 
+# --- Hermes :: read-only agent-repo mount and the internal coder-net ---------
+# Two things this change introduced, both load-bearing:
+#   1. /agent-repo is the OpenHands clone mounted READ-ONLY. If it ever became
+#      writable, Hermes could edit the repository the sandbox is reviewing.
+#   2. coder-net is the internal network shared only by hermes and openhands.
+#      Any other member is a misconfiguration worth surfacing.
+if docker info >/dev/null 2>&1; then
+  if docker inspect hermes-agent >/dev/null 2>&1; then
+    REPO_RW="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/agent-repo"}}{{.RW}}{{end}}{{end}}' hermes-agent 2>/dev/null)"
+    if [[ "$REPO_RW" == "false" ]]; then
+      pass "Hermes /agent-repo is mounted read-only"
+    elif [[ "$REPO_RW" == "true" ]]; then
+      fail "Hermes /agent-repo is mounted READ-WRITE" \
+           "It must be ':ro'. Fix hermes/docker-compose.hermes.yml, then: ${COMPOSE_CMD} up -d hermes"
+    else
+      fail "Hermes has no /agent-repo mount" \
+           "Add '\${OPENHANDS_WORKSPACE:?...}:/agent-repo:ro' to hermes/docker-compose.hermes.yml, then: ${COMPOSE_CMD} up -d hermes"
+    fi
+  else
+    warn "hermes-agent container not found" "Cannot verify the /agent-repo mount. Run ./install.sh."
+  fi
+
+  # coder-net must be internal and carry exactly hermes-agent + hybrid-ai-openhands.
+  CNET_INTERNAL="$(docker network inspect coder-net -f '{{.Internal}}' 2>/dev/null)"
+  if [[ -z "$CNET_INTERNAL" ]]; then
+    warn "coder-net network not found" \
+         "Hermes cannot reach the OpenHands API by service name. Recreate: ${COMPOSE_CMD} up -d"
+  else
+    if [[ "$CNET_INTERNAL" == "true" ]]; then
+      pass "coder-net is internal (no route off the host)"
+    else
+      fail "coder-net is NOT internal" \
+           "Set 'internal: true' for coder-net in docker-compose.yml, then: ${COMPOSE_CMD} up -d"
+    fi
+
+    CNET_MEMBERS="$(docker network inspect coder-net -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ *$//')"
+    CNET_UNEXPECTED=""
+    for m in $CNET_MEMBERS; do
+      case "$m" in
+        hermes-agent|hybrid-ai-openhands) ;;
+        *) CNET_UNEXPECTED="${CNET_UNEXPECTED}${m} " ;;
+      esac
+    done
+    if [[ -n "$CNET_UNEXPECTED" ]]; then
+      fail "coder-net has unexpected member(s): ${CNET_UNEXPECTED% }" \
+           "Only hermes and openhands may attach. Recreate: ${COMPOSE_CMD} up -d"
+    elif [[ "$CNET_MEMBERS" == "hermes-agent hybrid-ai-openhands" ]]; then
+      pass "coder-net has exactly hermes and openhands attached"
+    else
+      warn "coder-net members: ${CNET_MEMBERS:-none} (expected hermes-agent + hybrid-ai-openhands)" \
+           "A container is stopped or not yet attached. Recreate: ${COMPOSE_CMD} up -d"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Services actually responding
 # ---------------------------------------------------------------------------

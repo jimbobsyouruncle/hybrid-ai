@@ -134,13 +134,17 @@ jobs:
           TAILSCALE_IP=100.64.0.1 RUNPOD_API_KEY=x \
           RUNPOD_POD_ID=x WEBUI_SECRET_KEY=x STATUS_UID=1000 DOCKER_GID=999 \
           OLLAMA_MEM_LIMIT=8g WEBUI_MEM_LIMIT=3g OLLAMA_CPUS=3.5 WEBUI_CPUS=2.0 \
+          LOCAL_DOMAIN=example.test OPENHANDS_SANDBOX_HOST=example.test \
           OPENHANDS_WORKSPACE=/tmp/agent-workspace
           set +a
           docker compose -f docker-compose.yml config --quiet
-          # The overlay is deployed on every install but was never validated
+          # The overlays are deployed on every install but were never validated
           # here, so a broken overlay reached the Pi before anything caught it.
+          # The Hermes overlay references the shared `coder-net` defined in
+          # docker-compose.yml, so it must be validated with all three files.
           docker compose -f docker-compose.yml \
                          -f openhands/docker-compose.openhands.yml \
+                         -f hermes/docker-compose.hermes.yml \
                          config --quiet
 
       - name: Assert proxy allowlist is intact

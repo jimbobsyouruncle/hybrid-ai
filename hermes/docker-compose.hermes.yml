@@ -15,6 +15,23 @@ services:
       # holds .env (RunPod key, WebUI secret) and the logs. Read-only: Hermes
       # reads code here; changes go through OpenHands or you.
       - ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:ro
+      # The SAME clone again, at /agent-repo, also read-only. This is the view
+      # Hermes uses to read the OpenHands working clone as a repository, and it
+      # is deliberately a separate mount point from /workspace so the two roles
+      # are distinguishable in docs and diagnostics. `:ro` is load-bearing:
+      # Hermes reads the clone; it must never write to it. The clone is never
+      # the deployment directory (scripts/setup-agent-workspace.sh refuses that).
+      - ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/agent-repo:ro
+    # Two networks, deliberately:
+    #   default   -- the shared `hybrid-ai` stack network (unchanged).
+    #   coder-net -- the internal network shared only with `openhands`, so
+    #                Hermes reaches the OpenHands API at http://openhands:3000
+    #                by service name. `coder-net` is `internal: true`; it adds
+    #                no host port binds and gives Hermes no route to the LAN or
+    #                the internet.
+    networks:
+      - default
+      - coder-net
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - LOCAL_DOMAIN=${LOCAL_DOMAIN}
