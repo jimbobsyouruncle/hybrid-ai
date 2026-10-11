@@ -361,6 +361,16 @@ if docker info >/dev/null 2>&1; then
       fail "Hermes has no /agent-repo mount" \
            "Add '\${OPENHANDS_WORKSPACE:?...}:/agent-repo:ro' to hermes/docker-compose.hermes.yml, then: ${COMPOSE_CMD} up -d hermes"
     fi
+
+    # The gateway ("gateway run") is the long-lived process that drains the
+    # kanban queue. Read-only host probe via docker top; never docker exec.
+    if docker top hermes-agent 2>/dev/null \
+         | grep -Eq '(^|[[:space:]])(hermes[[:space:]]+)?gateway[[:space:]]+run([[:space:]]|$)'; then
+      pass "Hermes gateway process is running inside hermes-agent"
+    else
+      warn "Hermes gateway process NOT running inside hermes-agent" \
+           "The kanban dispatcher will not run. Fix: ${COMPOSE_CMD} up -d --force-recreate hermes"
+    fi
   else
     warn "hermes-agent container not found" "Cannot verify the /agent-repo mount. Run ./install.sh."
   fi
