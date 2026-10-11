@@ -67,6 +67,32 @@ every interface. See the gaps below.
 
 ---
 
+## Processes
+
+| Process | Role | Started by |
+|---|---|---|
+| WebUI (`bootstrap.py`) | The container main process, PID 1: serves the Hermes WebUI. | The compose `command:` |
+| Hermes gateway / kanban dispatcher | A background process in the same container: drains the kanban queue. | The compose `command:` |
+
+Both are started by the compose `command:`, not by the Dockerfile `CMD`. The compose
+`command:` supersedes the image `CMD`, so what runs is the `command:` in
+`docker-compose.hermes.yml`: it starts the gateway in the background, then `exec`s
+`bootstrap.py` as PID 1.
+
+Check the gateway with `./doctor.sh`, or by hand with a read-only probe:
+
+```bash
+docker top hermes-agent        # look for a "gateway run" process
+```
+
+A crashed gateway is **not** restarted until the container restarts. Nothing supervises the
+background job, so a gateway that exits stays down while the WebUI keeps serving. Recreate the
+container to bring it back.
+
+The `--replace` flag keeps it to one gateway run instance across container restarts.
+
+---
+
 ## Environment variables
 
 Referenced by name only; values live in `.env`, which is gitignored.
