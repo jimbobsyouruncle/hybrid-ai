@@ -204,6 +204,8 @@ Add the output as a repository secret named `PI_SSH_HOST_KEY`. Without it the de
 
 **3. Confirm `--trust-remote-code` is off.** If you switched to a model that genuinely needs it, set `TRUST_REMOTE_CODE=1` explicitly and satisfy yourself the model repository is trustworthy.
 
+**4. Review and narrow the OpenHands token's repository list.** The existing OpenHands token currently sees more repositories than this project. In GitHub → Settings → Developer settings → Fine-grained tokens, edit it so that **Only select repositories** lists this repository alone, and confirm Contents and Metadata are both Read-only. If the token cannot be narrowed, revoke it and create a replacement.
+
 ---
 
 ## Ongoing practice
@@ -227,6 +229,38 @@ git log -p | grep -iE 'rpa_[A-Za-z0-9]|tskey-|BEGIN [A-Z]* PRIVATE KEY'
 If anything surfaces, rotate it. Rewriting history is not sufficient — clones and forks retain a copy.
 
 **Preserve the logging discipline.** Every log line in this codebase contains metadata only. A single `print(messages)` left behind after debugging would write your entire conversation history into the container logs and undo the guarantees the rest of the system is built on.
+
+### GitHub credential separation
+
+Two distinct GitHub tokens are used. They are never interchangeable.
+
+| | OpenHands token | Builder token (`BUILDER_GITHUB_TOKEN`) |
+|---|---|---|
+| Type | Fine-grained PAT | Fine-grained PAT |
+| Repository access | Only select repositories | Only select repositories |
+| Contents | Read-only | Read and write |
+| Pull requests | None | Read and write |
+| Metadata | Read-only | Read-only |
+| Administration | None | None |
+| Workflows | None | None |
+| Organization scope | None | None |
+| Purpose | Clone and fetch only | Push `ai/*` branches and open PRs |
+
+The OpenHands token is read-only. OpenHands can read the repository and commit locally, but it
+cannot push, open a PR, or change anything on GitHub.
+
+The builder token never enters the sandbox, a URL, argv, a commit message, or a tracked file.
+It is supplied by name through the environment only, and pushes happen after independent review.
+Because it has no Workflows permission, changes under `.github/workflows/` cannot be pushed with
+it.
+
+**Rotation and narrowing policy**
+
+- Give each token an expiry. Rotate both at least quarterly, and immediately after any suspected exposure.
+- Rotate the tokens separately. Revoke the old token when its replacement goes live.
+- Narrow, never widen: if a token fails for lack of a permission, fix the workflow rather than adding permission. Any new permission needs a written reason in this file.
+- Review the repository list of each token whenever repositories are added to or removed from the account. A token should see this project and nothing else.
+- Never place token values in docs, examples, logs, or diagnostic bundles.
 
 ---
 
