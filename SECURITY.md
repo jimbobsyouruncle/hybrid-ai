@@ -204,7 +204,7 @@ Add the output as a repository secret named `PI_SSH_HOST_KEY`. Without it the de
 
 **3. Confirm `--trust-remote-code` is off.** If you switched to a model that genuinely needs it, set `TRUST_REMOTE_CODE=1` explicitly and satisfy yourself the model repository is trustworthy.
 
-**4. Review and narrow the OpenHands token's repository list.** The existing OpenHands token currently sees more repositories than this project. In GitHub → Settings → Developer settings → Fine-grained tokens, edit it so that **Only select repositories** lists this repository alone, and confirm Contents and Metadata are both Read-only. If the token cannot be narrowed, revoke it and create a replacement.
+**4. Review and narrow the OpenHands token's repository list.** Check whether the existing OpenHands token lists repositories beyond this project, and if it does, narrow it. In GitHub → Settings → Developer settings → Fine-grained tokens, edit it so that **Only select repositories** lists this repository alone, and confirm Contents and Metadata are both Read-only. If the token cannot be narrowed, revoke it and create a replacement.
 
 ---
 

@@ -85,9 +85,12 @@ Referenced by name only; values live in `.env`, which is gitignored.
 ## Credentials: `BUILDER_GITHUB_TOKEN`
 
 `BUILDER_GITHUB_TOKEN` is the GitHub credential the builder uses to push `ai/*` branches and
-open pull requests. It is referenced by name only; the value lives in `.env`, which is
-gitignored. It is separate from the read-only OpenHands token and never enters the OpenHands
-sandbox (see [`../SECURITY.md`](../SECURITY.md#github-credential-separation)).
+open pull requests. It is supplied to the builder/Hermes agent by name through the builder
+agent environment only. It is not read from the deployment `.env` and not set by
+`docker-compose.hermes.yml`. Its value is never placed in the deployment `.env`, in
+`.env.example`, in the OpenHands sandbox, on the command line (argv), in a URL, in a commit, or
+in any tracked file. It is separate from the read-only OpenHands token (see
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation)).
 
 Create it as a fine-grained personal access token with:
 
