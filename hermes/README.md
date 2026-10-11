@@ -82,6 +82,30 @@ Referenced by name only; values live in `.env`, which is gitignored.
 
 ---
 
+## Credentials: `BUILDER_GITHUB_TOKEN`
+
+`BUILDER_GITHUB_TOKEN` is the GitHub credential the builder uses to push `ai/*` branches and
+open pull requests. It is supplied to the builder/Hermes agent by name through the builder
+agent environment only. It is not read from the deployment `.env` and not set by
+`docker-compose.hermes.yml`. Its value is never placed in the deployment `.env`, in
+`.env.example`, in the OpenHands sandbox, on the command line (argv), in a URL, in a commit, or
+in any tracked file. It is separate from the read-only OpenHands token (see
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation)).
+
+Create it as a fine-grained personal access token with:
+
+- **Repository access:** Only select repositories.
+- **Contents:** Read and write.
+- **Pull requests:** Read and write.
+- **Metadata:** Read-only.
+- **Not granted:** no Administration, no Workflows, no organization scope.
+
+Because the token has no Workflows permission, a push that edits anything under
+`.github/workflows/` is rejected by GitHub. This is by design: workflow changes must be made
+by a human with the right access.
+
+---
+
 ## Reaching OpenHands from Hermes
 
 Over `coder-net`, from inside the `hermes-agent` container, the OpenHands API answers at:

@@ -131,13 +131,22 @@ surprise is worth avoiding.
 ## Git workflow
 
 ```text
-request → ai/* branch → tests → commit → you review → push → PR → you merge
+request -> ai/* branch -> commit (OpenHands) -> independent review -> builder pushes + opens PR -> merge
 ```
 
-The agent is instructed to stop after committing. Pushing and opening a PR need git
-credentials in the sandbox; prefer a GitHub App or a fine-grained token scoped to this one
-repository with Contents read/write and Pull requests read/write. Do not grant administration
-or workflow permissions. Never enable automatic merge.
+The agent is instructed to stop after committing. OpenHands never pushes and never opens a
+PR; the builder does that after an independent review (see
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation)). Never enable automatic merge.
+
+The OpenHands token is read-only. Use a fine-grained personal access token with:
+
+- **Repository access:** Only select repositories (this project only).
+- **Contents:** Read-only.
+- **Metadata:** Read-only.
+
+This is enough to clone and fetch. Do not grant Pull requests, Administration, or Workflows
+permissions. The write capability (push and PR) belongs to the builder token, which stays out
+of the sandbox.
 
 ---
 
