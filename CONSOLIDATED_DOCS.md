@@ -1,17 +1,17 @@
 # Repository RAG Corpus
-Generated on Tue Oct  6 04:35:04 UTC 2026
+Generated on Sun Oct 11 20:55:41 UTC 2026
 
 ---
 source_path: "CONSOLIDATED_CODE.md"
 filename: "CONSOLIDATED_CODE.md"
 directory: "."
 title: "Repository Codebase Context"
-word_count: 36147
-line_count: 7770
+word_count: 36913
+line_count: 7896
 ---
 
 # Repository Codebase Context
-Generated on Tue Oct  6 04:31:49 UTC 2026
+Generated on Sat Oct 10 21:52:32 UTC 2026
 
 ## File: backup/backup.sh
 ---
@@ -24,76 +24,89 @@ Directory: `backup`
 # PURPOSE (plain English):
 #   Backs up everything you would be upset to lose -- your chat history, your
 #   uploaded documents, the vector database that makes document search
-#   work, Hermes Agent memories, and OpenHands configurations -- to Cloudflare
-#   R2, encrypted before it ever leaves the Pi[cite: 2].
+#   work, Hermes Agent memories, and OpenHands configuration -- to Cloudflare
+#   R2, encrypted before it ever leaves the Pi.
 #
-#   It runs automatically every night via a systemd timer[cite: 2]. You can also run it
-#   by hand at any time[cite: 2].
+#   It runs automatically every night via a systemd timer. You can also run it
+#   by hand at any time.
 #
 # WHY RESTIC:
-#   - Encrypts on the Pi[cite: 2]. Cloudflare stores ciphertext and cannot read it[cite: 2].
+#   - Encrypts on the Pi. Cloudflare stores ciphertext and cannot read it.
 #   - Deduplicates at block level, so the second backup of a 2 GB database
-#     uploads only the few MB that actually changed[cite: 2].
-#   - Keeps snapshots, so you can go back to "last Tuesday", not just "latest"[cite: 2].
+#     uploads only the few MB that actually changed.
+#   - Keeps snapshots, so you can go back to "last Tuesday", not just "latest".
 #
 # WHY CLOUDFLARE R2:
-#   - No egress fees[cite: 2]. Restoring 50 GB costs nothing in bandwidth, which is
-#     exactly when you least want a surprise bill[cite: 2].
-#   - Roughly $0.015/GB/month stored[cite: 2]. A typical setup costs pennies[cite: 2].
+#   - No egress fees. Restoring 50 GB costs nothing in bandwidth, which is
+#     exactly when you least want a surprise bill.
+#   - Roughly $0.015/GB/month stored. A typical setup costs pennies.
 #
 # THE HARD PART -- WHY WE DO NOT JUST COPY THE FILES:
-#   Open WebUI keeps its data in SQLite, ChromaDB keeps vectors in SQLite,
-#   and Hermes Agent stores memory state in SQLite. Copying a SQLite file
-#   while the application is writing to it produces a CORRUPT copy[cite: 2]. It will look
-#   fine[cite: 2]. It will back up without error[cite: 2]. It will fail to open when you finally
-#   need it, which is the worst possible time to discover the problem[cite: 2].
+#   Open WebUI keeps its data in SQLite and ChromaDB keeps vectors in SQLite.
+#   Copying a SQLite file while the application is writing to it produces a
+#   CORRUPT copy. It will look fine. It will back up without error. It will
+#   fail to open when you finally need it.
 #
-#   So this script does NOT copy the live database files directly[cite: 2]. It asks SQLite to
-#   produce a consistent snapshot first (see snapshot_sqlite below), backs up
-#   that snapshot, and excludes the live files entirely[cite: 2]. This is the single
-#   most important thing this script does[cite: 2].
+#   So this script does NOT copy the live database files directly. It asks
+#   SQLite to produce a consistent snapshot first (see snapshot_sqlite), backs
+#   up that snapshot, and excludes the live files entirely.
 #
-# WHAT GETS BACKED UP:
-#   - Consistent SQLite snapshots (Open WebUI, ChromaDB, and Hermes Agent state)
-#   - Uploaded documents and any other non-database files in webui_data
-#   - Hermes Agent memories (~/.hermes/) and acquired skill definitions
-#   - OpenHands state (~/.openhands/) and maintenance workspace settings
-#   - Your .env configuration and local reverse proxy rules (status/Caddyfile)
-#   - A manifest recording what was captured and from which versions
+# CONTAINER CONTROL:
+#   Containers are paused/stopped by CONTAINER NAME with plain docker
+#   commands, never via 'docker compose'. hermes-agent lives in an overlay
+#   compose file, so a compose call without every -f file cannot see it and
+#   fails silently -- which once meant the "cold copy" ran against live DBs.
+#   Anything this script pauses or stops is resumed by the EXIT trap, even if
+#   the script fails part-way.
+#
+# WHAT GETS BACKED UP (staging paths are relative to the repo directory):
+#   - databases/   Consistent SQLite snapshots (Open WebUI, Chroma)
+#   - files/       Uploads, non-DB vector data, durable hermes_data state
+#   - hermes/      Durable ~/.hermes state (caches/runtimes excluded)
+#   - openhands/   ~/.openhands state (cache/tmp/logs excluded)
+#   - host/        Compose files, scripts, Caddyfile, model list, metadata
+#   - env/         Your .env configuration
 #
 # WHAT DOES NOT:
-#   - ollama_data/ -- model weights, tens of GB, freely re-downloadable[cite: 2].
-#     Backing them up would dominate cost for zero benefit[cite: 2].
+#   - ollama_data/ -- model weights, tens of GB, freely re-downloadable.
 #
 # USAGE:
-#   ./backup.sh             run a backup now[cite: 2]
-#   ./backup.sh --check     verify repository integrity (slow, reads data)[cite: 2]
-#   ./backup.sh --init      create the repository (first-time setup)[cite: 2]
-#   ./backup.sh --dry-run   show what would be backed up, upload nothing[cite: 2]
+#   ./backup.sh                    run a backup now
+#   ./backup.sh --check            verify repository integrity (slow)
+#   ./backup.sh --init             create the repository (first-time setup)
+#   ./backup.sh --dry-run          show what would be backed up, upload nothing
+#   ./backup.sh --non-interactive  never prompt (used by the systemd timer)
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-cd "$REPO_DIR"
+cd "$REPO_DIR" || exit 1
 
-# Credentials live OUTSIDE the git repository, in a root-only directory, so
-# that no git operation and no careless `tar czf` of the project folder can
-# ever sweep them up[cite: 2].
+# Credentials live OUTSIDE the git repository so that no git operation and no
+# careless 'tar czf' of the project folder can ever sweep them up.
 BACKUP_CONF_DIR="${BACKUP_CONF_DIR:-${HOME}/.config/hybrid-ai-backup}"
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
 
-# Where consistent database snapshots are staged before upload. Deliberately
-# on local disk, deliberately wiped afterwards[cite: 2].
+# Where consistent snapshots are staged before upload. Wiped afterwards.
 STAGING_DIR="${REPO_DIR}/.backup-staging"
-
 BACKUP_LOG="${BACKUP_LOG:-${REPO_DIR}/backup.log}"
 
-# Retention. Restic keeps the most recent snapshot in each bucket[cite: 2].
 KEEP_DAILY="${KEEP_DAILY:-7}"
 KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
 KEEP_MONTHLY="${KEEP_MONTHLY:-6}"
+
+# Every compose file, so 'config --images' reports the full stack.
+COMPOSE=(docker compose -p hybrid-ai --env-file "${REPO_DIR}/.env"
+         -f "${REPO_DIR}/docker-compose.yml"
+         -f "${REPO_DIR}/openhands/docker-compose.openhands.yml"
+         -f "${REPO_DIR}/hermes/docker-compose.hermes.yml")
+
+# Container names (not compose service names) that write durable state.
+APP_CONTAINERS=(open-webui hermes-agent)
+PAUSED_CONTAINERS=()
+STOPPED_CONTAINERS=()
 
 MODE="backup"
 NON_INTERACTIVE=0
@@ -103,7 +116,7 @@ for arg in "$@"; do
     --init)            MODE="init" ;;
     --dry-run)         MODE="dryrun" ;;
     --non-interactive) NON_INTERACTIVE=1 ;;
-    -h|--help) sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -120,7 +133,7 @@ ok()   { printf '%s[ OK ]%s %s\n' "$C_OK"  "$C_RST" "$*"; }
 warn() { printf '%s[ ! ]%s %s\n'  "$C_WRN" "$C_RST" "$*" >&2; }
 
 # Structured, greppable record of every run. METADATA ONLY -- never write a
-# credential, a filename from a user document, or any chat content here[cite: 2].
+# credential, a user document filename, or any chat content here.
 event() {
   local name="$1"; shift
   printf 'EVENT ts=%s event=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$*" \
@@ -133,17 +146,50 @@ die() {
   exit 1
 }
 
-# AVAILABILITY: always clean up staged database copies, even on failure[cite: 2].
+# --- Container control -----------------------------------------------------
+is_running() { [[ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" == "running" ]]; }
+
+unpause_webui() {
+  local c
+  for c in "${PAUSED_CONTAINERS[@]}"; do
+    docker unpause "$c" >/dev/null 2>&1 || warn "Could not unpause ${c}. Run: docker unpause ${c}"
+  done
+  PAUSED_CONTAINERS=()
+}
+
+restart_stopped() {
+  if (( ${#STOPPED_CONTAINERS[@]} > 0 )); then
+    docker start "${STOPPED_CONTAINERS[@]}" >/dev/null 2>&1 \
+      || warn "Could not restart ${STOPPED_CONTAINERS[*]}. Run: docker start ${STOPPED_CONTAINERS[*]}"
+    STOPPED_CONTAINERS=()
+  fi
+}
+
+pause_webui() {
+  [[ "${BACKUP_NO_PAUSE:-0}" == "1" ]] && return 1
+  command -v docker >/dev/null 2>&1 || return 1
+  local c
+  for c in "${APP_CONTAINERS[@]}"; do
+    is_running "$c" || continue
+    if docker pause "$c" >/dev/null 2>&1; then
+      PAUSED_CONTAINERS+=("$c")
+    fi
+  done
+  (( ${#PAUSED_CONTAINERS[@]} > 0 ))
+}
+
+# AVAILABILITY: always resume services and clean staged copies, even on failure.
 cleanup() {
   local rc=$?
-  if declare -F unpause_webui >/dev/null 2>&1; then unpause_webui; fi
+  unpause_webui
+  restart_stopped
   if [[ -d "$STAGING_DIR" ]]; then
     rm -rf "$STAGING_DIR" 2>/dev/null || true
   fi
   return $rc
 }
 trap cleanup EXIT
-trap 'die "Failed at line ${LINENO}:${BASH_COMMAND}"' ERR
+trap 'die "Failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
 
 touch "$BACKUP_LOG" 2>/dev/null && chmod 600 "$BACKUP_LOG" 2>/dev/null || true
 
@@ -158,6 +204,7 @@ for f in "$R2_ENV_FILE" "$RESTIC_PW_FILE"; do
   [[ "$perms" == "600" ]] || die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600 ${f}"
 done
 
+# SECURITY: parsed line by line, never sourced. 'source' would execute $(...).
 while IFS= read -r _line || [[ -n "$_line" ]]; do
   [[ "$_line" =~ ^[[:space:]]*# ]] && continue
   [[ "$_line" =~ ^[[:space:]]*$ ]] && continue
@@ -169,14 +216,12 @@ while IFS= read -r _line || [[ -n "$_line" ]]; do
   fi
 done < "$R2_ENV_FILE"
 unset _line _k _v
-
 export RESTIC_PASSWORD_FILE="$RESTIC_PW_FILE"
 
-[[ -n "${RESTIC_REPOSITORY:-}" ]]    || die "RESTIC_REPOSITORY not set in ${R2_ENV_FILE}"
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]]    || die "AWS_ACCESS_KEY_ID not set in ${R2_ENV_FILE}"
-[[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]|| die "AWS_SECRET_ACCESS_KEY not set in ${R2_ENV_FILE}"
-
-command -v restic >/dev/null 2>&1 || die "restic is not installed. Run ./install.sh, or: sudo apt-get install -y restic"
+[[ -n "${RESTIC_REPOSITORY:-}" ]]     || die "RESTIC_REPOSITORY not set in ${R2_ENV_FILE}"
+[[ -n "${AWS_ACCESS_KEY_ID:-}" ]]     || die "AWS_ACCESS_KEY_ID not set in ${R2_ENV_FILE}"
+[[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || die "AWS_SECRET_ACCESS_KEY not set in ${R2_ENV_FILE}"
+command -v restic >/dev/null 2>&1 || die "restic is not installed. Run: sudo apt-get install -y restic"
 
 BACKUP_HOST="${RESTIC_HOST:-$(hostname -s)}"
 
@@ -192,15 +237,15 @@ if [[ "$MODE" == "init" ]]; then
   restic init || die "restic init failed. Check your R2 credentials and bucket name."
   event "repo_initialised" "host=${BACKUP_HOST}"
   ok "Repository created."
-  cat <<'EOF'
+  cat <<'MSG'
 
   IMPORTANT -- do this now, not later:
 
   Store your repository password somewhere OFF this Pi. A password manager is
-  ideal. If the SD card dies and the password died with it, your backups are
+  ideal. If the disk dies and the password died with it, your backups are
   permanently unreadable. Restic has no recovery mechanism, by design.
 
-EOF
+MSG
   exit 0
 fi
 
@@ -222,35 +267,9 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 4. Capture application data consistently
 # ---------------------------------------------------------------------------
-PAUSED=0
-
-unpause_webui() {
-  if (( PAUSED )); then
-    docker compose --env-file "${REPO_DIR}/.env" unpause open-webui hermes-agent >/dev/null 2>&1 || \
-      docker unpause open-webui hermes-agent >/dev/null 2>&1 || true
-    PAUSED=0
-  fi
-}
-
-pause_webui() {
-  [[ "${BACKUP_NO_PAUSE:-0}" == "1" ]] && return 1
-  command -v docker >/dev/null 2>&1 || return 1
-  [[ -f "${REPO_DIR}/.env" ]] || return 1
-
-  docker ps --format '{{.Names}}' 2>/dev/null | grep -qE 'open-webui|hermes-agent' || return 1
-
-  if docker compose --env-file "${REPO_DIR}/.env" pause open-webui hermes-agent >/dev/null 2>&1 || \
-     docker pause open-webui hermes-agent >/dev/null 2>&1; then
-    PAUSED=1
-    return 0
-  fi
-  return 1
-}
-
 snapshot_sqlite() {
   local src="$1" dest="$2"
   mkdir -p "$(dirname "$dest")"
-
   if command -v sqlite3 >/dev/null 2>&1; then
     if sqlite3 "file:${src}?mode=ro" ".timeout 10000" "VACUUM INTO '${dest}'" 2>/dev/null; then
       return 0
@@ -264,14 +283,14 @@ snapshot_sqlite() {
 }
 
 [[ "$MODE" == "dryrun" ]] || log "Capturing application state..."
-
 rm -rf "$STAGING_DIR"
-mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" "${STAGING_DIR}/host" "${STAGING_DIR}/hermes" "${STAGING_DIR}/openhands"
+mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" \
+         "${STAGING_DIR}/host" "${STAGING_DIR}/hermes" "${STAGING_DIR}/openhands"
 chmod 700 "$STAGING_DIR"
 
 if pause_webui; then
   CONSISTENCY="paused"
-  [[ "$MODE" == "dryrun" ]] || ok "Open WebUI & Hermes Agent paused for point-in-time capture."
+  [[ "$MODE" == "dryrun" ]] || ok "Paused for point-in-time capture: ${PAUSED_CONTAINERS[*]}"
 else
   CONSISTENCY="online"
   [[ "$MODE" == "dryrun" ]] || warn "Could not pause containers; capturing live (see BACKUP_NO_PAUSE)."
@@ -280,7 +299,8 @@ fi
 DB_COUNT=0
 DB_FAILED=0
 
-# --- Snapshot only databases containing durable application state ---
+# Paths are staged RELATIVE TO THE REPO (e.g. databases/webui_data/webui.db).
+# restore.sh relies on this layout.
 DB_PATHS=(
   "${REPO_DIR}/webui_data/webui.db"
   "${REPO_DIR}/webui_data/vector_db/chroma.sqlite3"
@@ -298,7 +318,7 @@ for db in "${DB_PATHS[@]}"; do
   fi
 done
 
-# --- Allow-list durable non-database state ---
+# --- Allow-list durable non-database state ---------------------------------
 if [[ -d "${REPO_DIR}/webui_data/uploads" ]]; then
   mkdir -p "${STAGING_DIR}/files/webui_data/uploads"
   rsync -a "${REPO_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || \
@@ -315,7 +335,7 @@ if [[ -d "${REPO_DIR}/webui_data/vector_db" ]]; then
     warn "rsync reported issues copying Open WebUI vector data; continuing."
 fi
 
-# hermes_data contains reconstructable runtimes/caches. Preserve only named durable state.
+# hermes_data contains reconstructable runtimes/caches. Keep only durable state.
 for d in memories memory skills config configs sessions; do
   if [[ -d "${REPO_DIR}/hermes_data/${d}" ]]; then
     mkdir -p "${STAGING_DIR}/files/hermes_data/${d}"
@@ -325,7 +345,6 @@ for d in memories memory skills config configs sessions; do
 done
 
 if [[ -d "${HOME}/.hermes" ]]; then
-  mkdir -p "${STAGING_DIR}/hermes"
   rsync -a \
     --exclude='cache/' --exclude='tools/' --exclude='installs/' \
     --exclude='node_modules/' --exclude='.git/' --exclude='venv/' --exclude='.venv/' \
@@ -336,7 +355,6 @@ if [[ -d "${HOME}/.hermes" ]]; then
 fi
 
 if [[ -d "${HOME}/.openhands" ]]; then
-  mkdir -p "${STAGING_DIR}/openhands"
   rsync -a --exclude='cache/' --exclude='tmp/' --exclude='logs/' \
     "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || \
     warn "rsync reported issues copying OpenHands state; continuing."
@@ -345,14 +363,21 @@ fi
 unpause_webui
 [[ "$MODE" == "dryrun" ]] || ok "Capture complete; application services resumed."
 
+# --- Cold-copy fallback ----------------------------------------------------
 if (( DB_FAILED > 0 )); then
   warn "${DB_FAILED} database(s) could not be snapshotted online."
-  if command -v docker >/dev/null 2>&1 && [[ -f "${REPO_DIR}/.env" ]]; then
+  if command -v docker >/dev/null 2>&1; then
     warn "Falling back to a cold copy. Services will be briefly unavailable."
     event "cold_copy_fallback" "failed_dbs=${DB_FAILED}"
     CONSISTENCY="cold"
-
-    docker compose --env-file "${REPO_DIR}/.env" stop open-webui hermes-agent >/dev/null 2>&1 || true
+    for c in "${APP_CONTAINERS[@]}"; do
+      is_running "$c" || continue
+      if docker stop "$c" >/dev/null 2>&1; then
+        STOPPED_CONTAINERS+=("$c")
+      else
+        die "Could not stop ${c}; refusing to copy a database that is still being written."
+      fi
+    done
     sleep 3
     rm -rf "${STAGING_DIR}/databases"
     mkdir -p "${STAGING_DIR}/databases"
@@ -367,8 +392,7 @@ if (( DB_FAILED > 0 )); then
         die "Cold-copy fallback failed for ${rel}."
       fi
     done
-    docker compose --env-file "${REPO_DIR}/.env" start open-webui hermes-agent >/dev/null 2>&1 || \
-      warn "Could not restart services automatically. Run: ./install.sh"
+    restart_stopped
   else
     die "Cannot produce consistent database copies and cannot fall back."
   fi
@@ -380,10 +404,10 @@ fi
 # STEP 4b. Capture host and platform state
 # ---------------------------------------------------------------------------
 [[ "$MODE" == "dryrun" ]] || log "Capturing host and platform state..."
-
 HOST_DIR="${STAGING_DIR}/host"
 
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'ollama'; then
+OLLAMA_MODEL_COUNT=0
+if is_running ollama; then
   docker exec ollama ollama list 2>/dev/null \
     | awk 'NR>1 {print $1}' > "${HOST_DIR}/ollama-models.txt" || true
   mkdir -p "${HOST_DIR}/modelfiles"
@@ -393,16 +417,17 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'ollama'; then
     docker exec ollama ollama show --modelfile "$m" \
       > "${HOST_DIR}/modelfiles/${safe}.Modelfile" 2>/dev/null || true
   done < "${HOST_DIR}/ollama-models.txt"
-  OLLAMA_MODEL_COUNT="$(wc -l < "${HOST_DIR}/ollama-models.txt" 2>/dev/null | tr -d ' ' || echo 0)"
-else
-  OLLAMA_MODEL_COUNT=0
+  OLLAMA_MODEL_COUNT="$(wc -l < "${HOST_DIR}/ollama-models.txt" 2>/dev/null | tr -d ' ')"
 fi
 
-docker compose --env-file "${REPO_DIR}/.env" config --images 2>/dev/null \
-  > "${HOST_DIR}/container-images.txt" || true
+if [[ -f "${REPO_DIR}/.env" ]]; then
+  "${COMPOSE[@]}" config --images > "${HOST_DIR}/container-images.txt" 2>/dev/null || true
+fi
 
 for f in docker-compose.yml docker-compose.override.yml; do
-  [[ -f "${REPO_DIR}/${f}" ]] && cp -a "${REPO_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
+  if [[ -f "${REPO_DIR}/${f}" ]]; then
+    cp -a "${REPO_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
+  fi
 done
 
 for d in openwebui openhands hermes scripts status; do
@@ -417,22 +442,22 @@ if command -v git >/dev/null 2>&1 && [[ -d "${REPO_DIR}/.git" ]]; then
     printf 'commit=%s\n' "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
     printf 'branch=%s\n' "$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
     printf 'remote=%s\n' "$(git -C "$REPO_DIR" config --get remote.origin.url 2>/dev/null || echo none)"
-    printf 'dirty=%s\n' "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    printf 'dirty=%s\n'  "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   } > "${HOST_DIR}/git-state.txt" 2>/dev/null || true
   git -C "$REPO_DIR" diff HEAD > "${HOST_DIR}/uncommitted.patch" 2>/dev/null || true
   [[ -s "${HOST_DIR}/uncommitted.patch" ]] || rm -f "${HOST_DIR}/uncommitted.patch"
 fi
 
 {
-  printf 'hostname=%s\n'        "$(hostname -s 2>/dev/null)"
+  printf 'hostname=%s\n'       "$(hostname -s 2>/dev/null)"
   # shellcheck source=/dev/null
-  printf 'os=%s\n'              "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
-  printf 'kernel=%s\n'          "$(uname -r 2>/dev/null)"
-  printf 'arch=%s\n'            "$(uname -m 2>/dev/null)"
-  printf 'total_ram_mb=%s\n'    "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
-  printf 'docker=%s\n'          "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo n/a)"
-  printf 'tailscale_host=%s\n'  "$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // "unknown"' 2>/dev/null || echo unknown)"
-  printf 'backup_timer=%s\n'    "$(systemctl --user is-enabled hybrid-ai-backup.timer 2>/dev/null || echo unknown)"
+  printf 'os=%s\n'             "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
+  printf 'kernel=%s\n'         "$(uname -r 2>/dev/null)"
+  printf 'arch=%s\n'           "$(uname -m 2>/dev/null)"
+  printf 'total_ram_mb=%s\n'   "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
+  printf 'docker=%s\n'         "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo n/a)"
+  printf 'tailscale_host=%s\n' "$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // "unknown"' 2>/dev/null || echo unknown)"
+  printf 'backup_timer=%s\n'   "$(systemctl --user is-enabled hybrid-ai-backup.timer 2>/dev/null || echo unknown)"
 } > "${HOST_DIR}/platform.txt" 2>/dev/null || true
 
 chmod -R go-rwx "$HOST_DIR" 2>/dev/null || true
@@ -440,7 +465,7 @@ chmod -R go-rwx "$HOST_DIR" 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # STEP 5. Write a manifest
 # ---------------------------------------------------------------------------
-cat > "${STAGING_DIR}/MANIFEST.txt" <<EOF
+cat > "${STAGING_DIR}/MANIFEST.txt" <<MANIFEST
 hybrid-ai backup manifest
 =========================
 created_utc        : $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -449,18 +474,19 @@ consistency_method : ${CONSISTENCY}
 databases_captured : ${DB_COUNT}
 ollama_models      : ${OLLAMA_MODEL_COUNT:-0} (names only; weights not backed up)
 restic_version     : $(restic version 2>/dev/null | head -n1)
+layout             : repo-relative (v2)
 
 Contents
 --------
-databases/   Consistent Open WebUI and Chroma SQLite snapshots.
-files/       Allow-listed uploads, vector data, and durable Hermes state.
-hermes/      Durable ~/.hermes state if present; runtime/cache content excluded.
-openhands/   OpenHands user config/state; cache, temp, and logs excluded.
-host/        Deployment configurations, Caddyfile, and host metadata.
+databases/   Consistent SQLite snapshots, repo-relative (webui_data/...).
+files/       Uploads, vector data, durable hermes_data, repo-relative.
+hermes/      Durable ~/.hermes state; runtime/cache content excluded.
+openhands/   ~/.openhands state; cache, temp, and logs excluded.
+host/        Compose files, scripts, Caddyfile, model list, host metadata.
 env/         Active .env configuration.
 
 To restore, see backup/restore.sh in the hybrid-ai repository.
-EOF
+MANIFEST
 
 # ---------------------------------------------------------------------------
 # STEP 6. Stage the configuration file
@@ -470,12 +496,13 @@ if [[ -f "${REPO_DIR}/.env" ]]; then
   chmod 600 "${STAGING_DIR}/env/.env"
 fi
 
-STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1 || echo '?')"
+STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1)"
+STAGED_MB="${STAGED_MB:-?}"
 
 if [[ "$MODE" == "dryrun" ]]; then
   log "Dry run -- nothing will be uploaded."
   printf '\n  Staged %s MB:\n\n' "$STAGED_MB"
-  find "$STAGING_DIR" -maxdepth 2 -mindepth 1 -printf '    %y %p\n' 2>/dev/null | head -40
+  find "$STAGING_DIR" -maxdepth 3 -mindepth 1 -printf '    %y %P\n' 2>/dev/null | head -40
   printf '\n  Repository: %s\n\n' "${RESTIC_REPOSITORY}"
   exit 0
 fi
@@ -483,18 +510,15 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 7. Upload
 #
-# Only the staging directory is passed to restic. The live application data is
+# Only the staging directory is passed to restic. Live application data is
 # never uploaded directly, guaranteeing every snapshot is consistent.
 # ---------------------------------------------------------------------------
 log "Checking restic repository status..."
-
 if ! restic snapshots >/dev/null 2>&1; then
   warn "Repository at ${RESTIC_REPOSITORY} is not initialized!"
-  
-  if (( NON_INTERACTIVE )); then
-    die "Repository uninitialized and --non-interactive requested. Run: ./backup/backup.sh --init"
+  if (( NON_INTERACTIVE )) || [[ ! -t 0 ]]; then
+    die "Repository uninitialized. Run: ./backup/backup.sh --init"
   fi
-
   read -r -p "  Initialize repository now? [Y/n]: " _init_ans < /dev/tty
   if [[ "${_init_ans,,}" != "n" ]]; then
     log "Initialising restic repository..."
@@ -533,6 +557,7 @@ fi
 log "Applying retention policy (${KEEP_DAILY}d / ${KEEP_WEEKLY}w / ${KEEP_MONTHLY}m)..."
 if restic forget \
       --host "$BACKUP_HOST" \
+      --tag hybrid-ai \
       --keep-daily "$KEEP_DAILY" \
       --keep-weekly "$KEEP_WEEKLY" \
       --keep-monthly "$KEEP_MONTHLY" \
@@ -547,11 +572,11 @@ fi
 # ---------------------------------------------------------------------------
 # STEP 9. Report
 # ---------------------------------------------------------------------------
-SNAP_COUNT="$(restic snapshots --host "$BACKUP_HOST" --json 2>/dev/null | jq 'length' 2>/dev/null || echo '?')"
+SNAP_COUNT="$(restic snapshots --host "$BACKUP_HOST" --tag hybrid-ai --json 2>/dev/null | jq 'length' 2>/dev/null || echo '?')"
 event "backup_run_complete" "snapshots_retained=${SNAP_COUNT}"
 
 printf '\n'
-ok "Done. ${SNAP_COUNT} snapshot(s) retained for host${BACKUP_HOST}."
+ok "Done. ${SNAP_COUNT} snapshot(s) retained for host ${BACKUP_HOST}."
 printf '    Restore with : ./backup/restore.sh\n'
 printf '    Verify with  : ./backup/backup.sh --check\n\n'
 ```
@@ -1858,7 +1883,6 @@ services:
 
       # --- Cloud GPU settings, read by openwebui/runpod_pipe.py ------------
       RUNPOD_HOST: ${RUNPOD_HOST}
-      TAILSCALE_IP: ${TAILSCALE_IP:-}
       PI_HOST: ${PI_HOST}
       # So the pipe's connection-error message names the right peer instead of
       # a hardcoded string that may not match what you called the pod.
@@ -1958,6 +1982,7 @@ services:
       - ./backup.log:/data/backup.log:ro
       - ./install.log:/data/install.log:ro
     environment:
+      TAILSCALE_IP: ${TAILSCALE_IP:-}
       STATUS_PORT: "8088"
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       OLLAMA_URL: http://ollama:11434
@@ -2044,8 +2069,25 @@ services:
 # contract note at the top of this file for why.
 
 networks:
+  # The shared stack network. Every service in this file (and the OpenHands
+  # overlay) joins it implicitly, so containers can reach each other by service
+  # name. It is NOT isolated from the host.
   default:
     name: hybrid-ai
+
+  # coder-net :: the private path between the two code-aware services.
+  #
+  # `internal: true` means Docker gives this network no route off the host: a
+  # container on it can reach the other containers on it, and nothing else --
+  # no LAN, no internet, no published host ports. Only `openhands` (in the
+  # overlay) and `hermes` (in the Hermes overlay) attach to it. Hermes uses it
+  # to reach the OpenHands API at http://openhands:3000 by service name.
+  #
+  # This adds no host port binds. The existing OpenHands binds on 127.0.0.1 and
+  # 172.17.0.1 are unchanged and unrelated to this network.
+  coder-net:
+    name: coder-net
+    internal: true
 ```
 
 
@@ -2398,6 +2440,61 @@ for svc in ollama open-webui hybrid-ai-status hybrid-ai-proxy hybrid-ai-openhand
            "Start it with ./install.sh, or inspect: docker logs --tail 50 ${svc}" ;;
   esac
 done
+
+# --- Hermes :: read-only agent-repo mount and the internal coder-net ---------
+# Two things this change introduced, both load-bearing:
+#   1. /agent-repo is the OpenHands clone mounted READ-ONLY. If it ever became
+#      writable, Hermes could edit the repository the sandbox is reviewing.
+#   2. coder-net is the internal network shared only by hermes and openhands.
+#      Any other member is a misconfiguration worth surfacing.
+if docker info >/dev/null 2>&1; then
+  if docker inspect hermes-agent >/dev/null 2>&1; then
+    REPO_RW="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/agent-repo"}}{{.RW}}{{end}}{{end}}' hermes-agent 2>/dev/null)"
+    if [[ "$REPO_RW" == "false" ]]; then
+      pass "Hermes /agent-repo is mounted read-only"
+    elif [[ "$REPO_RW" == "true" ]]; then
+      fail "Hermes /agent-repo is mounted READ-WRITE" \
+           "It must be ':ro'. Fix hermes/docker-compose.hermes.yml, then: ${COMPOSE_CMD} up -d hermes"
+    else
+      fail "Hermes has no /agent-repo mount" \
+           "Add '\${OPENHANDS_WORKSPACE:?...}:/agent-repo:ro' to hermes/docker-compose.hermes.yml, then: ${COMPOSE_CMD} up -d hermes"
+    fi
+  else
+    warn "hermes-agent container not found" "Cannot verify the /agent-repo mount. Run ./install.sh."
+  fi
+
+  # coder-net must be internal and carry exactly hermes-agent + hybrid-ai-openhands.
+  CNET_INTERNAL="$(docker network inspect coder-net -f '{{.Internal}}' 2>/dev/null)"
+  if [[ -z "$CNET_INTERNAL" ]]; then
+    warn "coder-net network not found" \
+         "Hermes cannot reach the OpenHands API by service name. Recreate: ${COMPOSE_CMD} up -d"
+  else
+    if [[ "$CNET_INTERNAL" == "true" ]]; then
+      pass "coder-net is internal (no route off the host)"
+    else
+      fail "coder-net is NOT internal" \
+           "Set 'internal: true' for coder-net in docker-compose.yml, then: ${COMPOSE_CMD} up -d"
+    fi
+
+    CNET_MEMBERS="$(docker network inspect coder-net -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ' | sed 's/ *$//')"
+    CNET_UNEXPECTED=""
+    for m in $CNET_MEMBERS; do
+      case "$m" in
+        hermes-agent|hybrid-ai-openhands) ;;
+        *) CNET_UNEXPECTED="${CNET_UNEXPECTED}${m} " ;;
+      esac
+    done
+    if [[ -n "$CNET_UNEXPECTED" ]]; then
+      fail "coder-net has unexpected member(s): ${CNET_UNEXPECTED% }" \
+           "Only hermes and openhands may attach. Recreate: ${COMPOSE_CMD} up -d"
+    elif [[ "$CNET_MEMBERS" == "hermes-agent hybrid-ai-openhands" ]]; then
+      pass "coder-net has exactly hermes and openhands attached"
+    else
+      warn "coder-net members: ${CNET_MEMBERS:-none} (expected hermes-agent + hybrid-ai-openhands)" \
+           "A container is stopped or not yet attached. Recreate: ${COMPOSE_CMD} up -d"
+    fi
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Services actually responding
@@ -2908,6 +3005,23 @@ services:
       # holds .env (RunPod key, WebUI secret) and the logs. Read-only: Hermes
       # reads code here; changes go through OpenHands or you.
       - ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:ro
+      # The SAME clone again, at /agent-repo, also read-only. This is the view
+      # Hermes uses to read the OpenHands working clone as a repository, and it
+      # is deliberately a separate mount point from /workspace so the two roles
+      # are distinguishable in docs and diagnostics. `:ro` is load-bearing:
+      # Hermes reads the clone; it must never write to it. The clone is never
+      # the deployment directory (scripts/setup-agent-workspace.sh refuses that).
+      - ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/agent-repo:ro
+    # Two networks, deliberately:
+    #   default   -- the shared `hybrid-ai` stack network (unchanged).
+    #   coder-net -- the internal network shared only with `openhands`, so
+    #                Hermes reaches the OpenHands API at http://openhands:3000
+    #                by service name. `coder-net` is `internal: true`; it adds
+    #                no host port binds and gives Hermes no route to the LAN or
+    #                the internet.
+    networks:
+      - default
+      - coder-net
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - LOCAL_DOMAIN=${LOCAL_DOMAIN}
@@ -4070,6 +4184,18 @@ services:
 
     extra_hosts:
       - host.docker.internal:host-gateway
+
+    # Two networks, deliberately:
+    #   default   -- the shared `hybrid-ai` stack network (unchanged).
+    #   coder-net -- the internal network shared only with `hermes`, so Hermes
+    #                can reach this API at http://openhands:3000 by service
+    #                name without a host port. `coder-net` is `internal: true`
+    #                and defined in docker-compose.yml.
+    # Listing `default` explicitly keeps OpenHands on the shared network; the
+    # later phase that removes it will delete this line, not add one.
+    networks:
+      - default
+      - coder-net
 
     security_opt:
       - no-new-privileges:true
@@ -7787,8 +7913,8 @@ source_path: "README.md"
 filename: "README.md"
 directory: "."
 title: "hybrid-ai"
-word_count: 3710
-line_count: 480
+word_count: 4060
+line_count: 511
 ---
 
 # hybrid-ai
@@ -7873,6 +7999,33 @@ Your RunPod prompts travel over an encrypted private network. The cloud server k
 
 Cold starts are the honest cost of this design. Subsequent messages in the same session are immediate, because the pod is already warm and the watchdog counter keeps resetting while you work. If you prefer to bypass the cold start entirely for a quick query, the OpenRouter fallback provides instant access to cloud models on a per-token basis.
 
+### Networks and ports
+
+All containers join one shared Docker network, `hybrid-ai`, and reach each other by service name (for example, Open WebUI talks to Ollama at `http://ollama:11434`).
+
+This project adds a second, private network for the two code-aware services:
+
+| Network | Defined in | Members | Reachable from | Purpose |
+|---|---|---|---|---|
+| `hybrid-ai` | `docker-compose.yml` (the compose default) | every service | the host and each other | normal service-to-service traffic |
+| `coder-net` | `docker-compose.yml`, `internal: true` | `openhands` and `hermes` only | each other only — no host, LAN, or internet route | Hermes reaches the OpenHands API at `http://openhands:3000` by service name |
+
+`coder-net` is `internal: true`, so Docker gives it no route off the host. It publishes no ports, and adding it does not create any host port binding. The OpenHands UI keeps its existing binds on `127.0.0.1` and `172.17.0.1` — see [openhands/README.md](openhands/README.md) and [SECURITY.md](SECURITY.md).
+
+Host ports, and who can reach them:
+
+| Service | Host bind | Reached by |
+|---|---|---|
+| Open WebUI | `3000` on all interfaces | your browser, on the LAN and tailnet |
+| Hermes Agent UI | `${HERMES_PORT:-8501}` on all interfaces | your browser, on the LAN and tailnet |
+| Hermes Agent API | `${HERMES_API_PORT:-8642}` on all interfaces | your browser, on the LAN and tailnet |
+| Ollama | `127.0.0.1:11434` | the Pi only |
+| OpenHands | `127.0.0.1:${OPENHANDS_PORT:-3001}` | you, over an SSH tunnel |
+| OpenHands | `172.17.0.1:${OPENHANDS_PORT:-3001}` | Docker sandboxes only, for webhooks |
+| Status page, proxy | none (behind Caddy) | the proxy |
+
+The Hermes binds on all interfaces and the OpenHands sandbox ports are pre-existing gaps, recorded in [SECURITY.md](SECURITY.md) and [hermes/README.md](hermes/README.md); a later phase narrows them. This change adds no host binds.
+
 ---
 
 ## Performance on a Raspberry Pi 5
@@ -7940,11 +8093,15 @@ During setup, `install.sh` configures a local domain (e.g., `yourhostname.com`).
 
 The project includes **Hermes Agent**, a persistent memory and skill orchestration engine. Hermes sits alongside Open WebUI, managing long-term user context, storing explicit memories in `hermes_data/`, and providing a framework for custom tool skills. It operates independently of the chat interface, ensuring that your AI assistant retains knowledge of your preferences, environment, and ongoing projects across distinct chat sessions.
 
+Hermes reads the OpenHands working clone at `/agent-repo` (mounted read-only) and reaches the OpenHands API at `http://openhands:3000` over the internal `coder-net` network. See [hermes/README.md](hermes/README.md).
+
 ## OpenHands code-maintenance agent
 
 The project includes a separate OpenHands service for natural-language code maintenance. It works in a separate clone at `~/hybrid-ai-agent`; the deployment directory is not visible to the agent, creates isolated agent-server containers, and supports an inspect, branch, edit, test, and commit workflow. 
 
 The OpenHands controller uses the Docker socket to create sandboxes. Docker-socket access is effectively host-level control. Keep human review and branch protection enabled. See [openhands/README.md](openhands/README.md).
+
+The same clone is mounted read-only into Hermes at `/agent-repo`, and OpenHands joins the internal `coder-net` network so Hermes can call its API by service name. Neither change adds a host port.
 
 ## Prerequisites
 
@@ -8199,7 +8356,7 @@ Put that in a password manager. Rehearse a restore before you need one:
 | `openwebui/` | The Python bridge to the cloud GPU | [`openwebui/README.md`](openwebui/README.md) |
 | `status/` | Status page and reverse proxy | [`status/README.md`](status/README.md) |
 | `runpod/` | Everything that runs on the rented GPU | [`runpod/README.md`](runpod/README.md) |
-| `hermes/` | Hermes Agent system orchestrator | Commented inline |
+| `hermes/` | Hermes Agent system orchestrator | [hermes/README.md](hermes/README.md) |
 | `openhands/` | Natural-language code-maintenance agent | [openhands/README.md](openhands/README.md) |
 | `backup/` | Encrypted backups to Cloudflare R2 | [`backup/README.md`](backup/README.md) |
 | `webui_data/` | **Your data.** Chats, documents, vectors | Created at runtime, never committed |
@@ -8278,8 +8435,8 @@ source_path: "SECURITY.md"
 filename: "SECURITY.md"
 directory: "."
 title: "Security"
-word_count: 3981
-line_count: 327
+word_count: 4828
+line_count: 429
 ---
 
 # Security
@@ -8403,6 +8560,74 @@ Accepted, with rationale:
 
 ---
 
+## Container networking: the OpenHands 172.17.0.1 exception
+
+OpenHands is a controller that creates a **sandbox** container per conversation. OpenHands V1
+starts those sandboxes on Docker's default bridge and hardcodes each sandbox's webhook to
+`http://host.docker.internal:<host_port>/api/v1/webhooks`, where `host.docker.internal`
+resolves to the bridge gateway `172.17.0.1`.
+
+For a sandbox to deliver its webhook, the OpenHands app server must be reachable at that
+address. That is why the service publishes a second bind:
+
+```
+- "172.17.0.1:${OPENHANDS_PORT:-3001}:3000"
+```
+
+**This is an accepted, pre-existing exception to the loopback-only rule** (added in commit
+`018bbb6`), not a weakening of it:
+
+- `172.17.0.1` is the host's own address on the Docker bridge. It is reachable from
+  containers on that bridge, and **not from the LAN or tailnet**.
+- The UI bind `127.0.0.1:${OPENHANDS_PORT:-3001}` is unchanged and remains loopback-only.
+- `doctor.sh` fails the run if the `172.17.0.1` binding is missing, because sandboxes then
+  cannot deliver webhooks.
+
+Do not widen this bind, and do not change the webhook path. It is required by the current
+OpenHands release; removing the need for it is a separate change.
+
+### The internal `coder-net` network
+
+A second network, `coder-net`, is defined in `docker-compose.yml` with `internal: true`. It
+has exactly two members — `openhands` and `hermes` — and no route off the host: no LAN, no
+internet, no published ports.
+
+Its purpose is to let Hermes reach the OpenHands API at `http://openhands:3000` by service
+name without a host port. It **adds no host bindings** and does not affect the loopback-only
+posture of the OpenHands UI. `doctor.sh` checks that `coder-net` is internal and that it
+carries no member other than those two containers.
+
+### The read-only agent-repo mount
+
+The OpenHands working clone (`${OPENHANDS_WORKSPACE}`) is mounted into the Hermes container
+**read-only** at `/agent-repo`, in addition to the pre-existing read-only `/workspace` mount.
+Hermes reads the code OpenHands is working on; it cannot modify it. Writes to `/agent-repo`
+fail inside the container.
+
+Two properties keep this safe:
+
+- **`:ro` is enforced by Docker.** The mount is not writable from inside the container.
+- **The clone is never the deployment directory.** `scripts/setup-agent-workspace.sh` refuses
+  a workspace that is, or is inside, the deployment directory, so the read-only mount cannot
+  expose `.env` or the log files.
+
+`doctor.sh` checks that the `/agent-repo` mount exists and is read-only.
+
+### Pre-existing gaps, flagged but not fixed here
+
+Recorded so they are not mistaken for properties of the changes above. All are addressed in a
+later phase.
+
+| Gap | Detail |
+|---|---|
+| Hermes ports bind all interfaces | `HERMES_PORT` (default `8501`) and `HERMES_API_PORT` (default `8642`) are published on `0.0.0.0`. |
+| Hermes mounts the deployment directory read-write | `./hermes_data`, inside the deployment directory, is writable at `/root/.hermes`. |
+| Hermes runs as root | `hermes/Dockerfile` has no `USER` directive; a tracked `TODO(security)`. |
+| OpenHands sandbox ports publish on all interfaces | Sandboxes publish their agent-server port on the host. |
+| Hermes has no Docker socket | Good — listed for contrast: the read-only mount gives Hermes code visibility, not control. |
+
+---
+
 ## Required action for existing deployments
 
 **1. Add the SSH host key secret.** On the Pi:
@@ -8419,6 +8644,8 @@ Add the output as a repository secret named `PI_SSH_HOST_KEY`. Without it the de
 - Tailscale admin → Settings → Keys → revoke and regenerate. Update the pod template.
 
 **3. Confirm `--trust-remote-code` is off.** If you switched to a model that genuinely needs it, set `TRUST_REMOTE_CODE=1` explicitly and satisfy yourself the model repository is trustworthy.
+
+**4. Review and narrow the OpenHands token's repository list.** Check whether the existing OpenHands token lists repositories beyond this project, and if it does, narrow it. In GitHub → Settings → Developer settings → Fine-grained tokens, edit it so that **Only select repositories** lists this repository alone, and confirm Contents and Metadata are both Read-only. If the token cannot be narrowed, revoke it and create a replacement.
 
 ---
 
@@ -8443,6 +8670,38 @@ git log -p | grep -iE 'rpa_[A-Za-z0-9]|tskey-|BEGIN [A-Z]* PRIVATE KEY'
 If anything surfaces, rotate it. Rewriting history is not sufficient — clones and forks retain a copy.
 
 **Preserve the logging discipline.** Every log line in this codebase contains metadata only. A single `print(messages)` left behind after debugging would write your entire conversation history into the container logs and undo the guarantees the rest of the system is built on.
+
+### GitHub credential separation
+
+Two distinct GitHub tokens are used. They are never interchangeable.
+
+| | OpenHands token | Builder token (`BUILDER_GITHUB_TOKEN`) |
+|---|---|---|
+| Type | Fine-grained PAT | Fine-grained PAT |
+| Repository access | Only select repositories | Only select repositories |
+| Contents | Read-only | Read and write |
+| Pull requests | None | Read and write |
+| Metadata | Read-only | Read-only |
+| Administration | None | None |
+| Workflows | None | None |
+| Organization scope | None | None |
+| Purpose | Clone and fetch only | Push `ai/*` branches and open PRs |
+
+The OpenHands token is read-only. OpenHands can read the repository and commit locally, but it
+cannot push, open a PR, or change anything on GitHub.
+
+The builder token never enters the sandbox, a URL, argv, a commit message, or a tracked file.
+It is supplied by name through the environment only, and pushes happen after independent review.
+Because it has no Workflows permission, changes under `.github/workflows/` cannot be pushed with
+it.
+
+**Rotation and narrowing policy**
+
+- Give each token an expiry. Rotate both at least quarterly, and immediately after any suspected exposure.
+- Rotate the tokens separately. Revoke the old token when its replacement goes live.
+- Narrow, never widen: if a token fails for lack of a permission, fix the workflow rather than adding permission. Any new permission needs a written reason in this file.
+- Review the repository list of each token whenever repositories are added to or removed from the account. A token should see this project and nothing else.
+- Never place token values in docs, examples, logs, or diagnostic bundles.
 
 ---
 
@@ -8887,12 +9146,24 @@ Two providers, two failure modes, one password to remember.
 
 
 ---
+source_path: "docs/BUILDER_PUBLISH_SMOKE_TEST.md"
+filename: "BUILDER_PUBLISH_SMOKE_TEST.md"
+directory: "docs"
+title: "BUILDER_PUBLISH_SMOKE_TEST.md"
+word_count: 15
+line_count: 1
+---
+
+Automated smoke test of the builder publish path, created by OpenHands, based on commit 503a7963252a60cdcf57dd23de4f0754bf75dc3f.
+
+
+---
 source_path: "docs/TROUBLESHOOTING.md"
 filename: "TROUBLESHOOTING.md"
 directory: "docs"
 title: "Troubleshooting & Operations"
-word_count: 4283
-line_count: 747
+word_count: 4453
+line_count: 779
 ---
 
 # Troubleshooting & Operations
@@ -9284,6 +9555,38 @@ exceed the health-check window. Watch the pull, then re-check.
 
 ---
 
+## Kanban board not dispatching / gateway not running
+
+The Hermes WebUI and the Hermes gateway run in the same container. The WebUI is PID 1; the
+gateway runs in the background and drains the kanban queue. Nothing supervises the background
+job, so if the gateway exits the board stops dispatching while the WebUI keeps serving. The
+gateway is not restarted until the container restarts.
+
+`./doctor.sh` reports this as a warning against `hermes-agent`:
+
+```
+Hermes gateway process NOT running inside hermes-agent
+```
+
+Confirm it by hand with a read-only probe — look for a "gateway run" process:
+
+```bash
+docker top hermes-agent
+```
+
+**Fix: recreate the container.** Recreating restarts the gateway in the background and leaves the
+kanban data in `hermes_data/` untouched:
+
+```bash
+${COMPOSE_CMD} up -d --force-recreate hermes
+```
+
+`${COMPOSE_CMD}` is the full compose invocation `doctor.sh` uses (project `hybrid-ai`, all three
+compose files). Recreate rather than `docker exec` into the container: the background gateway is
+what the container `command:` starts, and an `exec`ed one is not tracked as that process.
+
+---
+
 ## Tailscale networking
 
 **`tailscale status` reports `Stopped` or `NeedsLogin`**
@@ -9645,6 +9948,218 @@ grep '^EVENT' install.log
 
 
 ---
+source_path: "hermes/README.md"
+filename: "README.md"
+directory: "hermes"
+title: "`hermes/` — Hermes Agent system orchestrator"
+word_count: 1425
+line_count: 201
+---
+
+# `hermes/` — Hermes Agent system orchestrator
+
+Hermes Agent is a persistent memory and skill orchestration engine. It sits alongside Open
+WebUI, stores long-term user context and acquired skills in `hermes_data/`, and provides a
+framework for custom tool skills. It runs as its own container, `hermes-agent`, and reaches
+the OpenHands API by service name over a private network.
+
+| File | Purpose |
+|---|---|
+| `docker-compose.hermes.yml` | Compose overlay adding the `hermes` service |
+| `Dockerfile` | Builds the image: Hermes CLI plus the Hermes WebUI |
+
+The service is defined only in the overlay. Compose must always run with all three files —
+`docker-compose.yml`, `openhands/docker-compose.openhands.yml`,
+`hermes/docker-compose.hermes.yml` — because a run that omits an overlay treats its service
+as an orphan and `--remove-orphans` deletes it. `install.sh`, `doctor.sh` and
+`openhands/scripts/openhands-control.sh` all pass the full set.
+
+---
+
+## Mounts
+
+| Host path | Container path | Mode | Notes |
+|---|---|---|---|
+| `./hermes_data` | `/root/.hermes` | read-write | Persistent memory, SQLite state, FTS5 indexes and acquired skills. This is a subdirectory of the **deployment directory** — see the gaps below. |
+| `${OPENHANDS_WORKSPACE}` | `/workspace` | **read-only** | The OpenHands clone. Read-only so Hermes can read code without editing it. |
+| `${OPENHANDS_WORKSPACE}` | `/agent-repo` | **read-only** | The same clone again, under a name that makes its purpose explicit: the read-only view of the OpenHands working clone. Writes here fail inside the container. |
+
+`${OPENHANDS_WORKSPACE}` is required. If it is unset, compose fails loudly with:
+
+```
+error while interpolating services.hermes.volumes... required variable OPENHANDS_WORKSPACE is missing a value: OPENHANDS_WORKSPACE must be set - run ./install.sh
+```
+
+The clone must never be the deployment directory. `scripts/setup-agent-workspace.sh` refuses
+to create or use a workspace that is, or is inside, the deployment directory, so `.env` and
+the log files stay out of reach of the read-only mount.
+
+There is **no Docker socket** in this container. Hermes cannot start, stop, or inspect other
+containers.
+
+---
+
+## Networks
+
+| Network | Defined in | Members | Why |
+|---|---|---|---|
+| `hybrid-ai` (the compose default) | `docker-compose.yml` | every service | Normal service-to-service traffic. |
+| `coder-net` (`internal: true`) | `docker-compose.yml` | `hermes` and `openhands` only | Hermes reaches the OpenHands API at `http://openhands:3000` by service name. |
+
+`coder-net` is `internal: true`: Docker gives it no route off the host. A container on it can
+reach the other members, and nothing else — no LAN, no internet, no published host ports. It
+adds no host port binds. `doctor.sh` checks that `coder-net` is internal and that it carries
+exactly `hermes-agent` and `hybrid-ai-openhands`.
+
+---
+
+## Ports
+
+| Variable | Default | Container port | Host bind | Reached by |
+|---|---|---|---|---|
+| `HERMES_PORT` | `8501` | `8501` | `8501` on **all interfaces** | browser, LAN + tailnet |
+| `HERMES_API_PORT` | `8642` | `8642` | `8642` on **all interfaces** | browser, LAN + tailnet |
+
+The container listens on `0.0.0.0` (`--host 0.0.0.0`), and the host binds are published on
+every interface. See the gaps below.
+
+---
+
+## Processes
+
+| Process | Role | Started by |
+|---|---|---|
+| WebUI (`bootstrap.py`) | The container main process, PID 1: serves the Hermes WebUI. | The compose `command:` |
+| Hermes gateway / kanban dispatcher | A background process in the same container: drains the kanban queue. | The compose `command:` |
+
+Both are started by the compose `command:`, not by the Dockerfile `CMD`. The compose
+`command:` supersedes the image `CMD`, so what runs is the `command:` in
+`docker-compose.hermes.yml`: it starts the gateway in the background, then `exec`s
+`bootstrap.py` as PID 1.
+
+Check the gateway with `./doctor.sh`, or by hand with a read-only probe:
+
+```bash
+docker top hermes-agent        # look for a "gateway run" process
+```
+
+A crashed gateway is **not** restarted until the container restarts. Nothing supervises the
+background job, so a gateway that exits stays down while the WebUI keeps serving. Recreate the
+container to bring it back.
+
+The `--replace` flag keeps it to one gateway run instance across container restarts.
+
+---
+
+## Environment variables
+
+Referenced by name only; values live in `.env`, which is gitignored.
+
+| Name | Read by | Purpose |
+|---|---|---|
+| `OPENHANDS_WORKSPACE` | `docker-compose.hermes.yml` | Host path mounted at `/workspace` and `/agent-repo`. Required. |
+| `HERMES_PORT` | `docker-compose.hermes.yml` | Host port for the WebUI. |
+| `HERMES_API_PORT` | `docker-compose.hermes.yml` | Host port for the API. |
+| `OPENROUTER_API_KEY` | container env | Model provider for agent work. |
+| `LOCAL_DOMAIN` | container env | Used for local subdomain routing. |
+| `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory, but the overlay currently hardcodes `./hermes_data`. |
+
+---
+
+## Credentials: `BUILDER_GITHUB_TOKEN`
+
+`BUILDER_GITHUB_TOKEN` is the GitHub credential the builder uses to push `ai/*` branches and
+open pull requests. It is supplied to the builder/Hermes agent by name through the builder
+agent environment only. It is not read from the deployment `.env` and not set by
+`docker-compose.hermes.yml`. Its value is never placed in the deployment `.env`, in
+`.env.example`, in the OpenHands sandbox, on the command line (argv), in a URL, in a commit, or
+in any tracked file. It is separate from the read-only OpenHands token (see
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation)).
+
+Create it as a fine-grained personal access token with:
+
+- **Repository access:** Only select repositories.
+- **Contents:** Read and write.
+- **Pull requests:** Read and write.
+- **Metadata:** Read-only.
+- **Not granted:** no Administration, no Workflows, no organization scope.
+
+Because the token has no Workflows permission, a push that edits anything under
+`.github/workflows/` is rejected by GitHub. This is by design: workflow changes must be made
+by a human with the right access.
+
+---
+
+## Reaching OpenHands from Hermes
+
+Over `coder-net`, from inside the `hermes-agent` container, the OpenHands API answers at:
+
+```
+http://openhands:3000
+```
+
+**Can a job be created and followed to completion with only that URL?**
+
+This is a documentation-based finding; no containers were recreated in this change (see the
+validation note below). Read from the architecture:
+
+- **Creating a job** against the OpenHands API over `http://openhands:3000` is expected to
+  work: it is a REST call to the app server, which is the member of `coder-net`.
+- **Following a job to completion** is expected to require the **sandbox agent-server**
+  directly. OpenHands V1 starts one sandbox container per conversation and the client streams
+  events from that sandbox, not through the app server. The endpoint is the per-conversation
+  published port:
+
+  ```
+  http://${OPENHANDS_SANDBOX_HOST}:<sandbox_host_port>
+  ```
+
+  From inside a container the same sandbox is reached as
+  `http://host.docker.internal:<sandbox_host_port>`. That port is published on the host by the
+  sandbox, not offered on `coder-net`.
+
+Per the scope of this change, no route, bind, or network was added to make the sandbox
+reachable from Hermes. The endpoint is named above and the investigation stops here. Any
+change to make the sandbox reachable belongs to the later phase that narrows the sandbox
+ports.
+
+---
+
+## Pre-existing gaps (flagged, not fixed here)
+
+These are existing properties of the service, recorded so they are not mistaken for
+something this change introduced. They are addressed in a later phase.
+
+| Gap | Detail | Why it is not fixed here |
+|---|---|---|
+| Hermes ports bind all interfaces | `8501` and `8642` are published on `0.0.0.0`, so anyone on the LAN or tailnet can reach them. | Narrowing the binds is out of scope; this change adds no binds and does not widen any. |
+| Hermes mounts the deployment directory read-write | `./hermes_data` is a subdirectory of the deployment directory, mounted read-write at `/root/.hermes`. | The memory store must be writable; relocating it is a later phase. |
+| Hermes runs as root | `hermes/Dockerfile` has no `USER` directive. This is a tracked `TODO(security)` in the Dockerfile and in `SECURITY.md`. | A non-root user is a separate change. |
+| OpenHands sandbox ports publish on all interfaces | Sandboxes created by OpenHands publish their agent-server port on the host. Adjacent to this service, not part of it. | Later phase. |
+
+---
+
+## Validation note
+
+The checks in this change ran without recreating containers (Docker was not running in the
+build sandbox and no `.env` exists there). The compose configuration was validated by parsing
+it, and `doctor.sh` was syntax-checked. The post-recreate checks — `docker network inspect
+coder-net` showing exactly two members, a write test against `/agent-repo` failing, a request
+from Hermes to `http://openhands:3000` succeeding, and `./doctor.sh` green — were **not**
+run here; run them on the Pi after `./install.sh`.
+
+---
+
+## Related documentation
+
+- [`../openhands/README.md`](../openhands/README.md) — the OpenHands service, its workspace
+  clone, and the shared `coder-net` network.
+- [`../SECURITY.md`](../SECURITY.md) — the `172.17.0.1` webhook exception and the read-only
+  mount.
+- [`../README.md`](../README.md) — architecture, networks and ports.
+
+
+---
 source_path: "openhands/AGENTS.md"
 filename: "AGENTS.md"
 directory: "openhands"
@@ -9730,8 +10245,8 @@ source_path: "openhands/README.md"
 filename: "README.md"
 directory: "openhands"
 title: "openhands/ — natural-language code maintenance"
-word_count: 854
-line_count: 151
+word_count: 1091
+line_count: 181
 ---
 
 # openhands/ — natural-language code maintenance
@@ -9788,6 +10303,24 @@ into the deployment directory when satisfied.
 
 The script refuses to proceed if the workspace is, or is inside, the deployment directory,
 and fails if a `.env` or log file is found in the clone.
+
+---
+
+## The clone is also visible to Hermes, read-only
+
+Hermes reads the same clone at `/agent-repo`, mounted read-only
+(`${OPENHANDS_WORKSPACE}:/agent-repo:ro`). It is never the deployment directory — the same
+script above refuses that — and `:ro` means Hermes can read the code OpenHands is working on
+but cannot modify it. Writes to `/agent-repo` fail inside the Hermes container.
+
+OpenHands and Hermes share one dedicated Docker network, `coder-net`, defined in
+`docker-compose.yml` with `internal: true`. It has exactly two members — `openhands` and
+`hermes` — and no route off the host: no LAN, no internet, no published ports. Hermes uses it
+to reach the OpenHands API at `http://openhands:3000` by service name.
+
+This adds no host port bindings. OpenHands keeps its existing `127.0.0.1` bind for the UI and
+its `172.17.0.1` bind for sandbox webhooks, both unchanged (see the note in
+"Security summary" below).
 
 ---
 
@@ -9849,13 +10382,22 @@ surprise is worth avoiding.
 ## Git workflow
 
 ```text
-request → ai/* branch → tests → commit → you review → push → PR → you merge
+request -> ai/* branch -> commit (OpenHands) -> independent review -> builder pushes + opens PR -> merge
 ```
 
-The agent is instructed to stop after committing. Pushing and opening a PR need git
-credentials in the sandbox; prefer a GitHub App or a fine-grained token scoped to this one
-repository with Contents read/write and Pull requests read/write. Do not grant administration
-or workflow permissions. Never enable automatic merge.
+The agent is instructed to stop after committing. OpenHands never pushes and never opens a
+PR; the builder does that after an independent review (see
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation)). Never enable automatic merge.
+
+The OpenHands token is read-only. Use a fine-grained personal access token with:
+
+- **Repository access:** Only select repositories (this project only).
+- **Contents:** Read-only.
+- **Metadata:** Read-only.
+
+This is enough to clone and fetch. Do not grant Pull requests, Administration, or Workflows
+permissions. The write capability (push and PR) belongs to the builder token, which stays out
+of the sandbox.
 
 ---
 
@@ -9874,7 +10416,10 @@ Verify redaction before exposing a bundle to any cloud-hosted model.
 | Control | Mechanism |
 |---|---|
 | No credential access | Workspace is a clone; `.env` is not in it |
-| Not internet-reachable | Binds `127.0.0.1` only; no Caddy route |
+| Not internet-reachable | Binds `127.0.0.1` (UI) and `172.17.0.1` (sandbox webhooks) only; no Caddy route |
+| Sandboxes can reach the API without a public port | `172.17.0.1:${OPENHANDS_PORT:-3001}` bind, reachable from the Docker bridge only, never the LAN |
+| Hermes reads the clone without being able to change it | `${OPENHANDS_WORKSPACE}:/agent-repo:ro` |
+| Hermes-only API path, no host port | internal `coder-net`, members `openhands` and `hermes` |
 | No automatic merge | Agent stops after commit; branch protection on `main` |
 | Injection resistance | `AGENTS.md` classifies repo text and logs as untrusted data |
 | Resource bounded | Memory and CPU limits so agent work cannot starve chat |
