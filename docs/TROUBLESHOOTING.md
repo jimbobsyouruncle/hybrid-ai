@@ -387,6 +387,38 @@ exceed the health-check window. Watch the pull, then re-check.
 
 ---
 
+## Kanban board not dispatching / gateway not running
+
+The Hermes WebUI and the Hermes gateway run in the same container. The WebUI is PID 1; the
+gateway runs in the background and drains the kanban queue. Nothing supervises the background
+job, so if the gateway exits the board stops dispatching while the WebUI keeps serving. The
+gateway is not restarted until the container restarts.
+
+`./doctor.sh` reports this as a warning against `hermes-agent`:
+
+```
+Hermes gateway process NOT running inside hermes-agent
+```
+
+Confirm it by hand with a read-only probe — look for a "gateway run" process:
+
+```bash
+docker top hermes-agent
+```
+
+**Fix: recreate the container.** Recreating restarts the gateway in the background and leaves the
+kanban data in `hermes_data/` untouched:
+
+```bash
+${COMPOSE_CMD} up -d --force-recreate hermes
+```
+
+`${COMPOSE_CMD}` is the full compose invocation `doctor.sh` uses (project `hybrid-ai`, all three
+compose files). Recreate rather than `docker exec` into the container: the background gateway is
+what the container `command:` starts, and an `exec`ed one is not tracked as that process.
+
+---
+
 ## Tailscale networking
 
 **`tailscale status` reports `Stopped` or `NeedsLogin`**
