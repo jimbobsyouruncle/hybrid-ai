@@ -201,12 +201,12 @@ jobs:
       - name: Connect to tailnet
         # Joins the runner to your private network as an ephemeral node tagged
         # "tag:ci". It is removed automatically when the job ends.
-        uses: tailscale/github-action@v2
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
-          version: latest
+          version: '1.104.1'
 
       - name: Verify Pi is reachable
         # Retry for up to ~50 seconds. Mesh routes take a moment to establish,
