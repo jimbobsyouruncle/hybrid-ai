@@ -5,7 +5,7 @@
 
 (trusted_only) {
 	@untrusted not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fd7a:115c:a1e0::/48
-	respond @untrusted "Access denied" 403
+	abort @untrusted
 }
 
 http://status.{$LOCAL_DOMAIN} {
@@ -22,13 +22,16 @@ http://hermes.{$LOCAL_DOMAIN} {
 }
 
 http://{$LOCAL_DOMAIN} {
-	import trusted_only
-
+	# The allowlist must be imported inside each protected handle: Caddy runs a
+	# matching handle before the site-level abort/respond, so a site-level
+	# import alone would be bypassed and leave these routes unprotected.
 	handle /status* {
+		import trusted_only
 		reverse_proxy status:8088
 	}
 
 	handle /hub* {
+		import trusted_only
 		reverse_proxy status:8088
 	}
 
@@ -38,6 +41,7 @@ http://{$LOCAL_DOMAIN} {
 	}
 
 	handle_path /ollama/* {
+		import trusted_only
 		reverse_proxy ollama:11434
 	}
 
