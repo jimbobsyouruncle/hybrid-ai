@@ -1,5 +1,5 @@
 # Repository RAG Corpus
-Generated on Sun Oct 11 20:55:41 UTC 2026
+Generated on Mon Oct 12 22:33:38 UTC 2026
 
 ---
 source_path: "CONSOLIDATED_CODE.md"
@@ -10515,8 +10515,8 @@ source_path: "openwebui/README.md"
 filename: "README.md"
 directory: "openwebui"
 title: "openwebui/ — the bridge to the cloud GPU"
-word_count: 694
-line_count: 111
+word_count: 721
+line_count: 115
 ---
 
 # openwebui/ — the bridge to the cloud GPU
@@ -10595,6 +10595,10 @@ means nothing to configure.
 ```bash
 python3 openwebui/test_refactor.py
 ```
+
+The tests import `runpod_core.py`, which imports `httpx`, so `httpx` must be
+installed to run them. CI installs the pinned `httpx==0.28.1` in the `validate`
+job before this step.
 
 ---
 
