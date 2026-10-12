@@ -30,6 +30,7 @@ Runs on every push. Catches mistakes before they can reach the Pi.
 | ShellCheck | Common shell bugs (advisory — reports but does not block) |
 | `py_compile` on every `*.py` in the repo | Python syntax errors, including `status/app.py`, which is bind-mounted with no build step |
 | `build_pipe.py --check` | A forgotten rebuild — the pasted pipe not matching its reviewed sources |
+| `pip install httpx==0.28.1` | Installs the pinned dependency the behavioural tests import (`runpod_core.py` imports `httpx`, which the job does not otherwise install) |
 | `test_refactor.py` | Regressions in mesh enforcement, credential scrubbing, truncation detection |
 | `docker compose config`, both files | Malformed compose file or OpenHands overlay |
 | **Secret assertion** | Fails the build if `.env` or a data folder was ever committed |

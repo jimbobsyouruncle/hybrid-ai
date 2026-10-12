@@ -75,6 +75,10 @@ means nothing to configure.
 python3 openwebui/test_refactor.py
 ```
 
+The tests import `runpod_core.py`, which imports `httpx`, so `httpx` must be
+installed to run them. CI installs the pinned `httpx==0.28.1` in the `validate`
+job before this step.
+
 ---
 
 ## Two fixes made during the split
