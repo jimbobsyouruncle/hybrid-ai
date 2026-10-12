@@ -121,6 +121,10 @@ jobs:
         # Open WebUI is not the code that was reviewed.
         run: python3 openwebui/build_pipe.py --check
 
+      - name: Install test dependency (httpx)
+        # Behavioural tests import httpx, which this job does not otherwise install.
+        run: python -m pip install "httpx==0.28.1"
+
       - name: Pipe behavioural tests
         # Mesh-address enforcement, credential scrubbing and stream-truncation
         # detection are security properties, not conveniences.
