@@ -358,7 +358,7 @@ The status page at `/status` exposes service state, log excerpts, and a diagnost
 | Read-only towards Docker | Socket mounted `:ro`; the app issues **only** HTTP GET. No code path starts, stops, or modifies a container |
 | No file serving | No static handler exists and no user input is ever turned into a filesystem path, so path traversal is not reachable |
 | Network restricted | Caddy permits `/status`, `/hub` and `/ollama` only from loopback, RFC1918, and `100.64.0.0/10`; others are aborted with no response body |
-| Allowlist defined once | The trusted-network rule is a single reusable Caddy snippet imported by every protected route, so routes cannot drift apart and silently become more permissive |
+| Allowlist defined once | The trusted-network rule is a single reusable Caddy snippet imported inside each protected `handle`, so it runs before the handle routes and cannot be bypassed by them |
 | Unauthenticated Ollama API protected | `/ollama/` sits behind the same allowlist; Ollama's own port remains bound to `127.0.0.1` |
 | Monitoring endpoint discloses nothing | `/health` returns one word (`ok`/`warn`/`fail`) with no detail, so it is safe to leave unrestricted for uptime checks |
 | Not directly reachable | The status container publishes no ports; the proxy is the only route in |
