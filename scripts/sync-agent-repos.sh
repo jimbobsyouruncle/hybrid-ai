@@ -197,9 +197,16 @@ add_repo() {  # owner name branch
   FULLNAMES+=("$full")
 }
 
-API_BASE="https://api.github.com"
-TMPDIR_SYNC="$(mktemp -d)"
+# --- Scratch and tree ------------------------------------------------------
+# Every write in this script stays under AGENT_REPOS_DIR: the tree itself, and
+# a short-lived scratch directory for API pages. Create the tree first so the
+# scratch directory can live inside it, not in $TMPDIR.
+mkdir -p "$AGENT_REPOS_DIR"
+ok "Reference tree: ${AGENT_REPOS_REAL}"
+TMPDIR_SYNC="$(mktemp -d "${AGENT_REPOS_DIR}/.sync.XXXXXX")"
 trap 'rm -rf "$TMPDIR_SYNC"' EXIT
+
+API_BASE="https://api.github.com"
 
 log "Listing non-fork repositories owned by '${OWNER}' via the GitHub API ..."
 page_url="${API_BASE}/users/${OWNER}/repos?type=owner&per_page=100"
@@ -320,10 +327,6 @@ else
 fi
 
 # --- Sync ------------------------------------------------------------------
-# The tree is created here and nowhere else is written to.
-mkdir -p "$AGENT_REPOS_DIR"
-ok "Reference tree: ${AGENT_REPOS_REAL}"
-
 n_total=0; n_cloned=0; n_updated=0; n_skipped=0; n_failed=0
 for full in "${FULLNAMES[@]}"; do
   owner="${REPO_OWNER[$full]}"
