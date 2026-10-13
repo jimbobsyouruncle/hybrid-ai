@@ -170,6 +170,19 @@ jobs:
           print(f"All sensitive routes protected: {sorted(must_protect)}")
           EOF
 
+      - name: Assert Hermes gateway autostart is pinned to the default profile
+        # The gateway runs as the default profile. A sticky named active profile
+        # (e.g. ciso) in the bind-mounted hermes_data/ would otherwise capture a
+        # bare `hermes gateway run` and be refused a gateway, leaving the kanban
+        # dispatcher down after a recreate. This fails the build if the pinned
+        # invocation is dropped.
+        run: |
+          if ! grep -Fq 'hermes -p default gateway run --replace' hermes/docker-compose.hermes.yml; then
+            echo "::error::Hermes gateway command: is not pinned to the default profile. Use: hermes -p default gateway run --replace"
+            exit 1
+          fi
+          echo "Hermes gateway autostart is pinned to the default profile."
+
       - name: Assert no secrets are tracked
         # Last line of defence. If .env or a data folder ever got committed,
         # this stops the build and tells you to clean up git history.

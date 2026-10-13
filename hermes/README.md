@@ -79,6 +79,15 @@ Both are started by the compose `command:`, not by the Dockerfile `CMD`. The com
 `docker-compose.hermes.yml`: it starts the gateway in the background, then `exec`s
 `bootstrap.py` as PID 1.
 
+The gateway runs as the **default** profile, pinned with `-p default`
+(`hermes -p default gateway run --replace`). This is load-bearing: a sticky named
+active profile stored in the bind-mounted `hermes_data/` (mounted at
+`/root/.hermes/active_profile`) would otherwise capture a bare `hermes gateway run`
+and be refused with `Profile '<name>' does not get a gateway of its own`. There is
+only one gateway per host, and it is owned by the default profile. Pinning
+`-p default` in the `command:` makes the gateway start after every container
+create/recreate regardless of the sticky active profile.
+
 Check the gateway with `./doctor.sh`, or by hand with a read-only probe:
 
 ```bash
