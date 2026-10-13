@@ -145,6 +145,24 @@ else
   fail "finding line missing path or key: $(cat "$OUT_FILE")"
 fi
 
+# --- Two .git/config under one root are both found ---------------------------
+MULTI="$WORKDIR/multi"
+mkdir -p "$MULTI/first" "$MULTI/second"
+git -C "$MULTI/first" init -q
+git -C "$MULTI/second" init -q
+git -C "$MULTI/first"  config remote.origin.url "https://${USERINFO}@github.com/org/first.git"
+git -C "$MULTI/second" config remote.origin.url "https://${USERINFO}@github.com/org/second.git"
+run_check "$MULTI"
+if [[ "$OUT_RC" -eq 1 ]] \
+   && grep -qF -- "$MULTI/first/.git/config: remote.origin.url"  "$OUT_FILE" \
+   && grep -qF -- "$MULTI/second/.git/config: remote.origin.url" "$OUT_FILE"; then
+  if no_leak "multi-config"; then
+    pass "two .git/config under one root -> both reported, no leak"
+  fi
+else
+  fail "two .git/config under one root expected both reported: $(cat "$OUT_FILE")"
+fi
+
 # --- Symlinked .git is not followed ------------------------------------------
 REAL="$(mk_repo real_repo "remote.origin.url=https://${USERINFO}@github.com/org/repo.git")"
 LINKROOT="$WORKDIR/linkroot"

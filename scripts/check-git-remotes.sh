@@ -151,8 +151,11 @@ scan_config() {
 }
 
 # Collect every .git/config under each root: maxdepth 4, symlinks never
-# followed (-P). A plain file argument is treated as a git config.
-mapfile -t configs < <(
+# followed (-P). find emits NUL-separated paths, so mapfile must split on NUL
+# (-d ''); the default newline delimiter would drop the NULs and concatenate
+# every path into one element, silently missing all but the first. A plain
+# file argument is treated as a git config.
+mapfile -t -d '' configs < <(
   for root in "$@"; do
     if [[ -d "$root" ]]; then
       find -P "$root" -maxdepth 4 -type f -path '*/.git/config' -print0
