@@ -255,6 +255,38 @@ restic version                  # any version
 tailscale version               # any version
 ```
 
+---
+
+## Agent context maps
+
+Two files at the repository root give coding agents a small map of the codebase instead of making them read every file:
+
+| File | What it holds |
+|---|---|
+| `REPO_MAP.md` | Every tracked file, grouped by directory, with a one-line description |
+| `CODE_INDEX.md` | Per-file code structure — function signatures, shell function names, workflow job ids, compose services — without any file bodies |
+
+Agents read these maps first and open only the files they actually need. That keeps context small and answers faster than dumping whole files into the prompt.
+
+Both files are generated from the tracked file list, are deterministic (no timestamps or commit SHAs), and must stay under 20480 bytes each. Regenerate them after any change that adds, removes, or renames a tracked file:
+
+```bash
+python3 <path-to-generate.py> --root . --output-dir . --max-bytes 20480
+```
+
+`scripts/check-agent-context.sh` verifies they are fresh. It compares the committed maps against a fresh generator run and exits:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Both maps match a fresh run |
+| `1` | A map is stale or missing, or a retired `CONSOLIDATED_*.md` is still tracked |
+| `2` | Usage error, or the generator failed (including a size overflow) |
+
+The **Agent context** pull request workflow (`.github/workflows/agent-context.yml`) runs that check on every pull request so a stale map cannot merge. The maps land only through reviewed pull requests — nothing regenerates and commits them automatically.
+
+---
+
+
 ### 3. External services
 
 Four accounts. One is free, two are pay-as-you-go, one is free for personal use.
@@ -433,6 +465,8 @@ Put that in a password manager. Rehearse a restore before you need one:
 | Path | What it holds | Documentation |
 |---|---|---|
 | `README.md` | This file — start here | — |
+| `REPO_MAP.md` | Agent context map — tracked files by directory | Generated; see [Agent context maps](#agent-context-maps) |
+| `CODE_INDEX.md` | Agent context index — per-file code structure | Generated; see [Agent context maps](#agent-context-maps) |
 | `install.sh` | The one script you run on the Pi | Commented inline |
 | `doctor.sh` | One-command health check | Commented inline |
 | `collect-diagnostics.sh` | Bundles logs and status into one redacted file | Commented inline |
