@@ -1,0 +1,29 @@
+name: Agent context
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-context:
+    name: Check agent context maps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check out the generator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: jimbobsyouruncle/shared-actions
+          ref: 3156ad16725e149a9baebeb71862a8d1d341418c
+          path: .shared-actions
+
+      - name: Test the freshness check
+        run: bash scripts/test-check-agent-context.sh .shared-actions/agent-context/generate.py
+
+      - name: Check the maps are fresh
+        run: bash scripts/check-agent-context.sh .shared-actions/agent-context/generate.py
