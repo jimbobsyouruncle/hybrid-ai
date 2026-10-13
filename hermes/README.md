@@ -232,11 +232,14 @@ Create it as a fine-grained personal access token with:
 - **Contents:** Read and write.
 - **Pull requests:** Read and write.
 - **Metadata:** Read-only.
-- **Not granted:** no Administration, no Workflows, no organization scope.
+- **Workflows:** Read and write.
+- **Not granted:** no Administration, no organization scope.
 
-Because the token has no Workflows permission, a push that edits anything under
-`.github/workflows/` is rejected by GitHub. This is by design: workflow changes must be made
-by a human with the right access.
+The token can push changes under `.github/workflows/`, so workflow changes reach `main` only
+through a reviewed pull request. The builder pushes only `ai/*` branches, and only after
+independent review. The written reason for the Workflows permission and the compensating controls
+are recorded in
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation).
 
 ---
 

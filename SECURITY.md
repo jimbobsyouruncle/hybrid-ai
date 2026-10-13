@@ -242,21 +242,34 @@ Two distinct GitHub tokens are used. They are never interchangeable.
 | Pull requests | None | Read and write |
 | Metadata | Read-only | Read-only |
 | Administration | None | None |
-| Workflows | None | None |
+| Workflows | None | Read and write |
 | Organization scope | None | None |
 | Purpose | Clone and fetch only | Push `ai/*` branches and open PRs |
+
+The builder token holds **Workflows: Read and write**. The narrowing policy requires a written
+reason for every new permission, so the reason is recorded here: the builder publishes reviewed CI
+changes in both `jimbobsyouruncle/hybrid-ai` and `jimbobsyouruncle/shared-actions`. Those changes
+include Action SHA pinning, `deploy.yml` changes that ship with the feature they deploy, and the
+agent-context caller and test workflows.
 
 The OpenHands token is read-only. OpenHands can read the repository and commit locally, but it
 cannot push, open a PR, or change anything on GitHub.
 
 The builder token never enters the sandbox, a URL, argv, a commit message, or a tracked file.
 It is supplied by name through the environment only, and pushes happen after independent review.
-Because it has no Workflows permission, changes under `.github/workflows/` cannot be pushed with
-it.
+The builder token can push changes under `.github/workflows/`. The builder pushes only `ai/*`
+branches and only after independent review, so workflow changes reach `main` only through a
+reviewed pull request.
+
+A workflow file on a pushed `ai/*` branch can run on push events with the repository-level Actions
+secrets, referenced here by name only. Two controls compensate for this. Independent review happens
+before every push, and the production environment gates the deploy. The owner should restrict the
+production deployment branches to `main` and keep required reviewers on that environment. Neither
+control is claimed to be configured already.
 
 The builder token's repository list also includes `jimbobsyouruncle/shared-actions`, because the
 builder publishes the shared agent-context action there. The permissions are the same as above,
-and Workflows is still none.
+including Workflows: Read and write.
 
 **Rotation and narrowing policy**
 
