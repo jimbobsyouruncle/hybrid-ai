@@ -254,12 +254,16 @@ It is supplied by name through the environment only, and pushes happen after ind
 Because it has no Workflows permission, changes under `.github/workflows/` cannot be pushed with
 it.
 
+The builder token's repository list also includes `jimbobsyouruncle/shared-actions`, because the
+builder publishes the shared agent-context action there. The permissions are the same as above,
+and Workflows is still none.
+
 **Rotation and narrowing policy**
 
 - Give each token an expiry. Rotate both at least quarterly, and immediately after any suspected exposure.
 - Rotate the tokens separately. Revoke the old token when its replacement goes live.
 - Narrow, never widen: if a token fails for lack of a permission, fix the workflow rather than adding permission. Any new permission needs a written reason in this file.
-- Review the repository list of each token whenever repositories are added to or removed from the account. A token should see this project and nothing else.
+- Review the repository list of each token whenever repositories are added to or removed from the account. A token should see only the repositories listed here.
 - Never place token values in docs, examples, logs, or diagnostic bundles.
 
 ---
