@@ -37,6 +37,7 @@ runtime.env
 .restore-work/
 .restore-test-*/
 webui_data.pre-restore-*/
+hermes_data.pre-restore-*/
 backup.log
 
 # --- Persistent local state (your knowledge base - NEVER commit) -----------
