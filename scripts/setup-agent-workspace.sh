@@ -28,7 +28,8 @@
 # WHAT IT DOES:
 #   1. Works out where the clone should live and where it came from.
 #   2. REFUSES to proceed if the target is, or is inside, the deployment dir.
-#   3. Creates the clone if missing; updates its origin if it already exists.
+#   3. Creates the clone if missing; updates its origin if it already exists,
+#      then refreshes it so the root copy of AGENTS.md does not go stale.
 #   4. Verifies no .env or log file leaked into it.
 #
 # HOW TO RUN IT:
@@ -149,6 +150,33 @@ if [[ -d "$WORKSPACE/.git" ]]; then
       log "Updating workspace origin to match this repository"
       git -C "$WORKSPACE" remote set-url origin "$ORIGIN_URL"
     fi
+  fi
+
+  # Refresh so the root copy of AGENTS.md (and everything else) does not go
+  # stale. The hook path is disabled so a hostile or broken hook cannot run as
+  # this user during the fetch. A failed fetch warns and does not abort, so a
+  # deploy with no network still completes; install.sh keeps going.
+  if git -c core.hooksPath=/dev/null -C "$WORKSPACE" fetch --no-tags origin; then
+    default_ref="$(git -C "$WORKSPACE" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    default_branch="${default_ref#origin/}"
+    current_branch="$(git -C "$WORKSPACE" symbolic-ref --short HEAD 2>/dev/null || true)"
+    if [[ -z "$default_branch" ]]; then
+      warn "Could not determine the default branch in ${WORKSPACE}; skipping refresh."
+    elif [[ "$current_branch" != "$default_branch" ]]; then
+      warn "Workspace is on '${current_branch}', not the default branch '${default_branch}'; skipping refresh."
+    elif [[ -n "$(git -C "$WORKSPACE" status --porcelain)" ]]; then
+      warn "Workspace has uncommitted changes; skipping refresh to leave them untouched."
+    else
+      # Clean tree on the default branch: fast-forward only. Never reset,
+      # stash, check out over changes, or delete anything.
+      if git -C "$WORKSPACE" merge --ff-only "origin/${default_branch}" >/dev/null 2>&1; then
+        ok "Agent workspace refreshed to the latest ${default_branch}"
+      else
+        warn "Could not fast-forward ${WORKSPACE}; skipping refresh."
+      fi
+    fi
+  else
+    warn "Fetch failed for ${WORKSPACE}; continuing with the existing clone."
   fi
 
 elif [[ -e "$WORKSPACE" ]]; then

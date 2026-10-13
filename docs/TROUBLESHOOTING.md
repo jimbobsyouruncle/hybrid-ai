@@ -399,6 +399,24 @@ clone by hand:
 than cloned. Remove the file — its presence defeats the isolation the separate
 workspace exists to provide.
 
+**The workspace-root `AGENTS.md` looks stale.** `setup-agent-workspace.sh`
+refreshes the existing clone on every run: it fetches, then fast-forwards only
+when the tree is clean and on the default branch. If it warns that it skipped
+the refresh, the clone is dirty or on another branch, or the fetch failed — it
+never resets or discards work. Bring it up to date by hand, or re-run:
+
+```bash
+./scripts/setup-agent-workspace.sh
+```
+
+**A multi-repo job edits the wrong tree.** The workspace root
+(`${OPENHANDS_WORKSPACE}`) is a hybrid-ai clone holding `AGENTS.md`; it is not
+the target of a job unless the task says so. A job on another owned repository
+is cloned into `${OPENHANDS_WORKSPACE}/project/<repo-name>`, and the agent
+works only inside that clone. Repositories do not all use `main`, so the agent
+fetches and branches from the remote default branch rather than a local `main`
+or `master`.
+
 **The UI will not load.** It binds to loopback only and there is no Caddy
 route, by design. Reach it through a tunnel:
 
