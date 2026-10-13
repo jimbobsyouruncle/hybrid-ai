@@ -111,7 +111,7 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | `OPENHANDS_WORKSPACE` | `docker-compose.hermes.yml` | Host path mounted at `/workspace` and `/agent-repo`. Required. |
 | `HERMES_PORT` | `docker-compose.hermes.yml` | Host port for the WebUI. |
 | `HERMES_API_PORT` | `docker-compose.hermes.yml` | Host port for the API. |
-| `OPENROUTER_API_KEY` | container env | Model provider for agent work. |
+| `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |
 | `LOCAL_DOMAIN` | container env | Used for local subdomain routing. |
 | `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory, but the overlay currently hardcodes `./hermes_data`. |
 

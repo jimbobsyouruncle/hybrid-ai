@@ -428,6 +428,63 @@ what the container `command:` starts, and an `exec`ed one is not tracked as that
 
 ---
 
+## Cards stay in Triage, gateway is running
+
+A running gateway is not enough. With `kanban.auto_decompose` enabled, the decomposer picks up
+each Triage card within about 60 seconds. If it cannot, cards stay in Triage and the board goes
+quiet — with no error anywhere, because the gateway itself keeps running.
+
+`./doctor.sh` reports the stall in the Containers section, naming the board and the affected task
+ids only:
+
+```
+Kanban Triage stalled on board <board>: 2 task(s) older than 15m (ids: 41 57); 2 have no event other than 'created'
+```
+
+A card whose only event is `created` is the failure signature: the decomposer never touched it.
+Tune the threshold with `DOCTOR_TRIAGE_STALL_MIN` (default 15 minutes, read from the environment,
+not from `.env`):
+
+```bash
+DOCTOR_TRIAGE_STALL_MIN=5 ./doctor.sh
+```
+
+**Cause.** The decomposer runs on the Hermes auxiliary provider. When no GPU pod is warm it falls
+back to OpenRouter, so a missing or blank `OPENROUTER_API_KEY` makes every decompose tick fail.
+This is exactly what happened on 2026-10-13: the key was commented out in `hermes_data/.env` and
+every 60s tick failed for about 35 minutes with no visible signal.
+
+**Check the auxiliary provider and credential.** `doctor.sh` also warns when the deployment `.env`
+or a board-running profile (`hermes_data/.env`, `hermes_data/profiles/builder/.env`,
+`hermes_data/profiles/reviewer/.env`) has no OpenRouter key:
+
+```
+OPENROUTER_API_KEY is missing or empty in hermes_data/.env
+```
+
+```bash
+hermes -p default config get auxiliary          # which provider the decomposer uses
+grep -c '^OPENROUTER_API_KEY=' hermes_data/.env # 1 means the line is uncommented
+```
+
+**A board database that cannot be read** is reported instead of being treated as healthy:
+
+```
+Kanban Triage not stalled: cannot query board <board>
+```
+
+That means the kanban DB is corrupt, locked, not a SQLite file, or unreadable. Inspect it
+read-only, for example: `sqlite3 "file:hermes_data/kanban/boards/<board>/kanban.db?mode=ro" 'PRAGMA quick_check;'`.
+
+**Fix.** Restore the key in the relevant `.env` (see `.env.example` for the format), then recreate
+the container so the gateway and decomposer pick it up:
+
+```bash
+${COMPOSE_CMD} up -d --force-recreate hermes
+```
+
+---
+
 ## Tailscale networking
 
 **`tailscale status` reports `Stopped` or `NeedsLogin`**
