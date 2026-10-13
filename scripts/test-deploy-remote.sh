@@ -25,8 +25,7 @@ if [[ ! -f "$DEPLOY_SCRIPT" ]]; then
 fi
 
 WORKDIR="$(mktemp -d)"
-cleanup() { rm -rf "$WORKDIR"; }
-trap cleanup EXIT
+trap 'rm -rf -- "$WORKDIR"' EXIT
 
 BINDIR="$WORKDIR/bin"      # shims that go on PATH
 REPO="$WORKDIR/repo"       # throwaway git working tree
