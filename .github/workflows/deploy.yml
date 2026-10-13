@@ -260,61 +260,35 @@ jobs:
             echo "==> Pre-deploy state"
             du -sh webui_data ollama_data 2>/dev/null || true
 
-            echo "==> Fetching latest"
-            git fetch --all --prune
+            echo "==> Fetching origin"
+            git fetch origin --prune
+
+            # Deploy the EXACT revision CI validated. If main moved after
+            # validation, or a manual run targets a non-main branch, resetting
+            # to origin/main would deploy an unvalidated tree.
+            SHA="${{ github.sha }}"
+            if ! git merge-base --is-ancestor "$SHA" origin/main; then
+              echo "::error::Validated revision $SHA is not an ancestor of origin/main. Refusing to deploy."
+              exit 1
+            fi
+
             # "reset --hard" makes the Pi match the repo exactly. Safe here
             # because .gitignore keeps all your real data untracked.
-            git reset --hard origin/main
+            git reset --hard "$SHA"
+
+            if [ "$(git rev-parse HEAD)" != "$SHA" ]; then
+              echo "::error::After reset, HEAD is $(git rev-parse HEAD) but expected $SHA."
+              exit 1
+            fi
+
             # install.sh chmods the rest itself, but it cannot run if it is
             # not executable to begin with.
-            chmod +x install.sh
+            chmod +x scripts/deploy-remote.sh
 
-            echo "==> Reprovisioning (non-interactive; existing .env preserved)"
-            ./install.sh --non-interactive
-
-            echo "==> Post-deploy verification"
-            chmod +x doctor.sh 2>/dev/null || true
-            sleep 20
-            docker compose --env-file .env ps
-
-            # Poll the health endpoint for up to two minutes. If it never comes
-            # back, dump the last 50 log lines so the failure is diagnosable
-            # straight from the GitHub Actions output.
-            for i in $(seq 1 12); do
-              if curl -fsS http://localhost:3000/health >/dev/null 2>&1; then
-                echo "Open WebUI healthy."
-                break
-              fi
-              echo "waiting for Open WebUI... ($i/12)"
-              sleep 10
-              if [ "$i" -eq 12 ]; then
-                echo "::error::Open WebUI failed its health check."
-                docker compose --env-file .env logs --tail 50 open-webui
-                exit 1
-              fi
-            done
-
-            # Full health report in the workflow output, so a failed deploy is
-            # diagnosable without SSHing in. Never fails the build by itself.
-            if [ -x ./doctor.sh ]; then
-              echo "==> Health report"
-              ./doctor.sh --no-cloud || true
-            fi
-
-            echo "==> Persistent data intact:"
-            du -sh webui_data ollama_data 2>/dev/null || true
-
-            # Backups are a data-loss control; a deploy that silently disables
-            # them is worth flagging even though it is not a failure.
-            if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
-              echo "Backup timer active. Next run:"
-              systemctl --user list-timers hybrid-ai-backup.timer --no-pager 2>/dev/null | head -3
-            else
-              echo "::warning::Backup timer is not active on this host."
-            fi
-
-            # Reclaim SD card space from superseded images.
-            docker image prune -f >/dev/null 2>&1 || true
+            # Hand off to the tracked remote-deploy script, which re-asserts
+            # HEAD == $SHA as its first action, reprovisions, and gates on
+            # doctor.sh (exit 2 now fails the deploy).
+            exec ./scripts/deploy-remote.sh "$SHA"
 
       - name: Summary
         # "if: always()" means this runs even when the deploy failed, so you
