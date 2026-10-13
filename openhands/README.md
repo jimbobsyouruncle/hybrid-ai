@@ -53,6 +53,29 @@ into the deployment directory when satisfied.
 The script refuses to proceed if the workspace is, or is inside, the deployment directory,
 and fails if a `.env` or log file is found in the clone.
 
+On every run it also refreshes the existing clone, so the workspace-root copy of
+`openhands/AGENTS.md` stays current without a manual pull. The refresh fetches, then
+fast-forwards only when the clone is clean and on its default branch. If the tree is dirty, on
+another branch, or the fetch fails, it warns and skips rather than resetting or discarding
+work. A failed fetch is a warning, so `install.sh` continues.
+
+### Multi-repo jobs: `project/<repo-name>`
+
+The workspace root is a hybrid-ai clone. It holds these instructions, and it is not the target
+of a job unless the task says so. When a job names a repository, OpenHands clones that
+repository into `project/<repo-name>` inside the workspace
+(`${OPENHANDS_WORKSPACE}/project/<repo-name>`). The agent works only in that clone, so a job on
+another owned repository never edits the hybrid-ai clone at the root.
+
+```text
+~/hybrid-ai-agent                    workspace root. A hybrid-ai clone with AGENTS.md.
+~/hybrid-ai-agent/project/<repo>     the job's own clone. This is where work happens.
+```
+
+Owned repositories do not all use `main`, so `AGENTS.md` tells the agent to fetch and read the
+remote default branch (`git symbolic-ref --short refs/remotes/origin/HEAD`) before branching,
+and to branch from `origin/<default>` rather than a local `main` or `master`.
+
 ---
 
 ## The clone is also visible to Hermes, read-only
@@ -103,8 +126,9 @@ control for a service that can execute arbitrary code as root.
 2. Open OpenHands through the SSH tunnel.
 3. In **Settings → LLM**, choose a provider and model and enter the credential. It is stored
    in `~/.openhands`, outside the repo and outside the sandbox.
-4. Start a conversation with: *"Read `/workspace/openhands/AGENTS.md` and follow it for all
-   work in this repository."*
+4. Start a conversation with: *"Read `/workspace/openhands/AGENTS.md` and follow it."* The
+   file tells the agent to work in the job's own clone under `project/<repo-name>`, so the
+   same instruction works for a job on any owned repository, not just hybrid-ai.
 5. For a task, paste the relevant file from `prompts/` and add your specifics: `feature.md` for new behaviour, `fix-from-diagnostics.md` for working from a diagnostic bundle, `security-review.md` for a review pass.
 
 ---
