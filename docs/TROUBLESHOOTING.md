@@ -406,6 +406,15 @@ Confirm it by hand with a read-only probe — look for a "gateway run" process:
 docker top hermes-agent
 ```
 
+**`Profile '<name>' does not get a gateway of its own`** in `docker logs hermes-agent`.
+A sticky named active profile (for example `ciso`) stored in the bind-mounted
+`hermes_data/active_profile` captures a bare `hermes gateway run` and is refused a
+gateway, because there is only one gateway per host and it is owned by the default
+profile. The fix is already pinned in the compose `command:`:
+`hermes -p default gateway run --replace`. Do not switch the active profile back to
+`default` by hand; the `-p default` pin makes the gateway start as the default profile
+after every container create/recreate regardless of the sticky active profile.
+
 **Fix: recreate the container.** Recreating restarts the gateway in the background and leaves the
 kanban data in `hermes_data/` untouched:
 
