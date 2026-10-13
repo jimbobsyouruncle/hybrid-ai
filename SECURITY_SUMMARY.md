@@ -1,3 +1,5 @@
+# Security summary
+
 **What this file is.** A short, quick-reference list of the controls in this
 repository that must **not be weakened**, and where each one lives. It is a
 *summary only* — [`SECURITY.md`](SECURITY.md) remains the authority for the threat
