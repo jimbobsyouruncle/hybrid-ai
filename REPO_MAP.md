@@ -22,11 +22,13 @@
 ## .github
 
 - .github/README.md
+- .github/dependabot.yml
 ## .github/workflows
 
 - .github/workflows/agent-context.yml
 - .github/workflows/deploy.yml
 - .github/workflows/sast-checks.yml
+- .github/workflows/validate.yml
 ## backup
 
 - backup/README.md - backup/ — Encrypted Offsite Backups

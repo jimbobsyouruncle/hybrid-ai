@@ -6,6 +6,10 @@
      No timestamps or commit SHAs are included; output is deterministic. -->
 
 
+## .github/dependabot.yml
+- version
+- updates
+
 ## .github/workflows/agent-context.yml
 - agent-context
 
@@ -16,6 +20,12 @@
 ## .github/workflows/sast-checks.yml
 - shellcheck
 - semgrep
+- validate
+- codeql
+- gate
+
+## .github/workflows/validate.yml
+- validate
 
 ## backup/backup.sh
 - log()
