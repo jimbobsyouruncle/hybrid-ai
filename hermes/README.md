@@ -60,11 +60,45 @@ repositories, each on its default branch, so a second, separate tree is mounted 
   `agent-repos.local` (gitignored). Each line is `OWNER/NAME` to include, or `-OWNER/NAME` to
   exclude; `#` comments and blank lines are ignored.
 - Missing repos are cloned on their default branch (`--single-branch`, no tags, no submodules,
-  git hooks disabled, LFS smudge skipped). Existing repos fast-forward only; a dirty tree is
-  skipped with a warning, never hard-reset.
-- It is idempotent, reads no credentials, and writes only under `AGENT_REPOS_DIR`.
+  git hooks disabled, LFS smudge skipped, symlinks disabled). Existing repos fast-forward only;
+  a dirty tree is skipped with a warning, never hard-reset. Before any fetch it refuses a clone
+  whose git config embeds a credential in a remote URL. A tree that already contains a symlink
+  is skipped as `skipped:symlinks` and left untouched.
+- It takes an `flock` so two runs cannot collide, and it is idempotent, reads no credentials,
+  and writes only under `AGENT_REPOS_DIR`.
 - It **refuses** a target that is, is inside, or contains the deployment directory or
   `OPENHANDS_WORKSPACE`, so mounting it read-only cannot expose `.env` or the logs.
+
+### Inventory and verification
+
+Each run writes `${AGENT_REPOS_DIR}/INVENTORY.md` atomically. The file holds the run time
+(UTC), a totals line, and one row per repository:
+
+| Repository | Default branch | HEAD | Status | Last sync (UTC) |
+| --- | --- | --- | --- | --- |
+
+Status is exactly one of `cloned`, `updated`, `up-to-date`, `skipped:<reason>`, `error`, or
+`stale` (present on disk but no longer in the inventory; left in place, never deleted). No URL
+appears anywhere in the file.
+
+Two flags read the tree without changing it:
+
+```bash
+./scripts/sync-agent-repos.sh --dry-run   # list the planned action per repo; writes nothing
+./scripts/sync-agent-repos.sh --check     # offline; verify INVENTORY.md against the tree
+```
+
+`--dry-run` lists the API and manifest inventories and the action each repo would get (clone,
+update, or a skip reason). It does no clone, no fetch, and writes no file.
+
+`--check` uses no network. It reads `INVENTORY.md`, then confirms every listed directory exists
+and its HEAD still matches. Exit codes: `0` ok; `1` the inventory is older than
+`AGENT_REPOS_MAX_AGE_HOURS` (default 48) or a skipped row exists; `2` a directory is missing, a
+HEAD does not match, or the inventory is missing or unreadable. `doctor.sh` runs this check and
+warns (never fails) when it is not `0`.
+
+A normal run exits `0` when all is well, `1` when anything was skipped or is stale, and `2` on
+any error.
 
 `install.sh` runs it on every deploy, after the workspace setup, and its failure is a warning
 (not a stop). To refresh on a schedule, install a timer **by hand**. A daily systemd timer:
@@ -173,6 +207,7 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | `AGENT_REPOS_DIR` | `docker-compose.hermes.yml`, `scripts/sync-agent-repos.sh` | Host path of the agent repo reference tree, mounted at `/agent-repos` read-only. Defaults to `${HOME}/hybrid-ai-repos` when unset. |
 | `AGENT_REPOS_OWNER` | `scripts/sync-agent-repos.sh` | Account whose owned, non-fork repos are inventoried. Blank means: derive it from the owner in this clone's git origin URL. |
 | `AGENT_REPOS_MANIFEST` | `scripts/sync-agent-repos.sh` | Optional local manifest of private repos. Blank means `./agent-repos.local`. |
+| `AGENT_REPOS_MAX_AGE_HOURS` | `scripts/sync-agent-repos.sh` | Freshness window, in hours, for `--check` (default 48). Older than this reports the tree stale. |
 | `HERMES_PORT` | `docker-compose.hermes.yml` | Host port for the WebUI. |
 | `HERMES_API_PORT` | `docker-compose.hermes.yml` | Host port for the API. |
 | `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |

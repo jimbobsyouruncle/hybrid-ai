@@ -849,6 +849,33 @@ else
   fi
 fi
 
+# --- Agent repo reference-tree freshness (read-only) ------------------------
+# scripts/sync-agent-repos.sh --check reads INVENTORY.md and confirms every
+# listed repo is still present and on the recorded HEAD. It uses no network and
+# writes nothing. Exit 0 is a pass; exit 1 (stale, or a skipped row) or exit 2
+# (missing dir, HEAD mismatch, inventory unreadable) is a WARNING here, never a
+# failure -- a stale reference tree must not turn a deploy red.
+SYNC_CHECK="${SCRIPT_DIR}/scripts/sync-agent-repos.sh"
+AR_SET="${AGENT_REPOS_DIR:-$(env_get AGENT_REPOS_DIR)}"
+if [[ -z "$AR_SET" ]]; then
+  : # Reference tree not configured; nothing to check.
+elif [[ ! -d "$AR_SET" ]]; then
+  warn "Agent repo reference tree directory is missing: ${AR_SET}" \
+       "The tree is built by scripts/sync-agent-repos.sh; run it to create it."
+elif [[ ! -x "$SYNC_CHECK" ]]; then
+  warn "Agent repo sync check is missing or not executable" \
+       "Restore scripts/sync-agent-repos.sh from the repository."
+else
+  SYNC_RC=0
+  "$SYNC_CHECK" --check >/dev/null 2>&1 || SYNC_RC=$?
+  if (( SYNC_RC == 0 )); then
+    pass "Agent repo reference tree inventory is fresh and matches"
+  else
+    warn "Agent repo reference tree check reported a problem (exit ${SYNC_RC})" \
+         "Run ./scripts/sync-agent-repos.sh to refresh the tree, then re-run ./doctor.sh. See docs/TROUBLESHOOTING.md."
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 6. Network
 # ---------------------------------------------------------------------------
