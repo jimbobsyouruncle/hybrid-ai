@@ -480,6 +480,57 @@ confirm the old value is gone.
 
 ---
 
+## Agent repo reference tree: inventory rows and skips
+
+`scripts/sync-agent-repos.sh` keeps the read-only reference tree at
+`AGENT_REPOS_DIR` and writes `${AGENT_REPOS_DIR}/INVENTORY.md` after each run.
+Each row is one repository with its default branch, HEAD short SHA, status and
+last sync time (UTC). The status is exactly one of:
+
+| Status | Meaning |
+|---|---|
+| `cloned` | The repo was missing and is now cloned. |
+| `updated` | An existing clone fast-forwarded to a newer default-branch commit. |
+| `up-to-date` | An existing clone was already at the remote head; nothing changed. |
+| `skipped:<reason>` | Left untouched this run. The reason is `dirty`, `symlinks`, `credential-remote`, or `not-a-repo`. |
+| `error` | A clone or fetch failed, or a git config could not be read. |
+| `stale` | Present on disk but no longer in the inventory (for example a repo you excluded in the manifest). Left in place; never deleted. |
+
+A normal run exits `0` when all is well, `1` when anything was skipped or is
+stale, and `2` on any error. Verify the tree without touching it or the network:
+
+```bash
+./scripts/sync-agent-repos.sh --check
+```
+
+`--check` reads `INVENTORY.md` and confirms each listed directory exists and its
+HEAD still matches. It exits `0` ok; `1` when the inventory is older than
+`AGENT_REPOS_MAX_AGE_HOURS` (default 48) or a skipped row is present; `2` when a
+directory is missing, a HEAD mismatches, or the inventory is missing or
+unreadable. `doctor.sh` runs this and warns (never fails) on anything but `0`.
+
+**`skipped:dirty`.** The clone has uncommitted changes. This script only
+fast-forwards and never discards work, so it leaves the tree alone. Commit or
+discard the changes, or delete the clone and let the next run re-clone it.
+
+**`skipped:symlinks`.** The clone's working tree contains a symlink. Clones are
+made with `core.symlinks=false` so a repository cannot plant a symlink that
+points outside the tree, but an older clone may already hold one. The script
+never deletes anything, so it skips the repo and records the reason. Re-clone
+that one repository by hand: delete the offending clone directory and run the
+sync again, or `git clone` it yourself. Do not delete the whole tree.
+
+**`skipped:credential-remote`.** A remote URL in the clone's git config embeds
+a credential. The script refuses to fetch from it. Rotate the token in GitHub
+(see the section above), then delete and re-clone that repository so the stored
+URL is replaced.
+
+**`stale`.** The directory is on disk but is no longer in the inventory, usually
+because it was excluded in `agent-repos.local`. It is left in place and never
+deleted; remove it by hand if you no longer want it there.
+
+---
+
 ## Kanban board not dispatching / gateway not running
 
 The Hermes WebUI and the Hermes gateway run in the same container. The WebUI is PID 1; the
