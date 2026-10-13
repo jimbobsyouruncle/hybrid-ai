@@ -12,6 +12,7 @@
 #
 # SNAPSHOT LAYOUT (written by backup.sh):
 #   databases/webui_data/...   SQLite snapshots, paths relative to the repo
+#   databases/hermes_data/...  Hermes SQLite snapshots, paths relative to hermes_data
 #   files/webui_data/...       uploads and non-DB vector data
 #   files/hermes_data/...      durable Hermes state from the repo directory
 #   hermes/                    ~/.hermes durable state
@@ -19,6 +20,13 @@
 #   host/  env/  MANIFEST.txt
 #   Very old snapshots stored databases/ relative to webui_data instead; both
 #   layouts are detected automatically.
+#
+# PRE-RESTORE SAFETY COPY (hermes_data.pre-restore-<stamp>):
+#   Files overwritten under hermes_data, plus the sidecars of every database we
+#   restore, are preserved here using ONE layout: every path is relative to
+#   hermes_data (e.g. config.yaml, profiles/<p>/state.db, and each moved
+#   <db>-wal / <db>-shm / <db>-journal beside the path of the database it
+#   belongs to).
 #
 # USAGE:
 #   ./restore.sh                     interactive: pick from a list of snapshots
@@ -222,8 +230,9 @@ STAGED="$(find "$RESTORE_WORK" -type d -name databases | head -n1)"
 [[ -n "$STAGED" ]] || die "Snapshot has no databases/ directory. Wrong snapshot?"
 STAGED_ROOT="$(dirname "$STAGED")"
 
-# Repo-relative layout (databases/webui_data/...) vs legacy (databases/webui.db).
-if [[ -d "${STAGED}/webui_data" ]]; then
+# Repo-relative layout (databases/webui_data/... or databases/hermes_data/...)
+# vs legacy (databases/webui.db, i.e. relative to webui_data).
+if [[ -d "${STAGED}/webui_data" || -d "${STAGED}/hermes_data" ]]; then
   DB_DEST_ROOT="$REPO_DIR"
   LAYOUT="repo-relative"
 else
@@ -255,8 +264,8 @@ fi
 
 # --- Confirm ---------------------------------------------------------------
 hr
-printf '  %sThis will replace the live contents of webui_data.%s\n' "$C_WRN" "$C_RST"
-printf '  Current data will be moved aside, not deleted.\n'
+printf '  %sThis will replace the live contents of webui_data and hermes_data.%s\n' "$C_WRN" "$C_RST"
+printf '  Current data will be preserved aside, not deleted.\n'
 printf '  All containers will be stopped for the duration.\n'
 hr
 read -r -p "  Type RESTORE to proceed: " confirm < /dev/tty
@@ -281,6 +290,7 @@ if command -v docker >/dev/null 2>&1; then
 fi
 
 # --- Move existing data aside ----------------------------------------------
+# webui_data is replaced wholesale, so it is simply moved aside.
 if [[ -d "${REPO_DIR}/webui_data" ]]; then
   SAFETY="${REPO_DIR}/webui_data.pre-restore-${STAMP}"
   log "Preserving current data at $(basename "$SAFETY")"
@@ -288,6 +298,20 @@ if [[ -d "${REPO_DIR}/webui_data" ]]; then
   event "pre_restore_snapshot_kept" "path=$(basename "$SAFETY")"
 fi
 mkdir -p "${REPO_DIR}/webui_data"
+
+# hermes_data is ONLY ever merged, never moved wholesale: it holds large,
+# rebuildable excluded directories (tools/, hermes-agent/, ...) that must never
+# be disturbed, and live files absent from the backup must survive. Overwritten
+# files are preserved under hermes_data.pre-restore-<stamp>, and the rsync has
+# no --delete flag. Everything preserved there uses ONE layout: every path is
+# relative to hermes_data, so a preserved database lands at
+# <dir>/profiles/<p>/state.db, never <dir>/hermes_data/profiles/<p>/state.db.
+HERMES_BACKUP_DIR=""
+RESTORED_HERMES_FILES=0
+
+# Map a repo-relative live Hermes path to its place in the pre-restore dir, by
+# stripping the hermes_data/ prefix (the one layout used for everything there).
+hermes_backup_path() { printf '%s/%s' "$HERMES_BACKUP_DIR" "${1#hermes_data/}"; }
 
 # --- Files first, then databases -------------------------------------------
 if [[ -d "${STAGED_ROOT}/files" ]]; then
@@ -299,7 +323,10 @@ if [[ -d "${STAGED_ROOT}/files" ]]; then
     fi
     if [[ -d "${STAGED_ROOT}/files/hermes_data" ]]; then
       mkdir -p "${REPO_DIR}/hermes_data"
-      rsync -a "${STAGED_ROOT}/files/hermes_data/" "${REPO_DIR}/hermes_data/" || die "Hermes state restore failed."
+      HERMES_BACKUP_DIR="${REPO_DIR}/hermes_data.pre-restore-${STAMP}"
+      log "Preserving overwritten hermes_data files under $(basename "$HERMES_BACKUP_DIR")"
+      rsync -a --backup --backup-dir="$HERMES_BACKUP_DIR" \
+        "${STAGED_ROOT}/files/hermes_data/" "${REPO_DIR}/hermes_data/" || die "Hermes state restore failed."
     fi
   else
     # Legacy: files/ was relative to webui_data.
@@ -308,18 +335,99 @@ if [[ -d "${STAGED_ROOT}/files" ]]; then
 fi
 
 # Databases go last so they overwrite any same-named file from files/.
+#
+# For each database ACTUALLY RESTORED under hermes_data we:
+#   - preserve the overwritten live database TOGETHER WITH ITS OWN SIDECARS
+#     (<db>-wal, <db>-shm, <db>-journal), so the preserved copy opens with the
+#     same rows the live database had; and
+#   - move those same sidecars into the pre-restore dir, so no restored
+#     database is left with a stale sidecar that could be read as newer and
+#     corrupt it.
+# Only the three exact sidecars of a database we restore are ever touched.
+# Nothing is matched by a name glob such as '*.db-*', so unrelated files (a
+# live DB not in the backup, its sidecars, workspace/schema.db-notes.md) and
+# everything under excluded rebuildable directories are left alone.
+#
+# If preserving the live database (its main file) or moving one of its sidecars
+# aside FAILS -- e.g. a full disk -- that database is SKIPPED, never
+# overwritten: overwriting it would destroy it with no safety copy, which this
+# card forbids. Skipped databases are counted and reported.
 log "Restoring databases (${LAYOUT} layout)..."
+RESTORE_SKIPPED=0
+RESTORE_SKIPPED_LIST=()
 while IFS= read -r -d '' db; do
   rel="${db#"${STAGED}/"}"
-  mkdir -p "$(dirname "${DB_DEST_ROOT}/${rel}")"
-  cp -a "$db" "${DB_DEST_ROOT}/${rel}"
+  dest="${DB_DEST_ROOT}/${rel}"
+  mkdir -p "$(dirname "$dest")"
+
+  if [[ "$DB_DEST_ROOT" == "$REPO_DIR" && "$rel" == hermes_data/* ]]; then
+    [[ -n "$HERMES_BACKUP_DIR" ]] || HERMES_BACKUP_DIR="${REPO_DIR}/hermes_data.pre-restore-${STAMP}"
+
+    # Preserve the live database's main file (if it is there). If the copy
+    # FAILS (e.g. a full disk) we must NOT overwrite the live database: that
+    # would destroy it with no safety copy. Skip this database and report it,
+    # matching the rsync --backup path.
+    if [[ -f "$dest" ]]; then
+      mkdir -p "$(dirname "$(hermes_backup_path "$rel")")"
+      if ! cp -a "$dest" "$(hermes_backup_path "$rel")" 2>/dev/null; then
+        warn "Could not preserve live ${rel}; SKIPPING its restore to avoid destroying it."
+        event "hermes_db_preserve_failed" "path=${rel}" "action=skipped"
+        RESTORE_SKIPPED=$(( RESTORE_SKIPPED + 1 ))
+        RESTORE_SKIPPED_LIST+=("$rel")
+        continue
+      fi
+    fi
+
+    # Move THIS database's own sidecars aside (preserved AND removed from beside
+    # the restored database in one step, so no stale sidecar can be read as
+    # newer). A move failure leaves the database with a stale sidecar, so we
+    # likewise skip it rather than overwrite.
+    skip=0
+    for sfx in -wal -shm -journal; do
+      if [[ -f "${dest}${sfx}" ]]; then
+        mkdir -p "$(dirname "$(hermes_backup_path "${rel}${sfx}")")"
+        if ! mv "${dest}${sfx}" "$(hermes_backup_path "${rel}${sfx}")" 2>/dev/null; then
+          warn "Could not move aside stale sidecar ${rel}${sfx}; SKIPPING its restore."
+          event "hermes_db_preserve_failed" "path=${rel}${sfx}" "action=skipped"
+          RESTORE_SKIPPED=$(( RESTORE_SKIPPED + 1 ))
+          RESTORE_SKIPPED_LIST+=("$rel")
+          skip=1
+          break
+        fi
+      fi
+    done
+    (( skip )) && continue
+  fi
+
+  if ! cp -a "$db" "$dest"; then
+    warn "Could not write restored database ${rel}; it was not restored."
+    event "hermes_db_restore_failed" "path=${rel}"
+    RESTORE_SKIPPED=$(( RESTORE_SKIPPED + 1 ))
+    RESTORE_SKIPPED_LIST+=("$rel")
+    continue
+  fi
 done < <(find "$STAGED" -type f -print0)
 
-# Stale WAL/journal sidecars would be read as newer than the restored database
-# and could corrupt it on first open.
-find "${REPO_DIR}/webui_data" -type f \
-  \( -name '*.db-wal' -o -name '*.db-shm' -o -name '*.db-journal' \
-     -o -name '*.sqlite3-wal' -o -name '*.sqlite3-shm' \) -delete 2>/dev/null || true
+if (( RESTORE_SKIPPED > 0 )); then
+  event "restore_skipped_databases" "count=${RESTORE_SKIPPED}" \
+        "paths=$(printf '%s,' "${RESTORE_SKIPPED_LIST[@]}" | cut -c1-160)"
+  warn "${RESTORE_SKIPPED} database(s) were NOT restored (see above). Those live databases were left untouched."
+fi
+
+# Report the pre-restore safety copy (its location and how much it holds).
+if [[ -n "$HERMES_BACKUP_DIR" && -d "$HERMES_BACKUP_DIR" ]]; then
+  RESTORED_HERMES_FILES="$(find "$HERMES_BACKUP_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
+fi
+if [[ -n "$HERMES_BACKUP_DIR" && -d "$HERMES_BACKUP_DIR" && "$RESTORED_HERMES_FILES" != "0" ]]; then
+  ok "Pre-restore copy of overwritten hermes_data files: $(basename "$HERMES_BACKUP_DIR") (${RESTORED_HERMES_FILES} file(s))"
+  event "hermes_pre_restore_backup_kept" "path=$(basename "$HERMES_BACKUP_DIR")" "files=${RESTORED_HERMES_FILES}"
+else
+  if [[ -n "$HERMES_BACKUP_DIR" ]]; then
+    rmdir "$HERMES_BACKUP_DIR" 2>/dev/null || true
+  fi
+  HERMES_BACKUP_DIR=""
+  printf '  No existing hermes_data files needed preserving.\n'
+fi
 
 # Caddy needs this directory before the proxy starts again.
 mkdir -p "${REPO_DIR}/webui_data/caddy"
@@ -489,7 +597,8 @@ cat <<NEXT
     4. Confirm everything is healthy:
          ./doctor.sh
 
-    5. Once satisfied, remove the safety copy:
+    5. Once satisfied, remove the safety copies:
          rm -rf ${SAFETY:-webui_data.pre-restore-*}
+         rm -rf hermes_data.pre-restore-*
 
 NEXT

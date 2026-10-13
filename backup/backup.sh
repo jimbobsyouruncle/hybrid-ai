@@ -40,8 +40,14 @@
 #   the script fails part-way.
 #
 # WHAT GETS BACKED UP (staging paths are relative to the repo directory):
-#   - databases/   Consistent SQLite snapshots (Open WebUI, Chroma)
-#   - files/       Uploads, non-DB vector data, durable hermes_data state
+#   - databases/   Consistent SQLite snapshots, discovered at run time. Covers
+#                  every Open WebUI / Chroma database under webui_data and every
+#                  Hermes SQLite database under hermes_data (state.db, kanban.db,
+#                  cron/*.db, per-profile state across profiles/*).
+#   - files/       Uploads, non-DB vector data, and the WHOLE durable
+#                  hermes_data tree minus rebuildable/volatile content (see the
+#                  HERMES_EXCLUDES array). Captured by exclusion, not by an
+#                  allow-list, so new durable state is never silently missed.
 #   - hermes/      Durable ~/.hermes state (caches/runtimes excluded)
 #   - openhands/   ~/.openhands state (cache/tmp/logs excluded)
 #   - host/        Compose files, scripts, Caddyfile, model list, metadata
@@ -276,26 +282,164 @@ else
   [[ "$MODE" == "dryrun" ]] || warn "Could not pause containers; capturing live (see BACKUP_NO_PAUSE)."
 fi
 
-DB_COUNT=0
-DB_FAILED=0
-
-# Paths are staged RELATIVE TO THE REPO (e.g. databases/webui_data/webui.db).
-# restore.sh relies on this layout.
-DB_PATHS=(
+# ---------------------------------------------------------------------------
+# Durable hermes_data: ONE exclude list, used for BOTH the file capture and the
+# database discovery. hermes_data is the ONLY durable Hermes state that survives
+# a container recreate (hermes/docker-compose.hermes.yml mounts
+# ./hermes_data:/root/.hermes). We capture it by EXCLUSION, not by an
+# allow-list, because an allow-list once dropped state (a rebuilt-by-hand
+# BACKLOG.md) that lived only in state.db.
+#
+# Directory entries end with '/'; file/glob entries do not. 'profiles/*/home/'
+# drops each profile's throwaway HOME. The *.db*-family entries are excluded
+# here because live SQLite is captured as a consistent snapshot instead (see
+# discover_databases below), never copied while in use.
+# ---------------------------------------------------------------------------
+HERMES_DATA="${REPO_DIR}/hermes_data"
+WEBUI_DB_PATHS=(
   "${REPO_DIR}/webui_data/webui.db"
   "${REPO_DIR}/webui_data/vector_db/chroma.sqlite3"
 )
+HERMES_EXCLUDES=(
+  'tools/' 'hermes-agent/' 'installs/' 'cache/' 'image_cache/' 'audio_cache/'
+  'lsp/' 'node_modules/' 'venv/' '.venv/' '__pycache__/' '.git/' 'logs/'
+  'runtime/' 'sandboxes/' 'terminal-sessions/' 'profiles/*/home/'
+  '*.pyc' '*.log' '*.lock' '*.pid' '*.sock'
+  'models_dev_cache.json' 'models_dev_cache.etag' 'provider_models_cache.json'
+  '*.db' '*.sqlite' '*.sqlite3' '*-wal' '*-shm' '*-journal'
+)
 
-for db in "${DB_PATHS[@]}"; do
-  [[ -f "$db" ]] || continue
+# rsync arguments for the list above (null-separated for mapfile).
+hermes_rsync_excludes() {
+  local x
+  for x in "${HERMES_EXCLUDES[@]}"; do printf '%s\0' "--exclude=${x}"; done
+}
+
+# Bare directory names to prune during discovery -- derived from the SAME list
+# so the two can never drift. Only simple names (no '/') are emitted here; see
+# hermes_prune_paths for path-pattern entries.
+hermes_prune_names() {
+  local x name
+  for x in "${HERMES_EXCLUDES[@]}"; do
+    [[ "$x" == */ ]] || continue
+    name="${x%/}"
+    [[ "$name" == */* ]] && continue
+    printf '%s\0' "$name"
+  done
+}
+
+# Directory entries that carry a '/', e.g. 'profiles/*/home/'. Emitted for use
+# as -path predicates, so per-profile home is pruned by its PATH pattern -- NOT
+# by a bare -name home, which would wrongly prune every directory named home.
+hermes_prune_paths() {
+  local x pat
+  for x in "${HERMES_EXCLUDES[@]}"; do
+    [[ "$x" == */ ]] || continue
+    pat="${x%/}"
+    [[ "$pat" == */* ]] || continue
+    printf '%s\0' "$pat"
+  done
+}
+
+# Turn ONE path entry (e.g. 'profiles/*/home') into anchored find predicates.
+# find's '*' crosses '/', so a lone -path "$HERMES_DATA/profiles/*/home" would
+# also match deeper trees such as profiles/<p>/workspace/proj/home. Pairing it
+# with an anchored ! -path that requires an EXTRA component
+# ("$HERMES_DATA/profiles/*/*/home") leaves EXACTLY the one-component case that
+# rsync's profile-home exclusion matches. The real $HERMES_DATA prefix anchors
+# the match, so nothing outside profiles/<one>/home is ever pruned.
+hermes_prune_path_args() {
+  local pat="$1" head tail
+  head="${pat%/*}"
+  tail="${pat##*/}"
+  printf '%s\0' -path "${HERMES_DATA}/${pat}" '!' -path "${HERMES_DATA}/${head}/*/${tail}"
+}
+
+# Snapshot one discovered database. Returns:
+#   0  snapshot written successfully
+#   1  SQLite snapshot failed (candidate for the cold-copy fallback)
+#   2  file is NOT a readable SQLite database (warned + recorded, never fatal)
+# Sets SNAPSHOT_REL to the repo-relative path for the caller's logging.
+snapshot_one_db() {
+  local db="$1" rel target
   rel="${db#"${REPO_DIR}/"}"
+  SNAPSHOT_REL="$rel"
   target="${STAGING_DIR}/databases/${rel}"
-  if snapshot_sqlite "$db" "$target"; then
-    DB_COUNT=$(( DB_COUNT + 1 ))
-  else
-    DB_FAILED=$(( DB_FAILED + 1 ))
-    warn "Could not snapshot ${rel} via SQLite API."
+
+  # A *.db file that SQLite cannot open (a stray text file, a partial download)
+  # must never abort the whole backup. Detect it up front and skip it.
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if ! sqlite3 "file:${db}?mode=ro" 'PRAGMA schema_version;' >/dev/null 2>&1; then
+      return 2
+    fi
   fi
+
+  snapshot_sqlite "$db" "$target"
+}
+
+# Discover every live SQLite database at RUN TIME. Covers the whole hermes_data
+# tree (state.db, kanban.db, shared-state.db, kanban/boards/*/kanban.db,
+# cron/executions.db, profiles/*/state.db, profiles/*/cron/*.db, ...) plus the
+# two Open WebUI databases. Fills DISCOVERED_DBS.
+#
+# The prune expression is built from the SAME exclude list so the two can never
+# drift: simple directory names become -name predicates, path patterns (e.g.
+# 'profiles/*/home') become ANCHORED -path predicates (see hermes_prune_path_args).
+# A bare -name home is deliberately NOT used -- it would prune every directory
+# named home, and an unanchored -path would prune deeper 'home' dirs too.
+DISCOVERED_DBS=()
+discover_databases() {
+  DISCOVERED_DBS=()
+  local prune=() p args=() first=1
+
+  if [[ -d "$HERMES_DATA" ]]; then
+    while IFS= read -r -d '' p; do
+      (( first )) || prune+=(-o)
+      prune+=(-name "$p")
+      first=0
+    done < <(hermes_prune_names)
+    while IFS= read -r -d '' p; do
+      mapfile -d '' -t args < <(hermes_prune_path_args "$p")
+      (( first )) || prune+=(-o)
+      prune+=( \( "${args[@]}" \) )
+      first=0
+    done < <(hermes_prune_paths)
+    while IFS= read -r -d '' db; do
+      DISCOVERED_DBS+=("$db")
+    done < <(find "$HERMES_DATA" \( "${prune[@]}" \) -prune -o \
+               -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print0)
+  fi
+
+  local extra
+  for extra in "${WEBUI_DB_PATHS[@]}"; do
+    [[ -f "$extra" ]] && DISCOVERED_DBS+=("$extra")
+  done
+  return 0
+}
+
+DB_COUNT=0
+DB_FAILED=0
+DB_NONSQLITE=0
+FAILED_DBS=()
+NONSQLITE_DBS=()
+
+# Paths are staged RELATIVE TO THE REPO (e.g. databases/webui_data/webui.db).
+# restore.sh relies on this layout.
+discover_databases
+if (( ${#DISCOVERED_DBS[@]} > 0 )); then
+  [[ "$MODE" == "dryrun" ]] || log "Found ${#DISCOVERED_DBS[@]} database file(s) to snapshot."
+fi
+
+for db in "${DISCOVERED_DBS[@]}"; do
+  rc=0
+  snapshot_one_db "$db" || rc=$?
+  case "$rc" in
+    0) DB_COUNT=$(( DB_COUNT + 1 )) ;;
+    1) DB_FAILED=$(( DB_FAILED + 1 )); FAILED_DBS+=("$db")
+       warn "Could not snapshot ${SNAPSHOT_REL} via SQLite API." ;;
+    2) DB_NONSQLITE=$(( DB_NONSQLITE + 1 )); NONSQLITE_DBS+=("$SNAPSHOT_REL")
+       warn "${SNAPSHOT_REL} is not a readable SQLite database; skipping its live snapshot." ;;
+  esac
 done
 
 # --- Allow-list durable non-database state ---------------------------------
@@ -315,14 +459,20 @@ if [[ -d "${REPO_DIR}/webui_data/vector_db" ]]; then
     warn "rsync reported issues copying Open WebUI vector data; continuing."
 fi
 
-# hermes_data contains reconstructable runtimes/caches. Keep only durable state.
-for d in memories memory skills config configs sessions; do
-  if [[ -d "${REPO_DIR}/hermes_data/${d}" ]]; then
-    mkdir -p "${STAGING_DIR}/files/hermes_data/${d}"
-    rsync -a "${REPO_DIR}/hermes_data/${d}/" "${STAGING_DIR}/files/hermes_data/${d}/" 2>/dev/null || \
-      warn "rsync reported issues copying Hermes ${d}; continuing."
-  fi
-done
+# Durable hermes_data: capture the WHOLE tree by exclusion (see HERMES_EXCLUDES).
+# NOTE: webui/ is deliberately KEPT. hermes/Dockerfile clones the Hermes WebUI
+# INTO the image, so the application code is not user state; ~/.hermes/webui
+# holds durable user data (attachments/, sessions/, settings.json,
+# workspaces.json, last_workspace.txt). The generic rules already drop its
+# *.log files and cache *.json.
+if [[ -d "$HERMES_DATA" ]]; then
+  mkdir -p "${STAGING_DIR}/files/hermes_data"
+  mapfile -d '' -t HERMES_RSYNC_EXCL < <(hermes_rsync_excludes)
+  rsync -a "${HERMES_RSYNC_EXCL[@]}" \
+    "${HERMES_DATA}/" "${STAGING_DIR}/files/hermes_data/" 2>/dev/null || \
+    warn "rsync reported issues copying durable hermes_data; continuing."
+  unset HERMES_RSYNC_EXCL
+fi
 
 if [[ -d "${HOME}/.hermes" ]]; then
   rsync -a \
@@ -344,6 +494,12 @@ unpause_webui
 [[ "$MODE" == "dryrun" ]] || ok "Capture complete; application services resumed."
 
 # --- Cold-copy fallback ----------------------------------------------------
+# Uses the SAME run-time discovered list, never a hardcoded one. A database that
+# could not be snapshotted online is copied cold. If the copy of a database that
+# IS SQLite fails, the run FAILS: a backup that reports success while a real
+# database is missing is the exact failure this script must never allow. A file
+# that is not SQLite at all (already warned and recorded above) is still skipped
+# without failing the run.
 if (( DB_FAILED > 0 )); then
   warn "${DB_FAILED} database(s) could not be snapshotted online."
   if command -v docker >/dev/null 2>&1; then
@@ -362,20 +518,31 @@ if (( DB_FAILED > 0 )); then
     rm -rf "${STAGING_DIR}/databases"
     mkdir -p "${STAGING_DIR}/databases"
     DB_COUNT=0
-    for db in "${DB_PATHS[@]}"; do
+    for db in "${DISCOVERED_DBS[@]}"; do
       [[ -f "$db" ]] || continue
       rel="${db#"${REPO_DIR}/"}"
-      mkdir -p "$(dirname "${STAGING_DIR}/databases/${rel}")"
-      if cp -a "$db" "${STAGING_DIR}/databases/${rel}"; then
-        DB_COUNT=$(( DB_COUNT + 1 ))
-      else
-        die "Cold-copy fallback failed for ${rel}."
+      # Do not cold-copy a non-SQLite file; it was already warned and recorded.
+      # This skip stays non-fatal.
+      if command -v sqlite3 >/dev/null 2>&1 && \
+         ! sqlite3 "file:${db}?mode=ro" 'PRAGMA schema_version;' >/dev/null 2>&1; then
+        warn "Skipping cold copy of non-SQLite ${rel}."
+        continue
       fi
+      mkdir -p "$(dirname "${STAGING_DIR}/databases/${rel}")"
+      cp -a "$db" "${STAGING_DIR}/databases/${rel}" \
+        || die "Cold-copy fallback failed for ${rel}. Refusing to report a successful backup."
+      DB_COUNT=$(( DB_COUNT + 1 ))
     done
     restart_stopped
   else
     die "Cannot produce consistent database copies and cannot fall back."
   fi
+fi
+
+if (( DB_NONSQLITE > 0 )); then
+  event "non_sqlite_db_skipped" "count=${DB_NONSQLITE}" \
+        "paths=$(printf '%s,' "${NONSQLITE_DBS[@]}" | cut -c1-160)"
+  warn "${DB_NONSQLITE} file(s) matched a database extension but are not SQLite; skipped."
 fi
 
 [[ "$MODE" == "dryrun" ]] || ok "Captured ${DB_COUNT} database(s) (${CONSISTENCY})."
@@ -458,8 +625,10 @@ layout             : repo-relative (v2)
 
 Contents
 --------
-databases/   Consistent SQLite snapshots, repo-relative (webui_data/...).
-files/       Uploads, vector data, durable hermes_data, repo-relative.
+databases/   Consistent SQLite snapshots, repo-relative, discovered at run time
+             (webui_data/... and hermes_data/...).
+files/       Uploads, vector data, and the whole durable hermes_data tree
+             (rebuildable/volatile content excluded), repo-relative.
 hermes/      Durable ~/.hermes state; runtime/cache content excluded.
 openhands/   ~/.openhands state; cache, temp, and logs excluded.
 host/        Compose files, scripts, Caddyfile, model list, host metadata.
