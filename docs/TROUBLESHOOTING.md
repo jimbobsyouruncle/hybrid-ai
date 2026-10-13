@@ -419,7 +419,7 @@ what the container `command:` starts, and an `exec`ed one is not tracked as that
 
 ---
 
-## Kanban cards stuck in Triage (decomposer silently stalled)
+## Cards stay in Triage, gateway is running
 
 A running gateway is not enough. With `kanban.auto_decompose` enabled, the decomposer picks up
 each Triage card within about 60 seconds. If it cannot, cards stay in Triage and the board goes
@@ -433,7 +433,8 @@ Kanban Triage stalled on board <board>: 2 task(s) older than 15m (ids: 41 57); 2
 ```
 
 A card whose only event is `created` is the failure signature: the decomposer never touched it.
-Tune the threshold with `DOCTOR_TRIAGE_STALL_MIN` (default 15 minutes):
+Tune the threshold with `DOCTOR_TRIAGE_STALL_MIN` (default 15 minutes, read from the environment,
+not from `.env`):
 
 ```bash
 DOCTOR_TRIAGE_STALL_MIN=5 ./doctor.sh
@@ -456,6 +457,15 @@ OPENROUTER_API_KEY is missing or empty in hermes_data/.env
 hermes -p default config get auxiliary          # which provider the decomposer uses
 grep -c '^OPENROUTER_API_KEY=' hermes_data/.env # 1 means the line is uncommented
 ```
+
+**A board database that cannot be read** is reported instead of being treated as healthy:
+
+```
+Kanban Triage not stalled: cannot query board <board>
+```
+
+That means the kanban DB is corrupt, locked, not a SQLite file, or unreadable. Inspect it
+read-only, for example: `sqlite3 "file:hermes_data/kanban/boards/<board>/kanban.db?mode=ro" 'PRAGMA quick_check;'`.
 
 **Fix.** Restore the key in the relevant `.env` (see `.env.example` for the format), then recreate
 the container so the gateway and decomposer pick it up:

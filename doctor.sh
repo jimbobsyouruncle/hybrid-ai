@@ -77,6 +77,7 @@ env_key_state() {
   v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2-)"
   v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
   if [[ -n "$v" ]]; then printf 'set'; else printf 'absent'; fi
+  unset v
 }
 
 # ---------------------------------------------------------------------------
@@ -282,18 +283,24 @@ if [[ -f .env ]]; then
   # --- OpenRouter credential present for board profiles ---------------------
   # Each Hermes profile has its own .env under hermes_data/. A board-running
   # profile (default/builder/reviewer) with no OpenRouter key stalls its board
-  # exactly like the deployment-wide case above.
-  for prof_env in "${HERMES_DATA_DIR}/.env" \
-                  "${HERMES_DATA_DIR}/profiles/builder/.env" \
-                  "${HERMES_DATA_DIR}/profiles/reviewer/.env"; do
-    case "$(env_key_state "$prof_env" OPENROUTER_API_KEY)" in
-      set)        pass "OPENROUTER_API_KEY is set in ${prof_env}" ;;
-      unreadable) warn "cannot read ${prof_env}" \
-                       "The OpenRouter credential in this profile cannot be verified by this user." ;;
-      *)          warn "OPENROUTER_API_KEY is missing or empty in ${prof_env}" \
-                       "Set it in that profile's .env (see .env.example) and restart Hermes: ${COMPOSE_CMD} up -d hermes" ;;
-    esac
-  done
+  # exactly like the deployment-wide case above. If hermes_data is absent there
+  # are no profiles to check, so emit a single warn rather than one per path.
+  if [[ ! -d "$HERMES_DATA_DIR" ]]; then
+    warn "OpenRouter credential present for board profiles: ${HERMES_DATA_DIR} not present" \
+         "No Hermes profiles on this host, so their OpenRouter credentials cannot be checked. Run ./install.sh to create ${HERMES_DATA_DIR}."
+  else
+    for prof_env in "${HERMES_DATA_DIR}/.env" \
+                    "${HERMES_DATA_DIR}/profiles/builder/.env" \
+                    "${HERMES_DATA_DIR}/profiles/reviewer/.env"; do
+      case "$(env_key_state "$prof_env" OPENROUTER_API_KEY)" in
+        set)        pass "OPENROUTER_API_KEY is set in ${prof_env}" ;;
+        unreadable) warn "cannot read ${prof_env}" \
+                         "The OpenRouter credential in this profile cannot be verified by this user." ;;
+        *)          warn "OPENROUTER_API_KEY is missing or empty in ${prof_env}" \
+                         "Set it in that profile's .env (see .env.example) and restart Hermes: ${COMPOSE_CMD} up -d hermes" ;;
+      esac
+    done
+  fi
 
   TS_IP="$(env_get TAILSCALE_IP)"
   if [[ -n "$TS_IP" ]]; then
@@ -436,6 +443,15 @@ if docker info >/dev/null 2>&1; then
   # Card text is untrusted input, so only ids and counts leave SQL; titles,
   # bodies, comments and event payloads are never selected or printed. The
   # database is opened read-only, and every failure path degrades to one warn.
+  #
+  # The threshold must be a whole number of minutes. A stray suffix (e.g.
+  # "15m") would make the arithmetic below throw "value too great for base" and
+  # print no Triage result at all, so validate it and fall back to 15.
+  if [[ ! "$DOCTOR_TRIAGE_STALL_MIN" =~ ^[0-9]+$ ]]; then
+    warn "DOCTOR_TRIAGE_STALL_MIN='${DOCTOR_TRIAGE_STALL_MIN}' is not a whole number of minutes" \
+         "Using the default of 15 minutes. Set it to an integer (minutes), e.g. DOCTOR_TRIAGE_STALL_MIN=15 ./doctor.sh"
+    DOCTOR_TRIAGE_STALL_MIN=15
+  fi
   if [[ ! -d "$HERMES_DATA_DIR" ]]; then
     warn "Kanban Triage not stalled: ${HERMES_DATA_DIR} not present" \
          "No Hermes data on this host, so the kanban pipeline cannot be checked."
@@ -457,10 +473,19 @@ if docker info >/dev/null 2>&1; then
         BOARD="$(basename "$(dirname "$db")")"
         # Counts come straight from SQL. The id list is the only per-row data
         # selected, and it is joined with sed -- no card text is ever read.
+        # `set -o pipefail` (set at the top) makes $? reflect sqlite3's own
+        # exit status, so a corrupt, locked, unreadable or non-SQLite file is
+        # detected instead of being mistaken for a healthy empty result.
         STALL_COUNT="$(sqlite3 "file:${db}?mode=ro" \
           "SELECT COUNT(*) FROM tasks WHERE status='triage' AND created_at < ${THRESH_EPOCH};" 2>/dev/null \
           | head -1)"
-        if [[ -z "$STALL_COUNT" || "$STALL_COUNT" == "0" ]]; then
+        RC=$?
+        if (( RC != 0 )) || [[ ! "$STALL_COUNT" =~ ^[0-9]+$ ]]; then
+          warn "Kanban Triage not stalled: cannot query board ${BOARD}" \
+               "The kanban database at ${db} could not be read (corrupt, locked, non-SQLite or unreadable). Inspect it read-only, e.g.: sqlite3 \"file:${db}?mode=ro\" 'PRAGMA quick_check;'. See docs/TROUBLESHOOTING.md."
+          continue
+        fi
+        if [[ "$STALL_COUNT" == "0" ]]; then
           pass "Kanban Triage not stalled on board ${BOARD}"
           continue
         fi
@@ -469,7 +494,7 @@ if docker info >/dev/null 2>&1; then
         CREATED_ONLY="$(sqlite3 "file:${db}?mode=ro" \
           "SELECT COUNT(*) FROM tasks t WHERE t.status='triage' AND t.created_at < ${THRESH_EPOCH} AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind <> 'created');" 2>/dev/null \
           | head -1)"
-        CREATED_ONLY="${CREATED_ONLY:-?}"
+        [[ "$CREATED_ONLY" =~ ^[0-9]+$ ]] || CREATED_ONLY="?"
         STALL_IDS="$(sqlite3 "file:${db}?mode=ro" \
           "SELECT id FROM tasks WHERE status='triage' AND created_at < ${THRESH_EPOCH};" 2>/dev/null \
           | sed '/^$/d' | tr '\n' ' ' | sed 's/ *$//')"
