@@ -11,21 +11,23 @@
 #   1. Checks that required programs (docker, git, jq, curl, openssl, sqlite3,
 #      rsync, tailscale) are installed, and stops with instructions if any are
 #      missing.
-#   2. Loads your existing .env file, if there is one, so it only asks you for
+#   2. Refreshes the read-only agent repo reference tree Hermes reads at
+#      /agent-repos, so it is current even if a later step fails or stops. A
+#      failure here is a warning, not a stop, and it needs no prompt (it runs in
+#      both interactive and --non-interactive modes).
+#   3. Loads your existing .env file, if there is one, so it only asks you for
 #      things it does not already know. It evaluates the version to determine
 #      if the structure needs to be upgraded.
-#   3. Reads your Pi's RAM and works out a safe memory budget for Ollama.
-#   4. Generates a login-session encryption key, but only the first time.
-#   5. Prompts you for your local domain, OpenRouter key, and RunPod credentials.
-#   6. Asks Tailscale for the network address of your cloud GPU pod (read-only).
+#   4. Reads your Pi's RAM and works out a safe memory budget for Ollama.
+#   5. Generates a login-session encryption key, but only the first time.
+#   6. Prompts you for your local domain, OpenRouter key, and RunPod credentials.
+#   7. Asks Tailscale for the network address of your cloud GPU pod (read-only).
 #      It does NOT start the pod unless you opt in: set RUNPOD_AUTO_WAKE=1 (or
 #      true) in .env, or pass --wake-runpod for a single run. Off by default.
-#   7. Creates the data folders if they do not exist (never overwrites them).
-#   8. Writes the .env file with locked-down permissions.
-#   9. Starts the core stack, OpenHands, Hermes Agent, and status reverse proxy.
-#      It also refreshes the read-only agent repo reference tree Hermes reads at
-#      /agent-repos (a warning, not a stop, if that refresh fails).
-#  10. Verifies local DNS resolution for your subdomains and gives exact Pi-hole rules.
+#   8. Creates the data folders if they do not exist (never overwrites them).
+#   9. Writes the .env file with locked-down permissions.
+#  10. Starts the core stack, OpenHands, Hermes Agent, and status reverse proxy.
+#  11. Verifies local DNS resolution for your subdomains and gives exact Pi-hole rules.
 #
 # HOW TO RUN IT:
 #   ./install.sh                   normal, interactive -- asks for anything missing
@@ -156,6 +158,17 @@ for _s in scripts/setup-agent-workspace.sh scripts/sync-agent-repos.sh \
   fi
 done
 unset _s _f
+
+# ---------------------------------------------------------------------------
+# Refresh the read-only reference tree Hermes sees at /agent-repos first, so it
+# is current even when a later install step fails or stops. A failure here is a
+# warning, not a stop, and it needs no prompt. The script reads AGENT_REPOS_DIR
+# and OPENHANDS_WORKSPACE from the environment, or parses .env itself, and falls
+# back to the same defaults this installer writes below.
+# ---------------------------------------------------------------------------
+log "Syncing the read-only agent repo reference tree..."
+"${SCRIPT_DIR}/scripts/sync-agent-repos.sh" \
+  || warn "Agent repo sync failed; Hermes sees a stale tree at ${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}. Re-run scripts/sync-agent-repos.sh by hand."
 
 # ---------------------------------------------------------------------------
 # STEP 2. Load existing .env
@@ -463,7 +476,8 @@ fi
 # --- OpenHands: workspace path and browser-reachable sandbox host ----------
 OPENHANDS_WORKSPACE="${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}"
 # Read-only local copy of every non-fork repo you own, mounted into Hermes at
-# /agent-repos. Populated by scripts/sync-agent-repos.sh after step 9.
+# /agent-repos. Refreshed near the start of every run by
+# scripts/sync-agent-repos.sh, before .env is loaded.
 AGENT_REPOS_DIR="${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}"
 if [[ -z "${OPENHANDS_SANDBOX_HOST:-}" ]]; then
   _default_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
@@ -617,13 +631,6 @@ else
   "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" \
     || warn "Agent workspace setup failed; OpenHands will not start until it exists."
 fi
-
-# Refresh the read-only reference tree Hermes sees at /agent-repos. A failure
-# here is a warning, not a stop: the stack still starts, Hermes just sees a
-# stale (or empty) tree until the next deploy or a manual re-run.
-log "Syncing the read-only agent repo reference tree..."
-"${SCRIPT_DIR}/scripts/sync-agent-repos.sh" \
-  || warn "Agent repo sync failed; Hermes sees a stale tree at ${AGENT_REPOS_DIR}. Re-run scripts/sync-agent-repos.sh by hand."
 
 prepare_openhands_workspace() {
   # -n: fail instead of prompting for a password, so CI never hangs.
