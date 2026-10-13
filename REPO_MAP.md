@@ -14,6 +14,7 @@
 - LICENSE
 - README.md - hybrid-ai
 - SECURITY.md - Security
+- SECURITY_SUMMARY.md - Security summary
 - collect-diagnostics.sh - FILE: collect-diagnostics.sh
 - docker-compose.yml - FILE: docker-compose.yml
 - doctor.sh - FILE: doctor.sh
