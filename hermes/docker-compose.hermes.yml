@@ -30,6 +30,17 @@ services:
       # Hermes reads the clone; it must never write to it. The clone is never
       # the deployment directory (scripts/setup-agent-workspace.sh refuses that).
       - ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/agent-repo:ro
+      # The read-only reference tree of every non-fork repo you own, one clone
+      # per repo on its own default branch, built by scripts/sync-agent-repos.sh.
+      # Separate from the OpenHands clone above, so Hermes can read code and
+      # agent-context markdown files regardless of which ai/* branch OpenHands
+      # last left checked out. `${AGENT_REPOS_DIR:-...}` defaults to
+      # ${HOME}/hybrid-ai-repos when AGENT_REPOS_DIR is unset (Docker Compose
+      # expands the nested default), so a compose parse with no .env still
+      # succeeds. `:ro` is load-bearing: Hermes reads this tree, never writes.
+      # The script refuses any path that is, contains, or is inside the
+      # deployment dir or the OpenHands workspace, so .env stays out of reach.
+      - ${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}:/agent-repos:ro
     # Two networks, deliberately:
     #   default   -- the shared `hybrid-ai` stack network (unchanged).
     #   coder-net -- the internal network shared only with `openhands`, so

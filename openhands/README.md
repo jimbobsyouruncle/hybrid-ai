@@ -62,6 +62,14 @@ Hermes reads the same clone at `/agent-repo`, mounted read-only
 script above refuses that — and `:ro` means Hermes can read the code OpenHands is working on
 but cannot modify it. Writes to `/agent-repo` fail inside the Hermes container.
 
+Hermes also mounts a second, separate tree read-only at `/agent-repos`
+(`${AGENT_REPOS_DIR}:/agent-repos:ro`, default `${HOME}/hybrid-ai-repos`). That tree holds one
+read-only clone of every non-fork repository you own, each on its own default branch, and is
+built by `scripts/sync-agent-repos.sh`. It is separate from this working clone so Hermes can
+read all your code — including agent-context markdown files once they exist — regardless of
+which `ai/*` branch OpenHands last left checked out here. See
+[`../hermes/README.md`](../hermes/README.md#the-read-only-agent-repo-reference-tree-agent-repos).
+
 OpenHands and Hermes share one dedicated Docker network, `coder-net`, defined in
 `docker-compose.yml` with `internal: true`. It has exactly two members — `openhands` and
 `hermes` — and no route off the host: no LAN, no internet, no published ports. Hermes uses it
@@ -167,7 +175,7 @@ Verify redaction before exposing a bundle to any cloud-hosted model.
 | No credential access | Workspace is a clone; `.env` is not in it |
 | Not internet-reachable | Binds `127.0.0.1` (UI) and `172.17.0.1` (sandbox webhooks) only; no Caddy route |
 | Sandboxes can reach the API without a public port | `172.17.0.1:${OPENHANDS_PORT:-3001}` bind, reachable from the Docker bridge only, never the LAN |
-| Hermes reads the clone without being able to change it | `${OPENHANDS_WORKSPACE}:/agent-repo:ro` |
+| Hermes reads the clone without being able to change it | `${OPENHANDS_WORKSPACE}:/agent-repo:ro`, and the separate `${AGENT_REPOS_DIR}:/agent-repos:ro` tree |
 | Hermes-only API path, no host port | internal `coder-net`, members `openhands` and `hermes` |
 | No automatic merge | Agent stops after commit; branch protection on `main` |
 | Injection resistance | `AGENTS.md` classifies repo text and logs as untrusted data |

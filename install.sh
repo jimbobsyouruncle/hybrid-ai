@@ -23,6 +23,8 @@
 #   7. Creates the data folders if they do not exist (never overwrites them).
 #   8. Writes the .env file with locked-down permissions.
 #   9. Starts the core stack, OpenHands, Hermes Agent, and status reverse proxy.
+#      It also refreshes the read-only agent repo reference tree Hermes reads at
+#      /agent-repos (a warning, not a stop, if that refresh fails).
 #  10. Verifies local DNS resolution for your subdomains and gives exact Pi-hole rules.
 #
 # HOW TO RUN IT:
@@ -62,7 +64,7 @@ for arg in "$@"; do
     --no-start)         NO_START=1 ;;
     --wake-runpod)      WAKE_RUNPOD_FLAG=1 ;;
     -h|--help)
-      sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
@@ -139,7 +141,8 @@ ok "sqlite3 $(sqlite3 --version 2>/dev/null | awk '{print $1}')"
 ok "tailscale $(tailscale version 2>/dev/null | head -n1 || echo '?')"
 
 # --- Make our own helper scripts executable --------------------------------
-for _s in scripts/setup-agent-workspace.sh openhands/scripts/openhands-control.sh \
+for _s in scripts/setup-agent-workspace.sh scripts/sync-agent-repos.sh \
+          openhands/scripts/openhands-control.sh \
           doctor.sh collect-diagnostics.sh backup/backup.sh backup/restore.sh \
           runpod/start.sh; do
   _f="${SCRIPT_DIR}/${_s}"
@@ -459,6 +462,9 @@ fi
 
 # --- OpenHands: workspace path and browser-reachable sandbox host ----------
 OPENHANDS_WORKSPACE="${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}"
+# Read-only local copy of every non-fork repo you own, mounted into Hermes at
+# /agent-repos. Populated by scripts/sync-agent-repos.sh after step 9.
+AGENT_REPOS_DIR="${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}"
 if [[ -z "${OPENHANDS_SANDBOX_HOST:-}" ]]; then
   _default_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
   if (( NON_INTERACTIVE )); then
@@ -576,6 +582,9 @@ HERMES_CPUS=${HERMES_CPUS:-1.5}
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
 OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE}
+# Read-only local copy of every non-fork repo you own. Mounted into Hermes at
+# /agent-repos. Refreshed on every deploy by scripts/sync-agent-repos.sh.
+AGENT_REPOS_DIR=${AGENT_REPOS_DIR}
 OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR:-${HOME}/.openhands}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
@@ -608,6 +617,13 @@ else
   "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" \
     || warn "Agent workspace setup failed; OpenHands will not start until it exists."
 fi
+
+# Refresh the read-only reference tree Hermes sees at /agent-repos. A failure
+# here is a warning, not a stop: the stack still starts, Hermes just sees a
+# stale (or empty) tree until the next deploy or a manual re-run.
+log "Syncing the read-only agent repo reference tree..."
+"${SCRIPT_DIR}/scripts/sync-agent-repos.sh" \
+  || warn "Agent repo sync failed; Hermes sees a stale tree at ${AGENT_REPOS_DIR}. Re-run scripts/sync-agent-repos.sh by hand."
 
 prepare_openhands_workspace() {
   # -n: fail instead of prompting for a password, so CI never hangs.

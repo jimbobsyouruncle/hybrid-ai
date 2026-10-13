@@ -26,6 +26,7 @@ as an orphan and `--remove-orphans` deletes it. `install.sh`, `doctor.sh` and
 | `./hermes_data/workspace` | `/root/workspace` | read-write | Persistent WebUI workspace; the same host folder the container also sees at `/root/.hermes/workspace`. |
 | `${OPENHANDS_WORKSPACE}` | `/workspace` | **read-only** | The OpenHands clone. Read-only so Hermes can read code without editing it. |
 | `${OPENHANDS_WORKSPACE}` | `/agent-repo` | **read-only** | The same clone again, under a name that makes its purpose explicit: the read-only view of the OpenHands working clone. Writes here fail inside the container. |
+| `${AGENT_REPOS_DIR}` | `/agent-repos` | **read-only** | The agent repo reference tree: one read-only clone of every non-fork repo you own, each on its own default branch, built by `scripts/sync-agent-repos.sh`. Defaults to `${HOME}/hybrid-ai-repos` when unset. |
 
 `${OPENHANDS_WORKSPACE}` is required. If it is unset, compose fails loudly with:
 
@@ -39,6 +40,65 @@ the log files stay out of reach of the read-only mount.
 
 There is **no Docker socket** in this container. Hermes cannot start, stop, or inspect other
 containers.
+
+---
+
+## The read-only agent repo reference tree (`/agent-repos`)
+
+The OpenHands clone at `/workspace` and `/agent-repo` is a single repository, left on whatever
+`ai/*` branch OpenHands last used. Hermes often needs a stable view of **all** your
+repositories, each on its default branch, so a second, separate tree is mounted read-only at
+`/agent-repos`.
+
+`scripts/sync-agent-repos.sh` builds and maintains that tree under `AGENT_REPOS_DIR`
+(default `${HOME}/hybrid-ai-repos`):
+
+- It lists your repos through the public GitHub REST API
+  (`GET /users/<owner>/repos?type=owner&per_page=100`) and keeps only non-fork repos owned by
+  the account. **Forks are never copied.** No token is sent.
+- Private repos the unauthenticated API cannot see are named in an optional local manifest,
+  `agent-repos.local` (gitignored). Each line is `OWNER/NAME` to include, or `-OWNER/NAME` to
+  exclude; `#` comments and blank lines are ignored.
+- Missing repos are cloned on their default branch (`--single-branch`, no tags, no submodules,
+  git hooks disabled, LFS smudge skipped). Existing repos fast-forward only; a dirty tree is
+  skipped with a warning, never hard-reset.
+- It is idempotent, reads no credentials, and writes only under `AGENT_REPOS_DIR`.
+- It **refuses** a target that is, is inside, or contains the deployment directory or
+  `OPENHANDS_WORKSPACE`, so mounting it read-only cannot expose `.env` or the logs.
+
+`install.sh` runs it on every deploy, after the workspace setup, and its failure is a warning
+(not a stop). To refresh on a schedule, install a timer **by hand**. A daily systemd timer:
+
+```ini
+# ~/.config/systemd/user/sync-agent-repos.service
+[Unit]
+Description=Sync the Hermes agent repo reference tree
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/hybrid-ai
+ExecStart=%h/hybrid-ai/scripts/sync-agent-repos.sh
+```
+
+```ini
+# ~/.config/systemd/user/sync-agent-repos.timer
+[Unit]
+Description=Daily sync of the Hermes agent repo reference tree
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl --user enable --now sync-agent-repos.timer` and, to run it with the
+user logged out, `sudo loginctl enable-linger "$USER"`. Or a crontab line:
+
+```cron
+17 4 * * * cd "$HOME/hybrid-ai" && ./scripts/sync-agent-repos.sh >> install.log 2>&1
+```
 
 ---
 
@@ -110,6 +170,9 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | Name | Read by | Purpose |
 |---|---|---|
 | `OPENHANDS_WORKSPACE` | `docker-compose.hermes.yml` | Host path mounted at `/workspace` and `/agent-repo`. Required. |
+| `AGENT_REPOS_DIR` | `docker-compose.hermes.yml`, `scripts/sync-agent-repos.sh` | Host path of the agent repo reference tree, mounted at `/agent-repos` read-only. Defaults to `${HOME}/hybrid-ai-repos` when unset. |
+| `AGENT_REPOS_OWNER` | `scripts/sync-agent-repos.sh` | Account whose owned, non-fork repos are inventoried. Blank means: derive it from the owner in this clone's git origin URL. |
+| `AGENT_REPOS_MANIFEST` | `scripts/sync-agent-repos.sh` | Optional local manifest of private repos. Blank means `./agent-repos.local`. |
 | `HERMES_PORT` | `docker-compose.hermes.yml` | Host port for the WebUI. |
 | `HERMES_API_PORT` | `docker-compose.hermes.yml` | Host port for the API. |
 | `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |

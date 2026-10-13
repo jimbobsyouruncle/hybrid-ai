@@ -90,3 +90,7 @@ docker-compose.override.yml
 
 # Hermes runtime and persistent data
 hermes_data/
+
+# Local manifest for scripts/sync-agent-repos.sh. Machine-specific: names your
+# private repos (and excludes), so it has no business in a public repository.
+agent-repos.local
