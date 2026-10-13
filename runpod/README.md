@@ -184,6 +184,20 @@ In the pod template's **Environment Variables** section:
 
 ---
 
+## What starts the pod
+
+| Action | Starts the pod? |
+|---|---|
+| Picking the cloud model in Open WebUI (`runpod_pipe.py`) | Yes, on demand |
+| `./install.sh` (default, `RUNPOD_AUTO_WAKE=0`) | No. It only reads `tailscale status` to find the peer's IP |
+| CI deploy (`./install.sh --non-interactive` on every push to `main`) | No, unless `.env` on the Pi sets `RUNPOD_AUTO_WAKE=1` |
+| `./install.sh --wake-runpod` | Yes, for that run only, if the peer is offline |
+| `RUNPOD_AUTO_WAKE=1` (or `true`) in `.env` | Yes, on every install run where the peer is offline |
+
+Only the exact values `1` and `true` enable auto-wake; any other value means off. When the installer does wake the pod, it needs `RUNPOD_API_KEY` and `RUNPOD_POD_ID` in `.env`, sends a resume request, and waits up to three minutes for the peer to join the tailnet. With auto-wake off, `install.sh` uses the peer IP it discovers, else the cached `TAILSCALE_IP` from `.env`.
+
+---
+
 ## First boot and verification
 
 Start the pod once manually. Watch the logs — you are looking for:

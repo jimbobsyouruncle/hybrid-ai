@@ -17,7 +17,9 @@
 #   3. Reads your Pi's RAM and works out a safe memory budget for Ollama.
 #   4. Generates a login-session encryption key, but only the first time.
 #   5. Prompts you for your local domain, OpenRouter key, and RunPod credentials.
-#   6. Asks Tailscale for the network address of your cloud GPU pod.
+#   6. Asks Tailscale for the network address of your cloud GPU pod (read-only).
+#      It does NOT start the pod unless you opt in: set RUNPOD_AUTO_WAKE=1 (or
+#      true) in .env, or pass --wake-runpod for a single run. Off by default.
 #   7. Creates the data folders if they do not exist (never overwrites them).
 #   8. Writes the .env file with locked-down permissions.
 #   9. Starts the core stack, OpenHands, Hermes Agent, and status reverse proxy.
@@ -27,6 +29,9 @@
 #   ./install.sh                   normal, interactive -- asks for anything missing
 #   ./install.sh --non-interactive  never prompts; fails instead. Used by CI.
 #   ./install.sh --no-start          write .env but do not touch Docker
+#   ./install.sh --wake-runpod       start the RunPod GPU pod this run if it is
+#                                    offline, even if RUNPOD_AUTO_WAKE=0
+#                                    (RUNPOD_AUTO_WAKE=1 in .env does it every run)
 #   ./install.sh --help              show this usage summary
 # ---------------------------------------------------------------------------
 
@@ -49,13 +54,15 @@ PEER_HOSTNAMES="${PEER_HOSTNAMES:-runpod-worker runpod-vllm}"
 PEER_HOSTNAME="${PEER_HOSTNAME:-${PEER_HOSTNAMES%% *}}"
 NON_INTERACTIVE=0
 NO_START=0
+WAKE_RUNPOD_FLAG=0
 
 for arg in "$@"; do
   case "$arg" in
     --non-interactive) NON_INTERACTIVE=1 ;;
     --no-start)         NO_START=1 ;;
+    --wake-runpod)      WAKE_RUNPOD_FLAG=1 ;;
     -h|--help)
-      sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
@@ -375,7 +382,20 @@ query_tailnet() {
 
 query_tailnet
 
-if [[ "$PEER_ONLINE" != "true" ]]; then
+# RunPod auto-wake is opt-in: only the exact values "1" or "true" in
+# RUNPOD_AUTO_WAKE, or the --wake-runpod flag (this run only), enable it.
+# The setting itself is written back to .env unchanged by the Step 8 rewrite.
+RUNPOD_AUTO_WAKE="${RUNPOD_AUTO_WAKE:-0}"
+WAKE_ENABLED=0
+if (( WAKE_RUNPOD_FLAG )) || [[ "$RUNPOD_AUTO_WAKE" == "1" || "$RUNPOD_AUTO_WAKE" == "true" ]]; then
+    WAKE_ENABLED=1
+fi
+
+if [[ "$PEER_ONLINE" != "true" && "$WAKE_ENABLED" != "1" ]]; then
+    log "RunPod auto-wake disabled (RUNPOD_AUTO_WAKE=${RUNPOD_AUTO_WAKE}); not starting the GPU pod."
+fi
+
+if [[ "$PEER_ONLINE" != "true" && "$WAKE_ENABLED" == "1" ]]; then
     if [[ -n "${RUNPOD_API_KEY:-}" && -n "${RUNPOD_POD_ID:-}" ]]; then
         warn "Peer '${PEER_HOSTNAME}' is offline or missing. Checking RunPod status..."
         
@@ -417,8 +437,10 @@ if [[ -n "${DISCOVERED_IP:-}" ]]; then
     TAILSCALE_IP="$DISCOVERED_IP"
     if [[ "$PEER_ONLINE" == "true" ]]; then
         ok "Peer '${MATCHED_PEER}' online at ${TAILSCALE_IP}"
-    else
+    elif [[ "$WAKE_ENABLED" == "1" ]]; then
         ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline — worker did not respond to wake)"
+    else
+        ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline — auto-wake disabled)"
     fi
 elif [[ -n "${TAILSCALE_IP:-}" ]]; then
     warn "No peer (${PEER_HOSTNAMES}) in tailnet right now; keeping cached ${TAILSCALE_IP}"
@@ -536,6 +558,7 @@ PEER_HOSTNAME=${PEER_HOSTNAME}
 PEER_HOSTNAMES=${PEER_HOSTNAMES}
 RUNPOD_API_KEY=${RUNPOD_API_KEY}
 RUNPOD_POD_ID=${RUNPOD_POD_ID}
+RUNPOD_AUTO_WAKE=${RUNPOD_AUTO_WAKE}
 VLLM_PORT=${VLLM_PORT:-8000}
 VLLM_MODEL_NAME=${VLLM_MODEL_NAME:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}
 POD_WARMUP_TIMEOUT=${POD_WARMUP_TIMEOUT:-600} 
