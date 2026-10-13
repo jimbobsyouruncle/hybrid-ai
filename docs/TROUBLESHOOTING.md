@@ -430,6 +430,56 @@ exceed the health-check window. Watch the pull, then re-check.
 
 ---
 
+## Agent clone embeds a credential in its git remote
+
+`./doctor.sh` prints a warning for every agent clone whose git config stores a
+credential inside a remote URL:
+
+```
+! Credential embedded in a git remote: <path>/.git/config: remote.origin.url
+```
+
+Only the file path and the config key are shown. The URL, the userinfo and the
+token are never printed — not on stdout, not on stderr. `scripts/check-git-remotes.sh`
+is the read-only check behind the warning; it scans the roots named by
+`OPENHANDS_WORKSPACE` (its root clone and `project/*/`) and `AGENT_REPOS_DIR`
+(`*/`), to a depth of four, and never follows a symlink.
+
+This is a warning, never a failure. A deploy stays green (exit `1`), because a
+single live clone trips the check today and turning it into a red deploy would
+block every deploy until the upstream fix lands.
+
+**What the warning means.** OpenHands' app-server clones with a URL of the form
+`https://<token>@github.com/<owner>/<repo>.git`. Git writes that URL verbatim
+into `project/<repo>/.git/config` as `remote.<name>.url` (and sometimes
+`pushurl`, or a `url.<base>.insteadOf` shim). The token is therefore sitting on
+disk in plain text. Anyone who can read that file can read the token.
+
+**Rotate the token in GitHub.** The credential is already on disk, so treat it
+as exposed. In GitHub, open **Settings → Developer settings → Personal access
+tokens** and revoke the OpenHands token, then create its replacement with the
+same read-only scope (see the OpenHands token column in
+[`SECURITY.md`](../SECURITY.md#github-credential-separation)). Put the new value
+in `OPENHANDS_GITHUB_TOKEN` (or wherever the deploy supplies it) and restart
+OpenHands. Because the token is read-only, the blast radius of the leak is
+read access to the repositories it can see, not write access.
+
+**Why hand-stripping does not hold.** Editing the URL out of `.git/config` by
+hand fixes the file that exists right now. The next time OpenHands clones or
+re-clones that project — which the agent-server does on demand — it writes the
+`https://<token>@...` URL straight back. The strip looks like a fix for a few
+minutes and then silently regresses. That is why detection, not removal, is the
+control until the upgrade.
+
+**The real fix: upgrade the agent-server.** An OpenHands agent-server at
+**`1.37.0` or newer** stops embedding credentials in the clone URL and uses a
+credential helper instead, so nothing sensitive lands in `.git/config`. That
+upgrade is tracked separately. Until it ships, expect the warning on every
+deploy and after every new clone, and re-check after rotating the token to
+confirm the old value is gone.
+
+---
+
 ## Kanban board not dispatching / gateway not running
 
 The Hermes WebUI and the Hermes gateway run in the same container. The WebUI is PID 1; the
