@@ -1,4 +1,4 @@
-# Security
+# Security summary
 
 This document records the threat model, the findings from a secure-code review against the OWASP Top 10 (2021) and OWASP ASVS, and the controls now enforced in the codebase.
 
