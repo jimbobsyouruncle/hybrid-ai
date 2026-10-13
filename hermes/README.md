@@ -23,6 +23,7 @@ as an orphan and `--remove-orphans` deletes it. `install.sh`, `doctor.sh` and
 | Host path | Container path | Mode | Notes |
 |---|---|---|---|
 | `./hermes_data` | `/root/.hermes` | read-write | Persistent memory, SQLite state, FTS5 indexes and acquired skills. This is a subdirectory of the **deployment directory** — see the gaps below. |
+| `./hermes_data/workspace` | `/root/workspace` | read-write | Persistent WebUI workspace; the same host folder the container also sees at `/root/.hermes/workspace`. |
 | `${OPENHANDS_WORKSPACE}` | `/workspace` | **read-only** | The OpenHands clone. Read-only so Hermes can read code without editing it. |
 | `${OPENHANDS_WORKSPACE}` | `/agent-repo` | **read-only** | The same clone again, under a name that makes its purpose explicit: the read-only view of the OpenHands working clone. Writes here fail inside the container. |
 

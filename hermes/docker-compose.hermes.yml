@@ -15,6 +15,10 @@ services:
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
       - ./hermes_data:/root/.hermes
+      # Persistent WebUI workspace: the same host folder the container already
+      # sees at /root/.hermes/workspace, mounted here at the WebUI Home path so
+      # it survives a container recreate. Read-write.
+      - ./hermes_data/workspace:/root/workspace
       # The agent clone, NOT the deployment directory. The deployment directory
       # holds .env (RunPod key, WebUI secret) and the logs. Read-only: Hermes
       # reads code here; changes go through OpenHands or you.
