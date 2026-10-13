@@ -122,6 +122,31 @@ Full detail in [`status/README.md`](../status/README.md). The status page is opt
 
 ---
 
+## A red deploy caused by doctor.sh
+
+The automated deploy runs `doctor.sh --no-cloud` on the Pi as its final gate. It reads the exit code instead of discarding it, so a broken host turns the deploy red. This is the difference that makes the gate useful:
+
+| `doctor.sh` exit code | Meaning | Deploy result |
+|---|---|---|
+| `0` | Everything healthy | Green, deploy continues |
+| `1` | Warnings only — working, but something needs attention | Green, prints `::warning::doctor.sh reported warnings` |
+| `2` | One or more failures — something is actually broken | Red, prints `::error::doctor.sh reported failures` |
+| any other | Unexpected | Red, treated the same as `2` |
+
+How to read it from the Actions page:
+
+1. Open the failed **deploy** job and scroll to the `Health report` section.
+2. The `::error::doctor.sh reported failures` line is printed last, after the health report, the persistent-data `du`, and the backup-timer line. Those informational lines still print on a failed deploy.
+3. Above that line, find the `FAIL` rows in the report. Each one names the check and the command to fix it.
+4. SSH in and re-run `./doctor.sh` by hand to reproduce and iterate — it is read-only, so it is safe to run repeatedly.
+5. Fix the failure, then re-run the deploy.
+
+A missing or non-executable `doctor.sh` is also an error, not a skip. The old inline script ran it only if executable and ignored its exit code; that skip is gone, because a health gate that quietly does not run is worse than no gate. If the deploy reports `doctor.sh is missing or not executable`, the file was removed from the checkout — restore it from the repository.
+
+Warnings (`exit 1`) never fail the deploy. If you want to silence one, fix the underlying warning rather than masking the exit code.
+
+---
+
 ## Manual triage
 
 If you prefer to check by hand, or `doctor.sh` itself will not run, these five commands isolate the failing layer. The first one that fails tells you which section to read.

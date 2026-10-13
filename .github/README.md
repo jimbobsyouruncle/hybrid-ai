@@ -43,9 +43,20 @@ Only runs if `validate` passed.
 
 1. Joins the tailnet as an ephemeral node tagged `tag:ci`
 2. Confirms the Pi is reachable, retrying for ~50 seconds while mesh routes establish
-3. SSHes in, runs `git reset --hard origin/main`, then `./install.sh --non-interactive`
-4. Polls the health endpoint for up to two minutes
-5. On failure, dumps the last 50 log lines into the workflow output so you can diagnose it without SSHing in yourself
+3. SSHes in and resets the Pi to the exact `github.sha` CI validated (not `origin/main`), after refusing any revision that is not an ancestor of `origin/main`
+4. Execs `./scripts/deploy-remote.sh <sha>`, which first re-asserts `HEAD` equals `<sha>` and then runs `./install.sh --non-interactive` itself
+5. Polls the health endpoint for up to two minutes
+6. Runs `./doctor.sh --no-cloud` as a gate: warnings stay green, failures turn the deploy red
+7. On failure, dumps the last 50 log lines into the workflow output so you can diagnose it without SSHing in yourself
+
+**Why the revision is pinned, not `origin/main`.** `validate` tests the commit that
+triggered the run (`GITHUB_SHA`). If the deploy reset to `origin/main`, and `main`
+moved after validation, the Pi would run an unvalidated revision. A manual
+**Run workflow** from a non-main branch would make the validated and deployed
+trees differ outright. Resetting to the exact SHA, and asserting `HEAD` matches
+it twice on the Pi — once in the workflow's remote script right after the reset,
+and once as `scripts/deploy-remote.sh`'s first action — closes that gap. The
+ancestor check keeps the target on the deployed line of history.
 
 ---
 
@@ -60,7 +71,8 @@ Only runs if `validate` passed.
 | `.env` survives | Also gitignored. `install.sh` reads existing values and preserves them |
 | Login sessions survive | `WEBUI_SECRET_KEY` is reused, not regenerated, so cookies stay valid |
 | Containers are never destroyed with volumes | The workflow runs `up -d`, never `down -v` |
-| Failure is visible | Health check failure fails the build with logs attached |
+| Failure is visible | A health-check failure fails the build with logs attached, and a `doctor.sh` exit 2 fails the build after the health report prints |
+| Validated revision is what runs | The deploy resets to the exact `github.sha` CI validated, and both the workflow and `scripts/deploy-remote.sh` assert `HEAD` equals it |
 
 The workflow also prints disk usage of both data folders before and after, so every run leaves an audit trail showing nothing shrank.
 
