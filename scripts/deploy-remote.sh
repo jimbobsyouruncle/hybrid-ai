@@ -58,6 +58,9 @@ chmod +x install.sh
 echo "==> Reprovisioning (non-interactive; existing .env preserved)"
 ./install.sh --non-interactive
 
+# Give the containers a grace period to settle before the health poll starts.
+sleep 20
+
 echo "==> Post-deploy verification"
 docker compose --env-file .env ps
 

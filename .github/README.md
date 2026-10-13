@@ -44,7 +44,7 @@ Only runs if `validate` passed.
 1. Joins the tailnet as an ephemeral node tagged `tag:ci`
 2. Confirms the Pi is reachable, retrying for ~50 seconds while mesh routes establish
 3. SSHes in and resets the Pi to the exact `github.sha` CI validated (not `origin/main`), after refusing any revision that is not an ancestor of `origin/main`
-4. Runs `./install.sh --non-interactive`, then `./scripts/deploy-remote.sh <sha>` (which re-asserts the revision before doing anything)
+4. Execs `./scripts/deploy-remote.sh <sha>`, which first re-asserts `HEAD` equals `<sha>` and then runs `./install.sh --non-interactive` itself
 5. Polls the health endpoint for up to two minutes
 6. Runs `./doctor.sh --no-cloud` as a gate: warnings stay green, failures turn the deploy red
 7. On failure, dumps the last 50 log lines into the workflow output so you can diagnose it without SSHing in yourself
@@ -54,8 +54,9 @@ triggered the run (`GITHUB_SHA`). If the deploy reset to `origin/main`, and `mai
 moved after validation, the Pi would run an unvalidated revision. A manual
 **Run workflow** from a non-main branch would make the validated and deployed
 trees differ outright. Resetting to the exact SHA, and asserting `HEAD` matches
-it on both ends of the SSH connection, closes that gap. The ancestor check keeps
-the target on the deployed line of history.
+it twice on the Pi — once in the workflow's remote script right after the reset,
+and once as `scripts/deploy-remote.sh`'s first action — closes that gap. The
+ancestor check keeps the target on the deployed line of history.
 
 ---
 
