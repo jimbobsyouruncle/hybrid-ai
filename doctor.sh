@@ -801,6 +801,55 @@ if (( OH_RUNNING )); then
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. Agent clone credentials
+#
+# OpenHands' app-server clones with `https://<token>@github.com/...`, and git
+# stores that URL verbatim in project/<repo>/.git/config. The token is then on
+# disk in plain text. Hand-stripping the URL does not hold: the next clone
+# rewrites it. Until the agent-server upgrade (>= 1.37.0, tracked separately)
+# stops doing this, detecting it is the only control. This is a WARNING, never
+# a failure -- one live clone trips it today, and a red deploy must not be the
+# result.
+# ---------------------------------------------------------------------------
+section "Agent clones"
+
+CRED_CHECK="${SCRIPT_DIR}/scripts/check-git-remotes.sh"
+CRED_ROOTS=()
+# Each root is used only when it is set AND exists; either one may be absent.
+OH_WS_CRED="${OPENHANDS_WORKSPACE:-$(env_get OPENHANDS_WORKSPACE)}"
+if [[ -n "$OH_WS_CRED" && -d "$OH_WS_CRED" ]]; then
+  CRED_ROOTS+=("$OH_WS_CRED")
+fi
+AR_DIR="${AGENT_REPOS_DIR:-$(env_get AGENT_REPOS_DIR)}"
+if [[ -n "$AR_DIR" && -d "$AR_DIR" ]]; then
+  CRED_ROOTS+=("$AR_DIR")
+fi
+
+if (( ${#CRED_ROOTS[@]} == 0 )); then
+  pass "No agent clone directories found to scan"
+elif [[ ! -x "$CRED_CHECK" ]]; then
+  warn "Agent clone credential check is missing or not executable" \
+       "Restore scripts/check-git-remotes.sh from the repository."
+else
+  # The check prints only `<path>: <key>` lines -- never a URL or a token --
+  # so it is safe to relay them. Exit 0 clean, 1 findings, 2 unreadable.
+  CRED_RC=0
+  CRED_OUT="$("$CRED_CHECK" "${CRED_ROOTS[@]}" 2>/dev/null)" || CRED_RC=$?
+  if (( CRED_RC == 0 )); then
+    pass "No agent clone embeds a credential in a git remote"
+  elif [[ -n "$CRED_OUT" ]]; then
+    while IFS= read -r cline; do
+      [[ -n "$cline" ]] || continue
+      warn "Credential embedded in a git remote: ${cline}" \
+           "Rotate that token in GitHub, then re-run ./doctor.sh. Do not hand-strip the URL: the next clone rewrites it. See docs/TROUBLESHOOTING.md for why, and for the agent-server upgrade that fixes it."
+    done <<<"$CRED_OUT"
+  else
+    warn "An agent clone git config could not be read" \
+         "Check the file permissions under: ${CRED_ROOTS[*]}. See docs/TROUBLESHOOTING.md."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 6. Network
 # ---------------------------------------------------------------------------
 section "Tailscale"

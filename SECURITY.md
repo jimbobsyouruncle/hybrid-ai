@@ -266,6 +266,8 @@ and Workflows is still none.
 - Review the repository list of each token whenever repositories are added to or removed from the account. A token should see only the repositories listed here.
 - Never place token values in docs, examples, logs, or diagnostic bundles.
 
+**Applied:** `./doctor.sh` runs `scripts/check-git-remotes.sh` on every deploy. It reports any agent clone whose `.git/config` embeds a credential in a `remote.*.url`, `remote.*.pushurl`, `url.<base>.insteadOf` or `url.<base>.pushInsteadOf`, naming only the repo path and the config key — never the URL or the token. It is read-only and a warning, never a failure. See [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md#agent-clone-embeds-a-credential-in-its-git-remote).
+
 ---
 
 ## Backup subsystem security
