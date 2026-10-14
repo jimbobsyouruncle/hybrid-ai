@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317  # helpers and the EXIT trap are called indirectly
+# shellcheck disable=SC2317,SC2329  # helpers and the EXIT trap are called indirectly
 # ---------------------------------------------------------------------------
 # FILE: scripts/test-backup.sh
 # Fixture test for backup/backup.sh.
