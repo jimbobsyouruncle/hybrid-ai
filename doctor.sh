@@ -430,6 +430,34 @@ if docker info >/dev/null 2>&1; then
       warn "Hermes gateway process NOT running inside hermes-agent" \
            "The kanban dispatcher will not run. Fix: ${COMPOSE_CMD} up -d --force-recreate hermes"
     fi
+
+    # --- Hermes effective uid ---------------------------------------------
+    # WARN (never fail) while Hermes runs as uid 0: that is the legacy default
+    # on every existing host, and the account migration sets HYBRID_AI_UID to
+    # move it to a dedicated non-root service uid.
+    HERMES_RUN_UID="$(docker inspect -f '{{.Config.User}}' hermes-agent 2>/dev/null)"
+    case "$HERMES_RUN_UID" in
+      ""|"0"|"0:0"|"root"|"root:root")
+        warn "Hermes runs as root (uid 0)" \
+             "Legacy default. Set HYBRID_AI_UID/HYBRID_AI_GID in .env to the dedicated non-root service uid, then: ${COMPOSE_CMD} up -d --build hermes"
+        ;;
+      *)
+        pass "Hermes runs as a non-root uid (${HERMES_RUN_UID})"
+        ;;
+    esac
+
+    # hermes_data should be owned by the configured non-root uid. Count only,
+    # never names: the report must not leak directory contents.
+    CFG_UID="$(env_get HYBRID_AI_UID)"
+    if [[ -n "$CFG_UID" && "$CFG_UID" != "0" && "$CFG_UID" =~ ^[0-9]+$ && -d "$HERMES_DATA_DIR" ]]; then
+      FOREIGN="$(find "$HERMES_DATA_DIR" ! -uid "$CFG_UID" 2>/dev/null | wc -l | tr -d ' ')"
+      if [[ "${FOREIGN:-0}" -gt 0 ]]; then
+        warn "hermes_data has ${FOREIGN} entr(ies) not owned by HYBRID_AI_UID=${CFG_UID}" \
+             "Fix ownership before Hermes starts as that uid, e.g.: sudo chown -R ${CFG_UID}:${CFG_UID} ${HERMES_DATA_DIR}"
+      else
+        pass "hermes_data is owned by HYBRID_AI_UID=${CFG_UID}"
+      fi
+    fi
   else
     warn "hermes-agent container not found" "Cannot verify the /agent-repo mount. Run ./install.sh."
   fi

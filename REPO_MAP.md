@@ -46,7 +46,7 @@
 
 - hermes/Dockerfile
 - hermes/README.md - hermes/ — Hermes Agent system orchestrator
-- hermes/docker-compose.hermes.yml - -p default is load-bearing: a sticky named active profile (e.g. ciso)
+- hermes/docker-compose.hermes.yml - Passed through from the env file so the image's hermes uid/gid match
 ## openhands
 
 - openhands/AGENTS.md - OpenHands Maintenance Agent Instructions
@@ -75,6 +75,7 @@
 
 - scripts/check-agent-context.sh - Check that the checked-in agent context maps are fresh.
 - scripts/check-git-remotes.sh - FILE: scripts/check-git-remotes.sh
+- scripts/check-hermes-nonroot.sh - FILE: scripts/check-hermes-nonroot.sh
 - scripts/deploy-remote.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
@@ -82,6 +83,7 @@
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
 - scripts/test-deploy-remote.sh
+- scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 ## status
 

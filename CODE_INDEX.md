@@ -22,6 +22,7 @@
 - semgrep
 - validate
 - codeql
+- hermes-nonroot-smoke
 - gate
 
 ## .github/workflows/validate.yml
@@ -206,6 +207,9 @@
 - note_unreadable()
 - scan_config()
 
+## scripts/check-hermes-nonroot.sh
+- err()
+
 ## scripts/deploy-remote.sh
 - (no symbols)
 
@@ -276,6 +280,11 @@
 - line_number()
 - repo_sha()
 - run_deploy()
+
+## scripts/test-hermes-nonroot-preflight.sh
+- run_check()
+- pass()
+- fail()
 
 ## scripts/test-sync-agent-repos.sh
 - pass()

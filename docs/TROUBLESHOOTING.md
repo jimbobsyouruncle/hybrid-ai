@@ -237,6 +237,27 @@ docker compose --env-file .env down      # NEVER add -v
 ./install.sh
 ```
 
+**Permission errors after switching Hermes to a non-root uid**
+
+The Hermes image now runs as a dedicated non-root uid when `HYBRID_AI_UID` is
+set in `.env`. If the files under `hermes_data` were still created by root, the
+non-root process cannot read or write them. You see this as `permission denied`
+in the Hermes logs, or as a failed start.
+
+`install.sh` refuses to start in this state and reports a count of files, not
+their names. `./doctor.sh` warns about it too. The fix is to give the uid
+ownership of the data directory:
+
+```bash
+# Set to the same value as HYBRID_AI_UID in .env.
+sudo chown -R 10001:10001 hermes_data
+./install.sh
+```
+
+To undo the switch, comment out `HYBRID_AI_UID` and `HYBRID_AI_GID` in `.env`
+(leave them unset). Hermes then runs as uid 0 again, exactly as before the
+migration.
+
 ---
 
 ## Open WebUI

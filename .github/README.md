@@ -5,7 +5,7 @@
 | `workflows/deploy.yml` | On a push to `main`, reuses `validate.yml` and then updates the Pi over the Tailscale network. |
 | `workflows/validate.yml` | Reusable source validation (`workflow_call` only). Called by `sast-checks.yml` on every pull request and by `deploy.yml` on every push to `main`. Holds no secrets. |
 | `workflows/agent-context.yml` | Checks the checked-in `REPO_MAP.md` and `CODE_INDEX.md` are fresh on every pull request. Read-only; never commits. |
-| `workflows/sast-checks.yml` | The single pull-request gate: ShellCheck, Semgrep, source validation and CodeQL, ending in the `Security & SAST gate`. |
+| `workflows/sast-checks.yml` | The single pull-request gate: ShellCheck, Semgrep, source validation, CodeQL and the Hermes non-root smoke test, ending in the `Security & SAST gate`. |
 | `dependabot.yml` | Grouped pull request that opens weekly on Sunday at 22:00 America/New_York to bump the SHA-pinned GitHub Actions. GitHub Actions only. |
 
 ---
@@ -80,11 +80,12 @@ ancestor check keeps the target on the deployed line of history.
 | `semgrep` | Semgrep (`--config auto --error`) | SAST findings from the community rulesets. Blocking. |
 | `validate` | `Validate sources` | Calls the same reusable `validate.yml` the deploy uses (see Job 1 above). |
 | `codeql` | `Analyze (python)` and `Analyze (actions)` | CodeQL advanced setup for Python and GitHub Actions. |
+| `hermes-nonroot-smoke` | Hermes non-root smoke | Builds the Hermes image as uid/gid `10001` and runs it as `10001` with `--cap-drop ALL --security-opt no-new-privileges`, an empty `10001`-owned `/root/.hermes`, and no secrets. Checks `id -u`, HTTP 200 on 8501 within 180 s, and liveness at +60 s. Prints `docker diff` (paths only). |
 | `gate` | **`Security & SAST gate`** | The single required check. Always runs; fails unless every job above succeeded. |
 
 **CodeQL advanced setup.** CodeQL previously ran as GitHub "default setup", a dynamic workflow GitHub created and ran on each pull request and each push to `main`. This workflow replaces it with advanced setup: a checked-in `codeql` job, pinned to `github/codeql-action` `24c54180a607b1449ed407dd24f251e4e9147c8d` (`v4.38.3`), analysing `python` and `actions` with `build-mode: none`, publishing under the category `/language:<lang>`. Results also appear on the weekly schedule run under **Security → Code scanning**. The `codeql` job is the only job that widens permissions, adding `security-events: write` and `actions: read`; the workflow default is `contents: read`.
 
-**One gate.** Branch protection needs one check, not five. `gate` depends on all four jobs with `if: always()`, so it runs even when an earlier job fails or is cancelled. It prints each result and exits non-zero unless every result is `success` — a failure, a cancellation and a skip all fail.
+**One gate.** Branch protection needs one check, not several. `gate` depends on all five jobs with `if: always()`, so it runs even when an earlier job fails or is cancelled. It prints each result and exits non-zero unless every result is `success` — a failure, a cancellation and a skip all fail.
 
 ### Owner steps before and after merge
 

@@ -91,12 +91,87 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
 
+  # Proves the Hermes image runs as a dedicated non-root uid. It builds the
+  # image with HYBRID_AI_UID=10001, runs it as 10001 with an empty data dir,
+  # no capabilities and no secrets, and checks the WebUI and liveness. The
+  # runner is arm64 (ubuntu-24.04-arm) because the supported target is a
+  # Raspberry Pi (aarch64).
+  hermes-nonroot-smoke:
+    name: Hermes non-root smoke
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the Hermes image as uid 10001
+        run: |
+          docker build \
+            --build-arg HYBRID_AI_UID=10001 \
+            --build-arg HYBRID_AI_GID=10001 \
+            -t hermes-nonroot-smoke hermes
+
+      - name: Run as 10001 and check uid, WebUI and liveness
+        run: |
+          set -euo pipefail
+          DATA="$(mktemp -d)"
+          sudo chown 10001:10001 "$DATA"
+          sudo chmod 0755 "$DATA"
+
+          docker run -d --name hermes-nonroot-smoke \
+            --user 10001:10001 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v "$DATA:/root/.hermes" \
+            -p 8501:8501 \
+            hermes-nonroot-smoke
+
+          # 1. The process identity is the dedicated uid.
+          RUN_UID="$(docker exec hermes-nonroot-smoke id -u)"
+          echo "container id -u = ${RUN_UID}"
+          [ "$RUN_UID" = "10001" ] || { echo "::error::container uid is ${RUN_UID}, expected 10001"; exit 1; }
+
+          # 2. The WebUI answers HTTP 200 on 8501 within 180 s. A dead
+          #    container ends the wait early.
+          CODE=""
+          for _ in $(seq 1 36); do
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8501/ || true)"
+            [ "$CODE" = "200" ] && break
+            if [ "$(docker inspect -f '{{.State.Running}}' hermes-nonroot-smoke)" != "true" ]; then
+              echo "::error::container exited before the WebUI answered"
+              docker logs --tail 60 hermes-nonroot-smoke || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "WebUI HTTP status = ${CODE}"
+          [ "$CODE" = "200" ] || { echo "::error::WebUI did not answer 200 within 180 s"; exit 1; }
+
+          # 3. Still running at +60 s.
+          sleep 60
+          RUNNING="$(docker inspect -f '{{.State.Running}}' hermes-nonroot-smoke)"
+          echo "running at +60s = ${RUNNING}"
+          [ "$RUNNING" = "true" ] || { echo "::error::container is not running at +60 s"; exit 1; }
+
+      - name: Show what Hermes writes at first start (paths only)
+        # Always runs, so a pull request shows what Hermes writes and where
+        # tools install. `docker diff` output is a change type plus a path.
+        if: always()
+        run: docker diff hermes-nonroot-smoke || true
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f hermes-nonroot-smoke || true
+
   # The single required check. It always runs and fails closed: a failure,
   # a cancellation, or a skipped dependency all end non-zero.
   gate:
     name: Security & SAST gate
     if: always()
-    needs: [shellcheck, semgrep, validate, codeql]
+    needs: [shellcheck, semgrep, validate, codeql, hermes-nonroot-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -106,12 +181,14 @@ jobs:
           echo "Semgrep          : ${{ needs.semgrep.result }}"
           echo "Validate sources : ${{ needs.validate.result }}"
           echo "CodeQL           : ${{ needs.codeql.result }}"
+          echo "Hermes non-root  : ${{ needs.hermes-nonroot-smoke.result }}"
           failed=0
           for result in \
             "${{ needs.shellcheck.result }}" \
             "${{ needs.semgrep.result }}" \
             "${{ needs.validate.result }}" \
-            "${{ needs.codeql.result }}"; do
+            "${{ needs.codeql.result }}" \
+            "${{ needs.hermes-nonroot-smoke.result }}"; do
             if [ "$result" != "success" ]; then
               failed=1
             fi

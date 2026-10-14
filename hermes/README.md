@@ -211,6 +211,8 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | `AGENT_REPOS_MAX_AGE_HOURS` | `scripts/sync-agent-repos.sh` | Freshness window, in hours, for `--check` (default 48). Older than this reports the tree stale. |
 | `HERMES_PORT` | `docker-compose.hermes.yml` | Host port for the WebUI. |
 | `HERMES_API_PORT` | `docker-compose.hermes.yml` | Host port for the API. |
+| `HYBRID_AI_UID` | `docker-compose.hermes.yml`, `hermes/Dockerfile`, `install.sh`, `doctor.sh` | Dedicated non-root uid the Hermes image builds and runs as. Unset or `0` means the legacy uid 0. Set by the account migration. |
+| `HYBRID_AI_GID` | `docker-compose.hermes.yml`, `hermes/Dockerfile` | Group id matching `HYBRID_AI_UID`. Unset or `0` means the legacy gid 0. |
 | `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |
 | `LOCAL_DOMAIN` | container env | Used for local subdomain routing. |
 | `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory, but the overlay currently hardcodes `./hermes_data`. |
@@ -288,7 +290,7 @@ something this change introduced. They are addressed in a later phase.
 |---|---|---|
 | Hermes ports bind all interfaces | `8501` and `8642` are published on `0.0.0.0`, so anyone on the LAN or tailnet can reach them. | Narrowing the binds is out of scope; this change adds no binds and does not widen any. |
 | Hermes mounts the deployment directory read-write | `./hermes_data` is a subdirectory of the deployment directory, mounted read-write at `/root/.hermes`. | The memory store must be writable; relocating it is a later phase. |
-| Hermes runs as root | `hermes/Dockerfile` has no `USER` directive. This is a tracked `TODO(security)` in the Dockerfile and in `SECURITY.md`. | A non-root user is a separate change. |
+| Hermes runs as root | **Fixed in the image.** `hermes/Dockerfile` creates a dedicated `hermes` group/user and ends with `USER ${HYBRID_AI_UID}:${HYBRID_AI_GID}` (default `10001`); the compose overlay passes the ids through from `.env`, sets `user:`, and pins `no-new-privileges`. A host keeps the legacy uid 0 until the account migration sets `HYBRID_AI_UID`. | Merging needs no admin action: unset keeps uid 0. |
 | OpenHands sandbox ports publish on all interfaces | Sandboxes created by OpenHands publish their agent-server port on the host. Adjacent to this service, not part of it. | Later phase. |
 
 ---
