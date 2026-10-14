@@ -283,6 +283,36 @@ including Workflows: Read and write.
 
 ---
 
+## Continuous integration checks
+
+Every pull request to `main` runs one workflow, **Security & SAST Checks** (`.github/workflows/sast-checks.yml`). It ends in a single required check, the **Security & SAST gate**.
+
+| Job | Check | Purpose |
+|---|---|---|
+| `shellcheck` | ShellCheck (Bash) | Common shell scripting bugs. Blocking. |
+| `semgrep` | Semgrep SAST | Community rulesets. Runs `semgrep scan --config auto --error`. Blocking. |
+| `validate` | `Validate sources` | Reuses `.github/workflows/validate.yml`, the same validation the deploy runs. |
+| `codeql` | CodeQL (`python`, `actions`) | CodeQL advanced setup, `build-mode: none`. |
+| `gate` | **`Security & SAST gate`** | Always runs; fails unless every job above succeeded. |
+
+The gate is fail-closed. It depends on all four jobs with `if: always()`, prints each result, and exits non-zero unless every result is `success` — a failure, a cancellation and a skipped job all fail the gate. Because the `pull_request` trigger carries no `paths:` filter, a documentation-only pull request still produces the gate, so the required check is never left pending.
+
+**Reusable validation, no secrets.** `validate.yml` is a `workflow_call`-only workflow. It is called by `sast-checks.yml` (pull requests) and by `deploy.yml` (push to `main`, before the Pi is touched). It receives no secrets: the `validate` job in `deploy.yml` is `uses: ./.github/workflows/validate.yml` with nothing passed in. The shell-syntax, Python-syntax, generated-pipe, behavioural-test, compose-schema, Caddy-allowlist, Hermes-gateway-pin and tracked-secret assertions all live there. The old advisory ShellCheck step was removed — it ran with `continue-on-error` and blocked nothing; the blocking `shellcheck` job covers it.
+
+**Triggers.** `pull_request` to `main` with the default activity types (opened, synchronize, reopened; `ready_for_review` is deliberately absent, so marking a draft ready re-runs nothing). `workflow_dispatch` for manual runs. A weekly `schedule` (Mondays) for a CodeQL baseline and a Semgrep rule-drift check. There is no push-to-main trigger; a merge lands through its pull request, and the deploy workflow is the push path.
+
+**Least privilege.** The workflow default is `permissions: contents: read`. Only the `codeql` job widens it, adding `security-events: write` and `actions: read`. Every `actions/checkout` uses `persist-credentials: false`, so the job token is not left in the checkout. No workflow uses `pull_request_target`, `secrets: inherit`, or any `secrets.` reference in `sast-checks.yml` or `validate.yml`, and every `uses:` is pinned to a full commit SHA. Untrusted pull-request code therefore runs with read-only credentials and no access to any secret.
+
+**CodeQL advanced setup.** CodeQL ran previously as GitHub "default setup" — a dynamic workflow GitHub created and ran on each pull request and each push to `main`. This repository now uses advanced setup: a checked-in `codeql` job pinned to `github/codeql-action` `24c54180a607b1449ed407dd24f251e4e9147c8d` (`v4.38.3`), analysing `python` and `actions` with `build-mode: none` under the category `/language:<lang>`. While default setup remains enabled, GitHub rejects advanced-setup uploads and the `codeql` job fails, so the owner disables default setup by hand before merging. The weekly run appears under **Security → Code scanning**.
+
+**Semgrep gate.** The gate is `semgrep scan --config auto --error`, unchanged. It runs with no `--exclude`, no `--severity`, and no added `nosemgrep` suppressions. The container is pinned by digest to `semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b` (`latest` as of 2026-10-13), never a mutable tag. A finding the rule set reports stops the merge.
+
+**Dependabot.** `.github/dependabot.yml` keeps the SHA-pinned actions current with one grouped, weekly GitHub Actions pull request (commit prefix `ci`, at most 5 open). It covers GitHub Actions only. These pins are manual and are not kept current by Dependabot: the `semgrep/semgrep` digest above; the compose and Dockerfile image tags; the `httpx==0.28.1` pin in `validate.yml`; the `jimbobsyouruncle/shared-actions` `ref:` in `agent-context.yml`; and the Tailscale `version:` action input in `deploy.yml`. `.github/README.md` lists them together.
+
+**Owner steps.** Before merging, disable CodeQL default setup. After the first green run, add the required check `Security & SAST gate` to the `main-protection` ruleset. Both are performed by hand; this document does not claim they are configured already.
+
+---
+
 ## Backup subsystem security
 
 | Control | Mechanism |

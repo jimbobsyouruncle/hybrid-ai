@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# FILE: .github/dependabot.yml
+# PURPOSE (plain English):
+#   Keeps the SHA-pinned GitHub Actions in .github/workflows/ current. Once a
+#   week Dependabot proposes a single pull request that bumps the pins it
+#   finds, so the pins do not silently age into unpatched versions.
+#
+#   This covers GitHub Actions ONLY. It does not touch the container image
+#   digests (the semgrep container, the compose/Dockerfile image tags), the
+#   `httpx` pin, the shared-actions `ref:`, or the tailscale `version:`
+#   input. Those are updated by hand and called out in .github/README.md.
+# ---------------------------------------------------------------------------
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Wait a week after a version is published before proposing it, so a
+    # malicious or broken release has time to be yanked. Semgrep's
+    # dependabot-missing-cooldown rule requires this.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

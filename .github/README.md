@@ -2,9 +2,11 @@
 
 | File | Purpose |
 |---|---|
-| `workflows/deploy.yml` | Validates the code, then updates the Pi over the Tailscale network whenever you push to `main`. |
+| `workflows/deploy.yml` | On a push to `main`, reuses `validate.yml` and then updates the Pi over the Tailscale network. |
+| `workflows/validate.yml` | Reusable source validation (`workflow_call` only). Called by `sast-checks.yml` on every pull request and by `deploy.yml` on every push to `main`. Holds no secrets. |
 | `workflows/agent-context.yml` | Checks the checked-in `REPO_MAP.md` and `CODE_INDEX.md` are fresh on every pull request. Read-only; never commits. |
-| `workflows/sast-checks.yml` | ShellCheck and Semgrep SAST on pull requests. |
+| `workflows/sast-checks.yml` | The single pull-request gate: ShellCheck, Semgrep, source validation and CodeQL, ending in the `Security & SAST gate`. |
+| `dependabot.yml` | Weekly grouped pull request that bumps the SHA-pinned GitHub Actions. GitHub Actions only. |
 
 ---
 
@@ -20,16 +22,20 @@ This is strictly better than the conventional approach of exposing SSH to the in
 
 ---
 
-## The two jobs
+## The deploy jobs
+
+`deploy.yml` has two jobs. The first is now a thin caller of the reusable
+`validate.yml`, which the pull-request gate calls too.
 
 ### Job 1 — `validate`
 
-Runs on every push. Catches mistakes before they can reach the Pi.
+Runs on every pull request to `main` (through `sast-checks.yml`) and on every
+push to `main` (through `deploy.yml`). Catches mistakes before they can reach
+the Pi.
 
 | Check | What it catches |
 |---|---|
 | `bash -n` on every `*.sh` in the repo | Syntax errors, unbalanced quotes |
-| ShellCheck | Common shell bugs (advisory — reports but does not block) |
 | `py_compile` on every `*.py` in the repo | Python syntax errors, including `status/app.py`, which is bind-mounted with no build step |
 | `build_pipe.py --check` | A forgotten rebuild — the pasted pipe not matching its reviewed sources |
 | `pip install httpx==0.28.1` | Installs the pinned dependency the behavioural tests import (`runpod_core.py` imports `httpx`, which the job does not otherwise install) |
@@ -38,6 +44,8 @@ Runs on every push. Catches mistakes before they can reach the Pi.
 | **Secret assertion** | Fails the build if `.env` or a data folder was ever committed |
 
 That last check is the one worth understanding. If `.env` somehow got committed, this stops the deploy and tells you. Note that by then the credentials are already in git history and **must be rotated** — deleting the file in a later commit does not remove it from history, and anyone with a clone still has a copy.
+
+The old advisory ShellCheck step is gone from validation. It was `continue-on-error`, so it never blocked anything. The blocking ShellCheck job in `sast-checks.yml` covers the same ground and does fail the gate.
 
 ### Job 2 — `deploy`
 
@@ -59,6 +67,45 @@ trees differ outright. Resetting to the exact SHA, and asserting `HEAD` matches
 it twice on the Pi — once in the workflow's remote script right after the reset,
 and once as `scripts/deploy-remote.sh`'s first action — closes that gap. The
 ancestor check keeps the target on the deployed line of history.
+
+---
+
+## The pull-request gate
+
+`sast-checks.yml` is the one workflow that runs on every pull request to `main`. It has no `paths:` filter, so a docs-only pull request still produces the check the branch ruleset requires. It runs on `pull_request` (opened, synchronize, reopened — not `ready_for_review`, so marking a draft ready re-runs nothing), on manual `workflow_dispatch`, and on a weekly `schedule` (Mondays) for a CodeQL baseline and a Semgrep rule-drift check. There is no push-to-main trigger.
+
+| Job | Check | What it catches |
+|---|---|---|
+| `shellcheck` | ShellCheck (Bash) | Common shell scripting bugs. Blocking. |
+| `semgrep` | Semgrep (`--config auto --error`) | SAST findings from the community rulesets. Blocking. |
+| `validate` | `Validate sources` | Calls the same reusable `validate.yml` the deploy uses (see Job 1 above). |
+| `codeql` | `Analyze (python)` and `Analyze (actions)` | CodeQL advanced setup for Python and GitHub Actions. |
+| `gate` | **`Security & SAST gate`** | The single required check. Always runs; fails unless every job above succeeded. |
+
+**CodeQL advanced setup.** CodeQL previously ran as GitHub "default setup", a dynamic workflow GitHub created and ran on each pull request and each push to `main`. This workflow replaces it with advanced setup: a checked-in `codeql` job, pinned to `github/codeql-action` `24c54180a607b1449ed407dd24f251e4e9147c8d` (`v4.38.3`), analysing `python` and `actions` with `build-mode: none`, publishing under the category `/language:<lang>`. Results also appear on the weekly schedule run under **Security → Code scanning**. The `codeql` job is the only job that widens permissions, adding `security-events: write` and `actions: read`; the workflow default is `contents: read`.
+
+**One gate.** Branch protection needs one check, not five. `gate` depends on all four jobs with `if: always()`, so it runs even when an earlier job fails or is cancelled. It prints each result and exits non-zero unless every result is `success` — a failure, a cancellation and a skip all fail.
+
+### Owner steps before and after merge
+
+1. **Before merge:** **Settings → Code security → CodeQL analysis → disable default setup.** While it is on, GitHub rejects advanced-setup uploads and the `codeql` job fails.
+2. **After the first green run:** ruleset `main-protection` → add required check `Security & SAST gate`.
+
+---
+
+## Keeping the pins current (Dependabot)
+
+`dependabot.yml` keeps the SHA-pinned actions in the workflows current. Once a week it opens one grouped pull request (all actions in a single group, commit prefix `ci`, at most 5 open at a time) that bumps every pin it finds.
+
+Dependabot covers **GitHub Actions only**. These pins still move by hand and are easy to forget:
+
+| Pin | Where | Why Dependabot does not cover it |
+|---|---|---|
+| `semgrep/semgrep@sha256:93963d…` | `workflows/sast-checks.yml` | Container image digest, not an action |
+| Compose / Dockerfile image tags | `docker-compose.yml`, `hermes/Dockerfile` | Container images, not actions |
+| `httpx==0.28.1` | `workflows/validate.yml` | pip pin inside a workflow step |
+| shared-actions `ref:` | `workflows/agent-context.yml` | A non-action git ref outside Dependabot's scope |
+| Tailscale `version: '1.104.1'` | `workflows/deploy.yml` | An action input, not a versioned dependency |
 
 ---
 

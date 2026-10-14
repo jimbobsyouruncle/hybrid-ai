@@ -1,31 +1,123 @@
 name: Security & SAST Checks
 
+# ONE gate for every pull request to main. It is deliberately unfiltered:
+# a docs-only change still runs the job so the required checks are always
+# present. CodeQL advanced setup replaces the repository's dynamic
+# "default setup" (the owner disables that by hand before merging this).
+#
+# Triggers:
+#   pull_request -> opened, synchronize, reopened (the defaults). Note
+#     ready_for_review is NOT included, so marking a draft ready re-runs
+#     nothing.
+#   workflow_dispatch -> manual run.
+#   schedule -> a weekly main-branch baseline for CodeQL and a Semgrep
+#     rule-drift check. There is no push-to-main trigger: a merge lands
+#     through its pull request, and the deploy workflow is the push path.
 on:
   pull_request:
     branches: [ "main" ]
-    paths:
-      - '**/*.py'
-      - '**/*.sh'
-      - '**/*.yml'
-      - '**/*.yaml'
-      - '**/Dockerfile'
   workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays 06:17 UTC
+
+# Least privilege at the top level. Only the CodeQL job widens it below.
+permissions:
+  contents: read
+
+# One in-flight run per pull request (or ref). A new push to the same PR
+# cancels the older run instead of queueing behind it.
+concurrency:
+  group: sast-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+
   shellcheck:
     name: ShellCheck (Bash)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Run ShellCheck
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
 
   semgrep:
     name: Semgrep (SAST)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container:
-      image: semgrep/semgrep
+      image: semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b # latest as of 2026-10-13
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Run Semgrep Rules
         run: semgrep scan --config auto --error
+
+  # The same validation the deploy runs, exposed to pull requests so a
+  # mistake is caught before merge rather than on the Pi.
+  validate:
+    name: Validate sources
+    uses: ./.github/workflows/validate.yml
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only this job may write code-scanning results. Everything else stays
+    # read-only. `actions: read` lets CodeQL read local action metadata for
+    # the `actions` language.
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # The single required check. It always runs and fails closed: a failure,
+  # a cancellation, or a skipped dependency all end non-zero.
+  gate:
+    name: Security & SAST gate
+    if: always()
+    needs: [shellcheck, semgrep, validate, codeql]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to succeed
+        run: |
+          echo "ShellCheck       : ${{ needs.shellcheck.result }}"
+          echo "Semgrep          : ${{ needs.semgrep.result }}"
+          echo "Validate sources : ${{ needs.validate.result }}"
+          echo "CodeQL           : ${{ needs.codeql.result }}"
+          failed=0
+          for result in \
+            "${{ needs.shellcheck.result }}" \
+            "${{ needs.semgrep.result }}" \
+            "${{ needs.validate.result }}" \
+            "${{ needs.codeql.result }}"; do
+            if [ "$result" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more security checks did not succeed."
+            exit 1
+          fi
+          echo "All security checks succeeded."
