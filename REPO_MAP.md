@@ -47,6 +47,9 @@
 - hermes/Dockerfile
 - hermes/README.md - hermes/ — Hermes Agent system orchestrator
 - hermes/docker-compose.hermes.yml - Passed through from the env file so the image's hermes uid/gid match
+## hermes/patches
+
+- hermes/patches/0001-kanban-prompt-body-chars.patch
 ## openhands
 
 - openhands/AGENTS.md - OpenHands Maintenance Agent Instructions
