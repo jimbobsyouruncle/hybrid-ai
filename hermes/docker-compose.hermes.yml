@@ -18,11 +18,11 @@ services:
     # Hardening only: forbid setuid/setgid from gaining privileges.
     security_opt:
       - no-new-privileges:true
-    # `-p default` is load-bearing: a sticky named active profile (e.g. ciso)
-    # is refused a gateway ("Profile '<name>' does not get a gateway of its
-    # own"), because the single gateway per host is owned by the default
-    # profile.
-    command: ["bash", "-c", "hermes -p default gateway run --replace & exec python3 bootstrap.py --host 0.0.0.0 --foreground --no-browser 8501"]
+    # No `command:` here on purpose: the image CMD is the single start command.
+    # It starts the gateway as the default profile (`-p default` is
+    # load-bearing: a sticky named active profile would be refused a gateway)
+    # and then execs the WebUI. Keeping the start command in exactly one place
+    # is what validate.yml and the smoke job assert against hermes/Dockerfile.
     ports:
       - "${HERMES_PORT:-8501}:8501"
       - "${HERMES_API_PORT:-8642}:8642"

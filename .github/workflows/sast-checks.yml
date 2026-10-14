@@ -156,6 +156,40 @@ jobs:
           echo "running at +60s = ${RUNNING}"
           [ "$RUNNING" = "true" ] || { echo "::error::container is not running at +60 s"; exit 1; }
 
+          # 4. The Hermes gateway process is up at +60 s, using the same test
+          #    doctor.sh uses. The image CMD starts it; nothing else does.
+          if ! docker top hermes-nonroot-smoke \
+               | grep -Eq '(^|[[:space:]])(hermes[[:space:]]+)?gateway[[:space:]]+run([[:space:]]|$)'; then
+            echo "::error::Hermes gateway process is not running at +60 s"
+            docker top hermes-nonroot-smoke || true
+            docker logs --tail 60 hermes-nonroot-smoke || true
+            exit 1
+          fi
+          echo "Hermes gateway process is running at +60 s."
+
+          # 5. The local kanban patch is present in the pinned checkout. This
+          #    proves the build applied hermes/patches/0001-... to the code that
+          #    runs, not just that the file ships in the repository.
+          docker exec hermes-nonroot-smoke \
+            grep -q 'HERMES_KANBAN_PROMPT_BODY_CHARS' \
+            /opt/hermes-agent/hermes_cli/kanban_specify.py \
+            || { echo "::error::the local kanban patch is missing from the installed code"; exit 1; }
+          echo "Local kanban patch is present in /opt/hermes-agent."
+
+      - name: Assert Hermes wrote nothing under the immutable install dir
+        # `docker diff` is a change type plus a path. The code lives at
+        # /opt/hermes-agent, outside every mount and root-owned, so the runtime
+        # uid must not write there. Any A(dd), C(hange), or D(elete) under that
+        # path is a hard failure: the install is meant to be immutable.
+        run: |
+          DIFF="$(docker diff hermes-nonroot-smoke || true)"
+          if echo "${DIFF}" | grep -Eq '^[ACD] /opt/hermes-agent'; then
+            echo "::error::the runtime wrote under /opt/hermes-agent"
+            echo "${DIFF}" | grep -E '^[ACD] /opt/hermes-agent' | head -20
+            exit 1
+          fi
+          echo "No writes under /opt/hermes-agent."
+
       - name: Show what Hermes writes at first start (paths only)
         # Always runs, so a pull request shows what Hermes writes and where
         # tools install. `docker diff` output is a change type plus a path.
