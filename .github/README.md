@@ -6,7 +6,7 @@
 | `workflows/validate.yml` | Reusable source validation (`workflow_call` only). Called by `sast-checks.yml` on every pull request and by `deploy.yml` on every push to `main`. Holds no secrets. |
 | `workflows/agent-context.yml` | Checks the checked-in `REPO_MAP.md` and `CODE_INDEX.md` are fresh on every pull request. Read-only; never commits. |
 | `workflows/sast-checks.yml` | The single pull-request gate: ShellCheck, Semgrep, source validation and CodeQL, ending in the `Security & SAST gate`. |
-| `dependabot.yml` | Weekly grouped pull request that bumps the SHA-pinned GitHub Actions. GitHub Actions only. |
+| `dependabot.yml` | Grouped pull request that opens weekly on Sunday at 22:00 America/New_York to bump the SHA-pinned GitHub Actions. GitHub Actions only. |
 
 ---
 
@@ -95,7 +95,7 @@ ancestor check keeps the target on the deployed line of history.
 
 ## Keeping the pins current (Dependabot)
 
-`dependabot.yml` keeps the SHA-pinned actions in the workflows current. Once a week it opens one grouped pull request (all actions in a single group, commit prefix `ci`, at most 5 open at a time) that bumps every pin it finds.
+`dependabot.yml` keeps the SHA-pinned actions in the workflows current. It opens one grouped pull request weekly on Sunday at 22:00 America/New_York (all actions in a single group, commit prefix `ci`, at most 5 open at a time) that bumps every pin it finds.
 
 Dependabot covers **GitHub Actions only**. These pins still move by hand and are easy to forget:
 
