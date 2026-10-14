@@ -341,6 +341,7 @@ def probe_backups() -> Dict[str, Any]:
                 "hint": "Configure backups by re-running ./install.sh."}
     last: Optional[str] = None
     failures = 0
+    incomplete = 0
     try:
         with open(BACKUP_LOG, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -348,8 +349,15 @@ def probe_backups() -> Dict[str, Any]:
                     match = re.search(r"ts=(\S+)", line)
                     if match:
                         last = match.group(1)
+                    # A success resets the counters: report what has happened
+                    # since the last fully successful run, not a total that only
+                    # ever grows.
+                    failures = 0
+                    incomplete = 0
                 elif "event=backup_failed" in line:
                     failures += 1
+                elif "event=backup_incomplete" in line:
+                    incomplete += 1
     except OSError:
         pass
 
@@ -373,6 +381,8 @@ def probe_backups() -> Dict[str, Any]:
     detail = f"last success {hours}h ago"
     if failures:
         detail += f" · {failures} failure(s) logged"
+    if incomplete:
+        detail += f" · {incomplete} incomplete run(s) since the last success"
     return {"name": "Backups", "state": lvl, "detail": detail, "hint": hint}
 
 
@@ -404,6 +414,7 @@ def probe_data() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 _JOB_EVENTS: Dict[str, Tuple[str, str]] = {
     "backup_success":          ("Backup", "ok"),
+    "backup_incomplete":       ("Backup", "warn"),
     "backup_failed":           ("Backup", "fail"),
     "backup_run_complete":     ("Backup", "ok"),
     "check_success":           ("Integrity check", "ok"),

@@ -325,6 +325,10 @@ The gate is fail-closed. It depends on all four jobs with `if: always()`, prints
 | Safe config parsing | `r2.env` is parsed line by line, never `source`d, so a crafted value cannot execute |
 | Service hardening | systemd units run as your user (not root) with `ProtectSystem=strict`, `ProtectHome=read-only`, `NoNewPrivileges`, and an explicit `ReadWritePaths` allowlist |
 | Plaintext staging cleaned up | Consistent database snapshots are written to `.backup-staging/` (0700) and removed on exit, including on failure, via an EXIT trap |
+| Untrusted-path handling | File names under `hermes_data` come from the Hermes container and are treated as attacker-controlled. A discovered path must pass an allow-list (each component matches `[A-Za-z0-9._@+-]+`, is not `.` or `..`, does not start with `-`) before any copy or `sqlite3` call. Rejected names are counted only and never logged |
+| No SQL text from names | `VACUUM INTO` (which splices the destination into SQL text) is not used. Capture is a sidecar copy with a staged checkpoint, or SQLite's online `.backup` |
+| Capture is verified | A captured database must pass `PRAGMA quick_check` on the staged copy. Classification is by the 16-byte SQLite header, not the file extension |
+| Incomplete status | A run that missed durable state still uploads, but is tagged `complete:false`, logs `backup_incomplete`, and exits 3 so no retry loop hides it |
 | Working directories gitignored | `.backup-staging/`, `.restore-work/`, `.restore-test-*/`, `webui_data.pre-restore-*/`, `backup.log` |
 | Metadata-only logging | Backup events record sizes, counts, and durations — never document names or chat content |
 

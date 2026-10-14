@@ -32,6 +32,11 @@ ExecStart=__REPO_DIR__/backup/backup.sh
 Restart=on-failure
 RestartSec=15min
 
+# EXIT_INCOMPLETE (3): the run uploaded what it had but missed durable state.
+# Retrying in 15 minutes would not recover the missing data, so this exit is
+# deliberately NOT retried. backup_failed (1) still restarts.
+RestartPreventExitStatus=3
+
 # Give up rather than run forever. A hung upload holding the SQLite staging
 # directory open is worse than a missed night.
 TimeoutStartSec=4h
