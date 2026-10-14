@@ -237,6 +237,27 @@ docker compose --env-file .env down      # NEVER add -v
 ./install.sh
 ```
 
+**Permission errors after switching Hermes to a non-root uid**
+
+The Hermes image now runs as a dedicated non-root uid when `HYBRID_AI_UID` is
+set in `.env`. If the files under `hermes_data` were still created by root, the
+non-root process cannot read or write them. You see this as `permission denied`
+in the Hermes logs, or as a failed start.
+
+`install.sh` refuses to start in this state and reports a count of files, not
+their names. `./doctor.sh` warns about it too. The fix is to give the uid
+ownership of the data directory:
+
+```bash
+# Set to the same value as HYBRID_AI_UID in .env.
+sudo chown -R 10001:10001 hermes_data
+./install.sh
+```
+
+To undo the switch, comment out `HYBRID_AI_UID` and `HYBRID_AI_GID` in `.env`
+(leave them unset). Hermes then runs as uid 0 again, exactly as before the
+migration.
+
 ---
 
 ## Open WebUI
@@ -557,10 +578,10 @@ docker top hermes-agent
 A sticky named active profile (for example `ciso`) stored in the bind-mounted
 `hermes_data/active_profile` captures a bare `hermes gateway run` and is refused a
 gateway, because there is only one gateway per host and it is owned by the default
-profile. The fix is already pinned in the compose `command:`:
-`hermes -p default gateway run --replace`. Do not switch the active profile back to
-`default` by hand; the `-p default` pin makes the gateway start as the default profile
-after every container create/recreate regardless of the sticky active profile.
+profile. The fix is already pinned in the image `CMD` (the compose overlay sets no
+`command:`): `hermes -p default gateway run --replace`. Do not switch the active profile
+back to `default` by hand; the `-p default` pin makes the gateway start as the default
+profile after every container create/recreate regardless of the sticky active profile.
 
 **Fix: recreate the container.** Recreating restarts the gateway in the background and leaves the
 kanban data in `hermes_data/` untouched:
@@ -571,7 +592,24 @@ ${COMPOSE_CMD} up -d --force-recreate hermes
 
 `${COMPOSE_CMD}` is the full compose invocation `doctor.sh` uses (project `hybrid-ai`, all three
 compose files). Recreate rather than `docker exec` into the container: the background gateway is
-what the container `command:` starts, and an `exec`ed one is not tracked as that process.
+what the image `CMD` starts, and an `exec`ed one is not tracked as that process.
+
+---
+
+## The Hermes image at a pinned commit: smoke-job failure modes
+
+The `hermes-nonroot-smoke` CI job builds `hermes/Dockerfile` and runs the image on an empty
+data volume as uid `10001`. It fails closed on these modes. Each maps to one build or
+configuration change.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The build fails on `sha256sum -c -` for `/tmp/hermes-install.sh` | The installer at `HERMES_COMMIT` no longer matches `HERMES_INSTALL_SHA256`. Upstream rewrote `scripts/install.sh` at a tag, or the pin moved without the checksum. | Download `https://raw.githubusercontent.com/NousResearch/hermes-agent/<sha>/scripts/install.sh` and set `HERMES_INSTALL_SHA256` to its sha256. Never disable the check. |
+| `git apply` fails, or `rev-parse HEAD` is not `HERMES_COMMIT` | The local patch no longer applies at the pin, or the checkout is at a different commit. | Rebase `patches/0001-kanban-prompt-body-chars.patch` onto the pinned commit, or bump `HERMES_COMMIT` deliberately. |
+| `exec: /opt/hermes-agent/.hermes/bin/hermes: not found`, or the WebUI exits at once | The launcher is missing or not on `PATH`. The old failure was the launcher living under the `/root/.hermes` mount point, which the volume hid. | Confirm the build published `/opt/hermes-agent/.hermes/bin/hermes` and that `ENV PATH` names it. Never put the launcher under `/root` — that tree is `chown`ed to the runtime uid. |
+| The gateway-not-running step fails (`docker top` finds no `gateway run`) | The image `CMD` did not start the gateway, or the profile pin was dropped. | Keep `hermes -p default gateway run --replace` in `hermes/Dockerfile`'s `CMD`. `validate.yml` asserts the exact string and fails closed if it is gone. |
+| `bootstrap.py: error: unrecognized arguments: --port` | A `--port` flag was added. `bootstrap.py` takes the port **positionally**. | Use `... bootstrap.py --host 0.0.0.0 --foreground --no-browser 8501`. |
+| The `docker diff` step reports paths under `/opt/hermes-agent` | The runtime uid wrote under the install dir: a git checkout (the image ships none), or missing build-time bytecode. | Do not make the install writable. Confirm the build still byte-compiles with the pinned interpreter and removes `.git`. If Hermes needs to write there, stop and report rather than loosen the tree. |
 
 ---
 

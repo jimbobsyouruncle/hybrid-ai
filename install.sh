@@ -592,6 +592,10 @@ HERMES_PORT=${HERMES_PORT:-8501}
 HERMES_API_PORT=${HERMES_API_PORT:-8642}
 HERMES_MEM_LIMIT=${HERMES_MEM_LIMIT:-2048m}
 HERMES_CPUS=${HERMES_CPUS:-1.5}
+# Dedicated non-root uid/gid for the Hermes image. No default is written: leaving
+# these unset keeps the legacy uid 0. Set them during the account migration.
+HYBRID_AI_UID=${HYBRID_AI_UID:-}
+HYBRID_AI_GID=${HYBRID_AI_GID:-}
 
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
@@ -688,6 +692,14 @@ done
 
 if [ $ATTEMPT -gt $MAX_RETRIES ]; then
     die "Failed to pull images after $MAX_RETRIES attempts. Please check network routing."
+fi
+
+# Non-root Hermes preflight. A no-op unless HYBRID_AI_UID is set and non-zero.
+# It refuses (before anything is started) when the uid is not a system account,
+# or when hermes_data holds entries that uid cannot read. Read-only; no sudo.
+# See scripts/check-hermes-nonroot.sh.
+if ! "${SCRIPT_DIR}/scripts/check-hermes-nonroot.sh"; then
+  die "Refusing to start: the Hermes non-root uid is not usable (see above)."
 fi
 
 log "Starting full Hybrid-AI control plane stack..."

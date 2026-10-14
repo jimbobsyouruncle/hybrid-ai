@@ -1,0 +1,26 @@
+diff --git a/hermes_cli/kanban_specify.py b/hermes_cli/kanban_specify.py
+index eefb92046..2ce972005 100644
+--- a/hermes_cli/kanban_specify.py
++++ b/hermes_cli/kanban_specify.py
+@@ -26,6 +26,12 @@ from utils import env_int
+ 
+ HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(1500, env_int("HERMES_KANBAN_SPECIFY_MAX_TOKENS", 6000))
+ 
++# Max characters of the card body fed to the aux LLM. Long bodies were silently
++# cut to 4000 chars before the model ever saw them (this helper is shared by
++# specify AND decompose), so a rewrite dropped the card's tail. Overridable so a
++# long card is not truncated; 16000 leaves ample room for a full spec.
++HERMES_KANBAN_PROMPT_BODY_CHARS = max(4000, env_int("HERMES_KANBAN_PROMPT_BODY_CHARS", 16000))
++
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -139,7 +145,7 @@ def _task_prompt_fields(task: kb.Task) -> dict[str, str]:
+     return {
+         "task_id": task.id,
+         "title": _truncate(task.title or "", 400),
+-        "body": _truncate(task.body or "(no body)", 4000),
++        "body": _truncate(task.body or "(no body)", HERMES_KANBAN_PROMPT_BODY_CHARS),
+     }
+ 
+ 

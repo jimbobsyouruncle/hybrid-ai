@@ -3,13 +3,26 @@ services:
     build:
       context: ./hermes
       dockerfile: Dockerfile
+      args:
+        # Passed through from the env file so the image's hermes uid/gid match
+        # the host-side `user:` below. When unset, the Dockerfile default
+        # (10001) applies.
+        HYBRID_AI_UID: ${HYBRID_AI_UID:-10001}
+        HYBRID_AI_GID: ${HYBRID_AI_GID:-10001}
     container_name: hermes-agent
     restart: unless-stopped
-    # `-p default` is load-bearing: a sticky named active profile (e.g. ciso)
-    # is refused a gateway ("Profile '<name>' does not get a gateway of its
-    # own"), because the single gateway per host is owned by the default
-    # profile.
-    command: ["bash", "-c", "source ~/.bashrc && hermes -p default gateway run --replace & exec python3 bootstrap.py --host 0.0.0.0 --foreground --no-browser 8501"]
+    # Run as the dedicated non-root service uid. The `:-0` default is the
+    # legacy setting: an existing host keeps uid 0 until the account migration
+    # sets HYBRID_AI_UID in .env. A host that sets it runs non-root.
+    user: "${HYBRID_AI_UID:-0}:${HYBRID_AI_GID:-0}"
+    # Hardening only: forbid setuid/setgid from gaining privileges.
+    security_opt:
+      - no-new-privileges:true
+    # No `command:` here on purpose: the image CMD is the single start command.
+    # It starts the gateway as the default profile (`-p default` is
+    # load-bearing: a sticky named active profile would be refused a gateway)
+    # and then execs the WebUI. Keeping the start command in exactly one place
+    # is what validate.yml and the smoke job assert against hermes/Dockerfile.
     ports:
       - "${HERMES_PORT:-8501}:8501"
       - "${HERMES_API_PORT:-8642}:8642"
