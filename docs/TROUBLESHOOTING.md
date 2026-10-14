@@ -779,15 +779,20 @@ journalctl --user -u hybrid-ai-backup.service -n 50
 ./backup/restore.sh --list                        # snapshots that exist
 ```
 
-A healthy run logs `backup_success` followed by `retention_applied`.
+A healthy run logs `backup_success` followed by `retention_applied`. A run that uploaded but missed durable state logs `backup_incomplete` and exits **3** — it is expected sometimes and is not retried.
 
 ### Backup events
 
 | Event | Meaning | Action |
 |---|---|---|
-| `backup_success` | Completed; check `staged_mb` and `duration_s` | — |
-| `cold_copy_fallback` | Online snapshot failed; containers stopped briefly | Install `sqlite3` to avoid the outage |
-| `backup_failed` | Run aborted | See `detail` and `backup.log` |
+| `backup_success` | Completed and every discovered database was captured; check `staged_mb` and `duration_s` | — |
+| `backup_incomplete` | Uploaded, but durable state was missing; snapshot is tagged `complete:false` and the run exits 3 | Inspect the events alongside it: `db_path_rejected`, `hermes_data_unreadable`, `rsync_partial`, `cold_copy_fallback`. Not retried automatically |
+| `db_path_rejected` | A discovered path failed the name allow-list; count only, the name is never logged | Investigate what wrote that name under `hermes_data` |
+| `hermes_data_unreadable` | `find` could not read part of `hermes_data`, or it is not a readable directory | Fix permissions/ownership; the files are missing from this snapshot |
+| `rsync_partial` | An `rsync` finished partial (exit 23/24); `source` names the tree | Re-run once the source is stable; some durable state is missing |
+| `non_sqlite_db_skipped` | A file matched `*.db` but is not SQLite | None; the file is intentionally skipped |
+| `cold_copy_fallback` | Online capture failed; containers stopped briefly for a verified cold copy | Install `sqlite3` to avoid the outage |
+| `backup_failed` | Run aborted (exit 1) | See `detail` and `backup.log` |
 | `retention_failed` | Pruning failed — backup itself is safe | Check R2 permissions |
 | `check_failed` | **Repository integrity failure** | **Do not prune.** See below |
 | `restore_test_success` | Rehearsal passed; backups are restorable | — |

@@ -977,10 +977,21 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
       warn "No successful backup recorded yet" "Run one now: ./backup/backup.sh"
     fi
 
-    if grep -q 'event=backup_failed\|event=check_failed' backup.log 2>/dev/null; then
-      RECENT_FAIL="$(grep -c 'event=backup_failed' backup.log 2>/dev/null || echo 0)"
-      warn "${RECENT_FAIL} backup failure(s) recorded in the log" \
+    # Count failures and incomplete runs SINCE THE LAST successful backup.
+    # Counting the whole file made these numbers only ever grow, even after a
+    # clean run; a success must reset them. Severity stays warn.
+    SINCE_LAST="$(awk '/event=backup_success/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' backup.log 2>/dev/null || true)"
+    RECENT_FAIL="$(printf '%s' "$SINCE_LAST" | grep -c 'event=backup_failed\|event=check_failed' 2>/dev/null || true)"
+    RECENT_INCOMPLETE="$(printf '%s' "$SINCE_LAST" | grep -c 'event=backup_incomplete' 2>/dev/null || true)"
+    RECENT_FAIL="${RECENT_FAIL:-0}"
+    RECENT_INCOMPLETE="${RECENT_INCOMPLETE:-0}"
+    if (( RECENT_FAIL > 0 )); then
+      warn "${RECENT_FAIL} backup failure(s) since the last successful backup" \
            "Review: grep 'event=backup_failed' backup.log | tail -5"
+    fi
+    if (( RECENT_INCOMPLETE > 0 )); then
+      warn "${RECENT_INCOMPLETE} incomplete backup run(s) since the last successful backup" \
+           "An incomplete run missed durable state. Review: grep 'event=backup_incomplete' backup.log | tail -5"
     fi
   fi
 

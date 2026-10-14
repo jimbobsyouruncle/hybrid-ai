@@ -75,6 +75,13 @@ jobs:
         # detection are security properties, not conveniences.
         run: python3 openwebui/test_refactor.py
 
+      - name: Backup script fixture tests
+        # backup.sh must never build SQL text or a SQLite URI from a file name
+        # found in container-written data, must verify captured databases, and
+        # must report a run that missed durable state as incomplete. Fully
+        # offline: restic, docker and systemctl are stubbed on PATH.
+        run: bash scripts/test-backup.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything.

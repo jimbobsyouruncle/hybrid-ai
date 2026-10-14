@@ -60,7 +60,9 @@ Open WebUI stores everything in SQLite. ChromaDB stores vectors in SQLite too.
 
 **Copying a SQLite file while the application is writing to it produces a corrupt copy.** It will look fine. It will upload without error. It will fail to open on the day you actually need it — which is the worst possible moment to discover the problem. This is the single most common way self-hosted backup setups turn out to be worthless.
 
-So `backup.sh` never copies the live database files. It asks SQLite to produce a coherent snapshot using the online backup API (`VACUUM INTO`, falling back to `.backup`), stages that, and explicitly excludes the live files and their WAL sidecars from the upload.
+So `backup.sh` never copies the live database files. When the stack can be paused, it copies each database **with its `-wal`, `-shm` and `-journal` sidecars** into staging without opening the live files, then checkpoints the **staged** copy and requires `PRAGMA quick_check` to pass. When pausing is not possible (or `BACKUP_NO_PAUSE=1`), it uses SQLite's online backup (`.backup`) instead. Either way the live files and their sidecars are excluded from the upload.
+
+`VACUUM INTO` is **never** used. Its only way to name the output is to splice that name into SQL text, and the names come from container-written data. A discovered name is treated as hostile: it must pass an allow-list (every path component matches `[A-Za-z0-9._@+-]+`, is not `.` or `..`, and does not start with `-`) before it reaches any copy or `sqlite3` call. A name that fails is never touched; it is counted (`db_path_rejected`) and the run is marked **incomplete**.
 
 ### The second consistency problem: ChromaDB is split in two
 
@@ -73,6 +75,16 @@ So the backup briefly **pauses** the Open WebUI container for the capture. `dock
 Set `BACKUP_NO_PAUSE=1` to skip this. Zero downtime, but only safe if you are certain nothing is being embedded during the backup window.
 
 If a consistent online snapshot cannot be taken at all, the script **stops Open WebUI, copies cold, and restarts it**. A brief outage is strictly better than a backup you cannot restore. It never silently falls back to a hot copy.
+
+### Incomplete runs are reported honestly
+
+Some runs cannot capture everything. A discovered path fails the allow-list, an entry under `hermes_data` cannot be read, an `rsync` finishes partial (exit 23 or 24), a database cannot be captured and still fails `quick_check` after the cold copy. In every case the script does **not** pretend the snapshot is whole:
+
+- it still uploads what it has, tagged `complete:false`;
+- it logs `backup_incomplete` (never `backup_success`);
+- it exits with code **3**, which both backup units list in `RestartPreventExitStatus=` so there is no 15-minute retry loop.
+
+`backup_failed` (exit 1) stays reserved for a run that aborted. An incomplete run is a distinct, non-retryable outcome. `doctor.sh` counts both `backup_failed` and `backup_incomplete` **since the last `backup_success`**, so a clean run resets the counters.
 
 `restore.sh --test` closes the loop by running `PRAGMA integrity_check` against the recovered databases, which is SQLite auditing its own files. That is the step that proves the whole chain works.
 
@@ -256,7 +268,8 @@ Two providers, two failure modes, one password to remember.
 | `No credentials at ~/.config/...` | Backups never configured | Run `./install.sh` |
 | `has permissions 644; expected 600` | Permissions drifted | `chmod 600 ~/.config/hybrid-ai-backup/*` |
 | `restic init failed` | Wrong account ID, bucket, or token | Verify the endpoint URL and that the token has Object Read & Write on that bucket |
-| `Could not snapshot ... via SQLite API` | `sqlite3` missing | `sudo apt-get install -y sqlite3`. The script falls back to a cold copy meanwhile |
+| `Could not capture ... via SQLite` | The database could not be captured online (e.g. `sqlite3` missing, or a WAL database in a directory the user cannot write) | `sudo apt-get install -y sqlite3`. The script falls back to a verified cold copy, then fails the run if that also fails |
+| `backup_incomplete` in the log, exit code 3 | The run uploaded but missed durable state (a rejected path, an unreadable entry, a partial rsync, an unverifiable database) | Check the events around it (`db_path_rejected`, `hermes_data_unreadable`, `rsync_partial`). This is not retried automatically, by design |
 | Backup never runs overnight | Linger not enabled | `sudo loginctl enable-linger $USER` |
 | `repository is already locked` | A previous run was killed | `restic unlock` after confirming nothing is running |
 | Integrity check fails | Repository corruption | Do not prune. Try `restic repair index`, and treat existing snapshots as suspect |

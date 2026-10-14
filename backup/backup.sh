@@ -27,9 +27,26 @@
 #   CORRUPT copy. It will look fine. It will back up without error. It will
 #   fail to open when you finally need it.
 #
-#   So this script does NOT copy the live database files directly. It asks
-#   SQLite to produce a consistent snapshot first (see snapshot_sqlite), backs
-#   up that snapshot, and excludes the live files entirely.
+#   So this script does NOT copy the live database files directly. When the
+#   stack can be paused (see CONTAINER CONTROL), it copies each database plus
+#   its sidecars into staging WITHOUT opening the live files, then checkpoint
+#   and quick_check the STAGED copy. When pausing is impossible it uses
+#   SQLite's online backup ('.backup'). Either way the live files are excluded
+#   from the upload. VACUUM INTO is never used: its only destination mechanism
+#   splices the path into SQL text, and the paths come from container data.
+#
+# UNTRUSTED PATHS:
+#   Every path discovered under hermes_data is written by the Hermes container
+#   and is therefore attacker-controlled. Before such a path reaches any copy
+#   or sqlite3 call it must pass the allow-list in valid_rel_path. A rejected
+#   path is never touched; it is counted and it makes the run INCOMPLETE.
+#
+# INCOMPLETE RUNS:
+#   If durable state could not be captured (a rejected path, an unreadable
+#   entry, a partial rsync, an unverifiable database) the run still uploads
+#   what it has -- but it is tagged complete:false, logs backup_incomplete, and
+#   exits EXIT_INCOMPLETE (3). A run that aborts outright still logs
+#   backup_failed and exits 1. Do not confuse the two.
 #
 # CONTAINER CONTROL:
 #   Containers are paused/stopped by CONTAINER NAME with plain docker
@@ -102,7 +119,7 @@ for arg in "$@"; do
     --init)            MODE="init" ;;
     --dry-run)         MODE="dryrun" ;;
     --non-interactive) NON_INTERACTIVE=1 ;;
-    -h|--help) sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,81p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -132,6 +149,51 @@ die() {
   exit 1
 }
 
+# Exit code for a run that finished but MISSED durable state. Distinct from 1
+# (an aborted run): both backup units list it in RestartPreventExitStatus so
+# systemd does not retry it every 15 minutes -- a retry would fail identically.
+EXIT_INCOMPLETE=3
+
+# --- Incomplete-run tracking ------------------------------------------------
+# A run that could not capture everything it should have is INCOMPLETE, not
+# successful. It is still uploaded (that partial data is worth keeping), but it
+# is tagged complete:false, emits backup_incomplete instead of backup_success,
+# and exits with EXIT_INCOMPLETE so the failure is visible rather than implied.
+INCOMPLETE_COUNT=0
+INCOMPLETE_REASONS=()
+
+mark_incomplete() {
+  INCOMPLETE_COUNT=$(( INCOMPLETE_COUNT + 1 ))
+  INCOMPLETE_REASONS+=("$1")
+}
+
+# --- Untrusted-path validation ---------------------------------------------
+# hermes_data is written by the Hermes container, so every path discovered
+# beneath it is attacker-controlled. Before such a path is used for ANY copy or
+# sqlite3 call it must pass this allow-list:
+#   * the absolute path starts with "$REPO_DIR/" (so the "$db" -> rel
+#     derivation below is exact and can never escape via "..")
+#   * the whole repo-relative path matches ^([A-Za-z0-9._@+-]+/)*[A-Za-z0-9._@+-]+$
+#   * no component is "." or ".."
+#   * no component starts with "-" (so it can never be read as an option)
+# The absolute prefix ("$REPO_DIR") is not inspected: it is ours, not the
+# container's. A rejected path is counted only -- its raw name is NEVER logged.
+valid_rel_path() {
+  local abs="$1" rel
+  [[ "$abs" == "${REPO_DIR}/"* ]] || return 1
+  rel="${abs#"${REPO_DIR}/"}"
+  [[ -n "$rel" ]] || return 1
+  # Match the ENTIRE path against one anchored regex. The char class cannot
+  # match a quote, a newline, a '*', a '?' or a space, so a component cannot
+  # hide behind a glob expansion or a line split. The pattern also forbids
+  # empty components, a leading/trailing slash, and repeated slashes.
+  [[ "$rel" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || return 1
+  # Reject any "." or ".." component and any component starting with "-".
+  [[ "$rel" =~ (^|/)\.\.?(/|$) ]] && return 1
+  [[ "$rel" =~ (^|/)- ]] && return 1
+  return 0
+}
+
 # --- Container control -----------------------------------------------------
 is_running() { [[ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" == "running" ]]; }
 
@@ -151,17 +213,114 @@ restart_stopped() {
   fi
 }
 
+# Pause every app container that is running. Returns 0 only when the capture can
+# be considered POINT-IN-TIME: every durable-state container was running AND is
+# now paused. If any container was not running, the stack could not be fully
+# frozen, so this reports failure and the caller falls back to the online backup.
 pause_webui() {
   [[ "${BACKUP_NO_PAUSE:-0}" == "1" ]] && return 1
   command -v docker >/dev/null 2>&1 || return 1
-  local c
+  local c all_running=1
+  for c in "${APP_CONTAINERS[@]}"; do
+    if ! is_running "$c"; then all_running=0; fi
+  done
   for c in "${APP_CONTAINERS[@]}"; do
     is_running "$c" || continue
     if docker pause "$c" >/dev/null 2>&1; then
       PAUSED_CONTAINERS+=("$c")
+    else
+      unpause_webui   # never leave a half-paused stack behind
+      return 1
     fi
   done
-  (( ${#PAUSED_CONTAINERS[@]} > 0 ))
+  (( all_running ))
+}
+
+# SQLite helpers -------------------------------------------------------------
+# EVERY path that reaches sqlite3 is validated first (valid_rel_path). The
+# helpers below NEVER build SQL text or a sqlite3 URI from a discovered name:
+# the path is only ever an argv element. In particular VACUUM INTO is gone --
+# its destination could only be supplied by splicing the path into SQL.
+
+# The exact bytes every SQLite database file starts with.
+SQLITE_MAGIC='SQLite format 3'
+
+# Classify a file by its 16-byte header (not its name). Fills DB_IS_SQLITE.
+# Reads at most 17 bytes so a file whose header is exactly this string plus
+# more content still compares as SQLite (the cut drops the 17th byte).
+DB_IS_SQLITE=0
+classify_db_file() {
+  DB_IS_SQLITE=0
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  [[ -r "$1" ]] || return 1
+  local head16
+  head16="$(head -c 16 "$1" 2>/dev/null)" || return 1
+  [[ "$head16" == "$SQLITE_MAGIC" ]] && DB_IS_SQLITE=1
+  return 0
+}
+
+# Copy the staged database without opening the LIVE files with sqlite3; the
+# staged copy is then checkpointed and must pass PRAGMA quick_check. Every
+# sidecar present (-wal, -shm, -journal) is copied too, or a WAL database's
+# uncheckpointed rows would be silently lost.
+sqlite_snapshot_paused() {
+  local db="$1" target="$2" sfx
+  [[ -f "$db" && ! -L "$db" ]] || return 1
+  mkdir -p "$(dirname "$target")" || return 1
+  cp -a --no-dereference -- "$db" "$target" || return 1
+  for sfx in -wal -shm -journal; do
+    # A symlinked sidecar is refused, not followed: copying it as a symlink and
+    # then checkpointing the staged copy would let the link point the write at
+    # an attacker-chosen file, and following it into staging would pull an
+    # arbitrary file's bytes into the snapshot.
+    [[ -L "${db}${sfx}" ]] && return 1
+    if [[ -f "${db}${sfx}" ]]; then
+      cp -a --no-dereference -- "${db}${sfx}" "${target}${sfx}" || return 1
+    fi
+  done
+  if command -v sqlite3 >/dev/null 2>&1; then
+    # Fold the staged WAL into the staged main file, then prove it is coherent.
+    sqlite3 "$target" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null 2>&1 || return 1
+    [[ "$(sqlite3 "$target" 'PRAGMA quick_check;' 2>/dev/null | head -n1)" == "ok" ]] || return 1
+  fi
+  # The sidecars are now folded in; drop them so the staged database is a
+  # single self-contained file (never a WAL that restore could misread).
+  for sfx in -wal -shm -journal; do
+    [[ -e "${target}${sfx}" ]] && rm -f "${target}${sfx}"
+  done
+  return 0
+}
+
+# Online backup via SQLite's own backup API ('.backup'). The .backup dot-command
+# does not parse SQL, and the path is passed inside double quotes, so a name
+# made only of the allowed characters cannot escape. The SOURCE is opened
+# read-only. VACUUM INTO is deliberately not used here or anywhere.
+sqlite_snapshot_online() {
+  local db="$1" target="$2"
+  [[ -f "$db" ]] || return 1
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$target")" || return 1
+  sqlite3 -readonly -- "$db" ".timeout 10000" ".backup \"${target}\"" 2>/dev/null || return 1
+  [[ -s "$target" ]] || return 1
+  return 0
+}
+
+# Last-resort copy with the stack STOPPED. Re-validates the path, re-classifies
+# by header, copies without following symlinks, folds in any sidecar and
+# REQUIRES PRAGMA quick_check to pass. A genuine non-SQLite file is skipped; any
+# other failure is fatal to the run. Returns 0 ok, 1 failure, 2 non-SQLite,
+# 3 rejected path. Sets SNAPSHOT_REL.
+cold_copy_db() {
+  local db="$1"
+  SNAPSHOT_REL=""
+  valid_rel_path "$db" || return 3
+  SNAPSHOT_REL="${db#"${REPO_DIR}/"}"
+  [[ -f "$db" && ! -L "$db" ]] || return 1
+  classify_db_file "$db" || return 1
+  (( DB_IS_SQLITE )) || return 2
+  # A cold copy that cannot be verified is not a backup; refuse to pretend.
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  sqlite_snapshot_paused "$db" "${STAGING_DIR}/databases/${SNAPSHOT_REL}"
 }
 
 # AVAILABILITY: always resume services and clean staged copies, even on failure.
@@ -251,23 +410,14 @@ if [[ "$MODE" == "check" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# STEP 4. Capture application data consistently
+# STEP 4. Capture application data consistently -- stage_backup()
+#
+# Capture (stage) and upload are separate functions that share ONLY the staging
+# directory and the manifest, so a later card can run them as separate systemd
+# units. stage_backup() fills STAGING_DIR and the manifest; upload_backup()
+# reads them. Neither introduces a new $HOME- or repo-relative path.
 # ---------------------------------------------------------------------------
-snapshot_sqlite() {
-  local src="$1" dest="$2"
-  mkdir -p "$(dirname "$dest")"
-  if command -v sqlite3 >/dev/null 2>&1; then
-    if sqlite3 "file:${src}?mode=ro" ".timeout 10000" "VACUUM INTO '${dest}'" 2>/dev/null; then
-      return 0
-    fi
-    rm -f "$dest"
-    if sqlite3 "file:${src}?mode=ro" ".timeout 10000" ".backup '${dest}'" 2>/dev/null; then
-      return 0
-    fi
-  fi
-  return 1
-}
-
+stage_backup() {
 [[ "$MODE" == "dryrun" ]] || log "Capturing application state..."
 rm -rf "$STAGING_DIR"
 mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" \
@@ -355,26 +505,43 @@ hermes_prune_path_args() {
   printf '%s\0' -path "${HERMES_DATA}/${pat}" '!' -path "${HERMES_DATA}/${head}/*/${tail}"
 }
 
-# Snapshot one discovered database. Returns:
-#   0  snapshot written successfully
-#   1  SQLite snapshot failed (candidate for the cold-copy fallback)
-#   2  file is NOT a readable SQLite database (warned + recorded, never fatal)
-# Sets SNAPSHOT_REL to the repo-relative path for the caller's logging.
+# Snapshot one discovered database. Codes are captured by the caller so the
+# cold-copy fallback can retry a FAILURE but never a rejected or non-SQLite path.
+# Returns:
+#   0  captured successfully
+#   1  capture failed, or the file is unreadable (candidate for cold copy)
+#   2  file is NOT SQLite (16-byte header); skipped, never fatal
+#   3  path REJECTED by the allow-list; counted, raw name never logged
+# Sets SNAPSHOT_REL (repo-relative path) for the caller's logging.
+SNAPSHOT_REL=""
 snapshot_one_db() {
   local db="$1" rel target
+  SNAPSHOT_REL=""
+
+  # Attacker-controlled path: refuse it before any copy or sqlite3 call.
+  if ! valid_rel_path "$db"; then
+    return 3
+  fi
   rel="${db#"${REPO_DIR}/"}"
   SNAPSHOT_REL="$rel"
   target="${STAGING_DIR}/databases/${rel}"
 
-  # A *.db file that SQLite cannot open (a stray text file, a partial download)
-  # must never abort the whole backup. Detect it up front and skip it.
-  if command -v sqlite3 >/dev/null 2>&1; then
-    if ! sqlite3 "file:${db}?mode=ro" 'PRAGMA schema_version;' >/dev/null 2>&1; then
-      return 2
-    fi
+  # Classify by the 16-byte header, never by the file name. A genuine
+  # non-SQLite file is skipped; an unreadable file is a failure, so the
+  # cold-copy fallback gets a chance before the run dies.
+  if ! classify_db_file "$db"; then
+    return 1
+  fi
+  if (( ! DB_IS_SQLITE )); then
+    return 2
   fi
 
-  snapshot_sqlite "$db" "$target"
+  if [[ "$CONSISTENCY" == "paused" ]]; then
+    sqlite_snapshot_paused "$db" "$target" || return 1
+  else
+    sqlite_snapshot_online "$db" "$target" || return 1
+  fi
+  return 0
 }
 
 # Discover every live SQLite database at RUN TIME. Covers the whole hermes_data
@@ -387,10 +554,17 @@ snapshot_one_db() {
 # 'profiles/*/home') become ANCHORED -path predicates (see hermes_prune_path_args).
 # A bare -name home is deliberately NOT used -- it would prune every directory
 # named home, and an unanchored -path would prune deeper 'home' dirs too.
-DISCOVERED_DBS=()
+#
+# find runs in a process substitution, so its stderr is redirected into a file
+# and its exit status absorbed with '|| true'. Without that, a find error on an
+# unreadable entry fired the inherited ERR trap and logged a spurious
+# backup_failed while the run carried on. Any output there is a real readability
+# problem: it is counted, makes the run INCOMPLETE, and is reported.
 discover_databases() {
   DISCOVERED_DBS=()
   local prune=() p args=() first=1
+  local err_file="${STAGING_DIR}/.discovery.errors"
+  : > "$err_file" 2>/dev/null || true
 
   if [[ -d "$HERMES_DATA" ]]; then
     while IFS= read -r -d '' p; do
@@ -407,19 +581,30 @@ discover_databases() {
     while IFS= read -r -d '' db; do
       DISCOVERED_DBS+=("$db")
     done < <(find "$HERMES_DATA" \( "${prune[@]}" \) -prune -o \
-               -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print0)
+               -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print0 \
+               2>>"$err_file" || true)
+  elif [[ -e "$HERMES_DATA" ]]; then
+    printf 'hermes_data exists but is not a readable directory\n' >> "$err_file"
   fi
 
   local extra
   for extra in "${WEBUI_DB_PATHS[@]}"; do
     [[ -f "$extra" ]] && DISCOVERED_DBS+=("$extra")
   done
+
+  if [[ -s "$err_file" ]]; then
+    event "hermes_data_unreadable" "count=1"
+    mark_incomplete "hermes_data_unreadable"
+    warn "Some durable-state entries could not be read; this run is INCOMPLETE."
+  fi
+  rm -f "$err_file" 2>/dev/null || true
   return 0
 }
 
 DB_COUNT=0
 DB_FAILED=0
 DB_NONSQLITE=0
+DB_REJECTED=0
 FAILED_DBS=()
 NONSQLITE_DBS=()
 
@@ -436,27 +621,50 @@ for db in "${DISCOVERED_DBS[@]}"; do
   case "$rc" in
     0) DB_COUNT=$(( DB_COUNT + 1 )) ;;
     1) DB_FAILED=$(( DB_FAILED + 1 )); FAILED_DBS+=("$db")
-       warn "Could not snapshot ${SNAPSHOT_REL} via SQLite API." ;;
+       warn "Could not capture ${SNAPSHOT_REL} via SQLite." ;;
     2) DB_NONSQLITE=$(( DB_NONSQLITE + 1 )); NONSQLITE_DBS+=("$SNAPSHOT_REL")
-       warn "${SNAPSHOT_REL} is not a readable SQLite database; skipping its live snapshot." ;;
+       warn "${SNAPSHOT_REL} is not a SQLite database (header); skipping its snapshot." ;;
+    3) DB_REJECTED=$(( DB_REJECTED + 1 ))
+       # Count only. The raw name is attacker-controlled and is NEVER logged.
+       warn "A discovered path failed the name allow-list; skipping it." ;;
   esac
 done
+if (( DB_REJECTED > 0 )); then
+  event "db_path_rejected" "count=${DB_REJECTED}"
+  mark_incomplete "db_path_rejected"
+fi
 
 # --- Allow-list durable non-database state ---------------------------------
+# A partial rsync (exit 23/24: some files vanished or could not be transferred)
+# means durable state is missing from the snapshot, so the run is INCOMPLETE.
+# Other rsync exit codes are loud warnings as before. The label is a fixed
+# string, never a path, so no untrusted name reaches the event log.
+rsync_classify() {
+  local rc="$1" label="$2"
+  if (( rc == 23 || rc == 24 )); then
+    event "rsync_partial" "source=${3}" "exit=${rc}"
+    mark_incomplete "rsync_partial:${3}"
+    warn "rsync for ${label} was partial (exit ${rc}); this run is INCOMPLETE."
+  elif (( rc != 0 )); then
+    warn "rsync reported issues copying ${label}; continuing."
+  fi
+}
+
 if [[ -d "${REPO_DIR}/webui_data/uploads" ]]; then
   mkdir -p "${STAGING_DIR}/files/webui_data/uploads"
-  rsync -a "${REPO_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || \
-    warn "rsync reported issues copying Open WebUI uploads; continuing."
+  rc=0; rsync -a "${REPO_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || rc=$?
+  rsync_classify "$rc" "Open WebUI uploads" "webui_uploads"
 fi
 
 if [[ -d "${REPO_DIR}/webui_data/vector_db" ]]; then
   mkdir -p "${STAGING_DIR}/files/webui_data/vector_db"
+  rc=0
   rsync -a \
     --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
     --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*.db-journal' \
     --exclude='*-wal' --exclude='*-shm' \
-    "${REPO_DIR}/webui_data/vector_db/" "${STAGING_DIR}/files/webui_data/vector_db/" 2>/dev/null || \
-    warn "rsync reported issues copying Open WebUI vector data; continuing."
+    "${REPO_DIR}/webui_data/vector_db/" "${STAGING_DIR}/files/webui_data/vector_db/" 2>/dev/null || rc=$?
+  rsync_classify "$rc" "Open WebUI vector data" "webui_vector_db"
 fi
 
 # Durable hermes_data: capture the WHOLE tree by exclusion (see HERMES_EXCLUDES).
@@ -468,26 +676,29 @@ fi
 if [[ -d "$HERMES_DATA" ]]; then
   mkdir -p "${STAGING_DIR}/files/hermes_data"
   mapfile -d '' -t HERMES_RSYNC_EXCL < <(hermes_rsync_excludes)
+  rc=0
   rsync -a "${HERMES_RSYNC_EXCL[@]}" \
-    "${HERMES_DATA}/" "${STAGING_DIR}/files/hermes_data/" 2>/dev/null || \
-    warn "rsync reported issues copying durable hermes_data; continuing."
+    "${HERMES_DATA}/" "${STAGING_DIR}/files/hermes_data/" 2>/dev/null || rc=$?
+  rsync_classify "$rc" "durable hermes_data" "hermes_data"
   unset HERMES_RSYNC_EXCL
 fi
 
 if [[ -d "${HOME}/.hermes" ]]; then
+  rc=0
   rsync -a \
     --exclude='cache/' --exclude='tools/' --exclude='installs/' \
     --exclude='node_modules/' --exclude='.git/' --exclude='venv/' --exclude='.venv/' \
     --exclude='__pycache__/' --exclude='*.pyc' \
     --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
-    "${HOME}/.hermes/" "${STAGING_DIR}/hermes/" 2>/dev/null || \
-    warn "rsync reported issues copying ~/.hermes durable state; continuing."
+    "${HOME}/.hermes/" "${STAGING_DIR}/hermes/" 2>/dev/null || rc=$?
+  rsync_classify "$rc" "the .hermes durable state" "dot_hermes"
 fi
 
 if [[ -d "${HOME}/.openhands" ]]; then
+  rc=0
   rsync -a --exclude='cache/' --exclude='tmp/' --exclude='logs/' \
-    "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || \
-    warn "rsync reported issues copying OpenHands state; continuing."
+    "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || rc=$?
+  rsync_classify "$rc" "OpenHands state" "openhands"
 fi
 
 unpause_webui
@@ -495,13 +706,13 @@ unpause_webui
 
 # --- Cold-copy fallback ----------------------------------------------------
 # Uses the SAME run-time discovered list, never a hardcoded one. A database that
-# could not be snapshotted online is copied cold. If the copy of a database that
-# IS SQLite fails, the run FAILS: a backup that reports success while a real
-# database is missing is the exact failure this script must never allow. A file
-# that is not SQLite at all (already warned and recorded above) is still skipped
-# without failing the run.
+# could not be captured online is copied cold with the stack STOPPED and MUST
+# pass quick_check. If it still fails, the run dies: a backup that reports
+# success while a real database is missing is exactly what this script must
+# never allow. A genuine non-SQLite file is skipped, not fatal; a REJECTED path
+# is skipped too (it was counted and already made the run incomplete).
 if (( DB_FAILED > 0 )); then
-  warn "${DB_FAILED} database(s) could not be snapshotted online."
+  warn "${DB_FAILED} database(s) could not be captured online."
   if command -v docker >/dev/null 2>&1; then
     warn "Falling back to a cold copy. Services will be briefly unavailable."
     event "cold_copy_fallback" "failed_dbs=${DB_FAILED}"
@@ -519,19 +730,14 @@ if (( DB_FAILED > 0 )); then
     mkdir -p "${STAGING_DIR}/databases"
     DB_COUNT=0
     for db in "${DISCOVERED_DBS[@]}"; do
-      [[ -f "$db" ]] || continue
-      rel="${db#"${REPO_DIR}/"}"
-      # Do not cold-copy a non-SQLite file; it was already warned and recorded.
-      # This skip stays non-fatal.
-      if command -v sqlite3 >/dev/null 2>&1 && \
-         ! sqlite3 "file:${db}?mode=ro" 'PRAGMA schema_version;' >/dev/null 2>&1; then
-        warn "Skipping cold copy of non-SQLite ${rel}."
-        continue
-      fi
-      mkdir -p "$(dirname "${STAGING_DIR}/databases/${rel}")"
-      cp -a "$db" "${STAGING_DIR}/databases/${rel}" \
-        || die "Cold-copy fallback failed for ${rel}. Refusing to report a successful backup."
-      DB_COUNT=$(( DB_COUNT + 1 ))
+      [[ -f "$db" && ! -L "$db" ]] || continue
+      crc=0; cold_copy_db "$db" || crc=$?
+      case "$crc" in
+        0) DB_COUNT=$(( DB_COUNT + 1 )) ;;
+        2) warn "Skipping cold copy of non-SQLite ${SNAPSHOT_REL}." ;;
+        3) : ;;   # rejected: already counted, already incomplete
+        *) die "Cold-copy fallback failed for ${SNAPSHOT_REL:-a database}. Refusing to report a successful backup." ;;
+      esac
     done
     restart_stopped
   else
@@ -618,6 +824,7 @@ hybrid-ai backup manifest
 created_utc        : $(date -u +%Y-%m-%dT%H:%M:%SZ)
 source_host        : ${BACKUP_HOST}
 consistency_method : ${CONSISTENCY}
+run_status         : $( (( INCOMPLETE_COUNT > 0 )) && echo "incomplete" || echo "complete" )
 databases_captured : ${DB_COUNT}
 ollama_models      : ${OLLAMA_MODEL_COUNT:-0} (names only; weights not backed up)
 restic_version     : $(restic version 2>/dev/null | head -n1)
@@ -645,8 +852,11 @@ if [[ -f "${REPO_DIR}/.env" ]]; then
   chmod 600 "${STAGING_DIR}/env/.env"
 fi
 
-STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1)"
+# An unreadable staged entry (from an incomplete rsync) can make du fail; that
+# must not abort an otherwise-finished run via the ERR trap, so absorb it.
+STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1 || true)"
 STAGED_MB="${STAGED_MB:-?}"
+}   # end stage_backup()
 
 if [[ "$MODE" == "dryrun" ]]; then
   log "Dry run -- nothing will be uploaded."
@@ -657,11 +867,16 @@ if [[ "$MODE" == "dryrun" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# STEP 7. Upload
+# STEP 7. Upload -- upload_backup()
 #
 # Only the staging directory is passed to restic. Live application data is
 # never uploaded directly, guaranteeing every snapshot is consistent.
+#
+# An INCOMPLETE run still uploads -- partial data is worth keeping -- but it is
+# tagged complete:false so a restore can see at a glance that durable state was
+# missing, and it exits with EXIT_INCOMPLETE rather than reporting success.
 # ---------------------------------------------------------------------------
+upload_backup() {
 log "Checking restic repository status..."
 if ! restic snapshots >/dev/null 2>&1; then
   warn "Repository at ${RESTIC_REPOSITORY} is not initialized!"
@@ -682,6 +897,12 @@ if ! restic snapshots >/dev/null 2>&1; then
   fi
 fi
 
+if (( INCOMPLETE_COUNT > 0 )); then
+  COMPLETE_TAG="complete:false"
+else
+  COMPLETE_TAG="complete:true"
+fi
+
 log "Uploading to R2 (${STAGED_MB} MB staged, deduplicated against previous runs)..."
 BACKUP_START=$SECONDS
 
@@ -689,13 +910,21 @@ if restic backup "$STAGING_DIR" \
       --host "$BACKUP_HOST" \
       --tag hybrid-ai \
       --tag "consistency:${CONSISTENCY}" \
+      --tag "$COMPLETE_TAG" \
       --exclude-caches \
       --one-file-system 2>&1 | tee -a "$BACKUP_LOG"; then
   BACKUP_SECONDS=$(( SECONDS - BACKUP_START ))
-  event "backup_success" "host=${BACKUP_HOST}" "staged_mb=${STAGED_MB}" \
-        "databases=${DB_COUNT}" "consistency=${CONSISTENCY}" \
-        "duration_s=${BACKUP_SECONDS}"
-  ok "Backup complete in ${BACKUP_SECONDS}s."
+  if (( INCOMPLETE_COUNT > 0 )); then
+    event "backup_incomplete" "host=${BACKUP_HOST}" "staged_mb=${STAGED_MB}" \
+          "databases=${DB_COUNT}" "consistency=${CONSISTENCY}" \
+          "duration_s=${BACKUP_SECONDS}" "reasons=$(printf '%s,' "${INCOMPLETE_REASONS[@]}" | cut -c1-160)"
+    warn "Backup uploaded but INCOMPLETE: durable state is missing from this snapshot."
+  else
+    event "backup_success" "host=${BACKUP_HOST}" "staged_mb=${STAGED_MB}" \
+          "databases=${DB_COUNT}" "consistency=${CONSISTENCY}" \
+          "duration_s=${BACKUP_SECONDS}"
+    ok "Backup complete in ${BACKUP_SECONDS}s."
+  fi
 else
   die "restic backup failed. See ${BACKUP_LOG}."
 fi
@@ -728,3 +957,14 @@ printf '\n'
 ok "Done. ${SNAP_COUNT} snapshot(s) retained for host ${BACKUP_HOST}."
 printf '    Restore with : ./backup/restore.sh\n'
 printf '    Verify with  : ./backup/backup.sh --check\n\n'
+}   # end upload_backup()
+
+# --- Run: stage, then upload. A run that missed durable state still uploads,
+# but reports INCOMPLETE and exits with EXIT_INCOMPLETE. The ERR trap is
+# cleared first: a deliberate non-zero exit must not be re-labelled a failure.
+stage_backup
+upload_backup
+if (( INCOMPLETE_COUNT > 0 )); then
+  trap - ERR
+  exit "$EXIT_INCOMPLETE"
+fi

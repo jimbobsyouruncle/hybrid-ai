@@ -408,7 +408,7 @@ run "install.sh events" bash -c "grep '^EVENT' install.log 2>/dev/null | tail -2
 sub "Scheduled job history (last outcome per job)"
 {
   if [[ -f backup.log || -f install.log ]]; then
-    for ev in backup_success backup_failed check_success check_failed \
+    for ev in backup_success backup_incomplete backup_failed check_success check_failed \
               restore_success restore_test_success restore_test_failed \
               retention_applied retention_failed install_success install_failed; do
       line="$(grep "event=${ev}" backup.log install.log 2>/dev/null | tail -1)"

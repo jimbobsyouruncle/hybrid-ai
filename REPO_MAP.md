@@ -78,6 +78,7 @@
 - scripts/deploy-remote.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
+- scripts/test-backup.sh - shellcheck disable=SC2317 # helpers and the EXIT trap are called indirectly
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
 - scripts/test-deploy-remote.sh

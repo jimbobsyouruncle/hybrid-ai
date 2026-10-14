@@ -21,6 +21,11 @@ WorkingDirectory=__REPO_DIR__
 ExecStart=__REPO_DIR__/backup/backup.sh --check
 TimeoutStartSec=6h
 
+# An INCOMPLETE backup run (exit 3) is a valid outcome, not a check failure.
+# If the check service is ever given a retry policy, do not retry on exit 3;
+# 1 (a real failure) stays retryable.
+RestartPreventExitStatus=3
+
 Nice=19
 IOSchedulingClass=idle
 CPUWeight=10
