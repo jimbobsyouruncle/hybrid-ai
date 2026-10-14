@@ -100,8 +100,9 @@ warns (never fails) when it is not `0`.
 A normal run exits `0` when all is well, `1` when anything was skipped or is stale, and `2` on
 any error.
 
-`install.sh` runs it on every deploy, after the workspace setup, and its failure is a warning
-(not a stop). To refresh on a schedule, install a timer **by hand**. A daily systemd timer:
+`install.sh` runs it near the start of every deploy, before it loads `.env`, and its failure is
+a warning (not a stop). To refresh on a schedule, install a timer **by hand**. A daily systemd
+timer:
 
 ```ini
 # ~/.config/systemd/user/sync-agent-repos.service

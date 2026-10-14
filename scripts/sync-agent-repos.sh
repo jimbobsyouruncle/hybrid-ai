@@ -48,9 +48,9 @@
 #   ./scripts/sync-agent-repos.sh --check         verify the tree from INVENTORY.md
 #   ./scripts/sync-agent-repos.sh --help          show this message
 #
-#   install.sh calls this on every deploy, after step 9. To refresh on a
-#   schedule the owner installs a timer BY HAND, e.g. a daily systemd timer
-#   (see hermes/README.md) or this crontab line:
+#   install.sh calls this near the start of every deploy, before it loads .env.
+#   To refresh on a schedule the owner installs a timer BY HAND, e.g. a daily
+#   systemd timer (see hermes/README.md) or this crontab line:
 #
 #     17 4 * * * cd /home/youruser/hybrid-ai && ./scripts/sync-agent-repos.sh >> install.log 2>&1
 #

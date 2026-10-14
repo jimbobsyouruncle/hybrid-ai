@@ -484,6 +484,9 @@ confirm the old value is gone.
 
 `scripts/sync-agent-repos.sh` keeps the read-only reference tree at
 `AGENT_REPOS_DIR` and writes `${AGENT_REPOS_DIR}/INVENTORY.md` after each run.
+`install.sh` runs it near the start of every deploy, before it loads `.env`, so
+the tree is current even if a later install step fails or stops. A sync failure
+is only a warning; `install.sh` carries on.
 Each row is one repository with its default branch, HEAD short SHA, status and
 last sync time (UTC). The status is exactly one of:
 
