@@ -12,6 +12,26 @@
 #     systemctl --user status  hybrid-ai-backup.service
 #     systemctl --user start   hybrid-ai-backup.service   # run now
 #     journalctl --user -u hybrid-ai-backup.service -n 50 # recent output
+#
+# INCIDENT B1 (2026-10-15):
+#   This unit (Restart=on-failure, RestartSec=15min) retried a failing run
+#   every ~915 s. Each retry's cold-copy fallback stopped and restarted
+#   hermes-agent, killing in-flight agent sessions -- for a failure that a
+#   retry could never fix. The backup could not read the container-owned
+#   hermes_data tree at all.
+#
+#   Two changes stop that from recurring:
+#     1. backup.sh now runs an access preflight. A run that cannot read the
+#        data is INCOMPLETE and exits 3, and it never stops a container. An
+#        INCOMPLETE run (exit 3) is listed in RestartPreventExitStatus below,
+#        so systemd never retries it.
+#     2. StartLimitIntervalSec/StartLimitBurst below bound even a hard failure
+#        (exit 1): a retry that fails identically twice gives up instead of
+#        stopping containers every 15 minutes.
+#
+#   The cold-copy fallback stops hermes-agent ONLY when BACKUP_ALLOW_AGENT_STOP=1
+#   is set in the environment; without it, stopping the agent is declined (the
+#   run is INCOMPLETE, never fatal) because it kills in-flight sessions.
 # ---------------------------------------------------------------------------
 [Unit]
 Description=hybrid-ai encrypted backup to Cloudflare R2
@@ -19,6 +39,12 @@ Documentation=file://%h/hybrid-ai/backup/README.md
 # Do not start a backup while the network is still coming up after a reboot.
 After=network-online.target
 Wants=network-online.target
+
+# BOUNDED RETRY: cap restarts so a hard failure (exit 1) cannot loop forever.
+# Within any 1 hour window a run may be started at most twice; a second failure
+# in that window stops the retries rather than stopping containers every 15 min.
+StartLimitIntervalSec=1h
+StartLimitBurst=2
 
 [Service]
 Type=oneshot
@@ -32,9 +58,11 @@ ExecStart=__REPO_DIR__/backup/backup.sh
 Restart=on-failure
 RestartSec=15min
 
-# EXIT_INCOMPLETE (3): the run uploaded what it had but missed durable state.
-# Retrying in 15 minutes would not recover the missing data, so this exit is
-# deliberately NOT retried. backup_failed (1) still restarts.
+# EXIT_INCOMPLETE (3): the run uploaded what it had but missed durable state
+# (including "this account cannot read the data"). Retrying in 15 minutes would
+# not recover the missing data and could stop containers for nothing, so this
+# exit is deliberately NOT retried. backup_failed (1) still restarts -- but is
+# now bounded by StartLimitIntervalSec/StartLimitBurst above.
 RestartPreventExitStatus=3
 
 # Give up rather than run forever. A hung upload holding the SQLite staging

@@ -24,6 +24,13 @@
 #   d) a plain text file named *.db is skipped with its reason
 #   e) a clean fixture gives backup_success
 #   f) the online path (BACKUP_NO_PAUSE=1) uses SQLite .backup, never VACUUM INTO
+#   g) a SPLIT app/data/log/work layout backs up and restores with relocation
+#   h) an uncapturable hermes_data DB with BACKUP_ALLOW_AGENT_STOP unset: the
+#      cold copy declines to stop hermes-agent, exits 3, stops nothing
+#   i) the same with BACKUP_ALLOW_AGENT_STOP=1: hermes-agent IS stopped, the
+#      cold copy still cannot capture the DB, cold_copy_failed, exit 3
+#   j) an uncapturable webui_data DB: only open-webui is stopped, exit 3
+#   k) a cold-copy stop failure: no backup_failed, exit 3
 #
 # Exit 0 when every case passes, non-zero otherwise. Exit 2 on usage error.
 # ---------------------------------------------------------------------------
@@ -52,8 +59,10 @@ trap cleanup EXIT
 TMPROOT="$(mktemp -d)"
 STUB="$TMPROOT/stub"
 SQLITE_LOG="$TMPROOT/sqlite.log"
+DOCKER_LOG="$TMPROOT/docker.log"
 mkdir -p "$STUB"
 : > "$SQLITE_LOG"
+: > "$DOCKER_LOG"
 
 # --- stubs -----------------------------------------------------------------
 cat > "$STUB/restic" <<'EOF'
@@ -90,11 +99,19 @@ case "$1" in
 esac
 EOF
 
-cat > "$STUB/docker" <<'EOF'
+cat > "$STUB/docker" <<EOF
 #!/usr/bin/env bash
-case "$1" in
+# Log every invocation (argv) so a case can assert exactly which containers
+# were stopped. When DOCKER_FAIL_STOP names a container, a 'stop' of it fails.
+printf '%s\n' "\$*" >> '${DOCKER_LOG}'
+case "\$1" in
   inspect) echo running; exit 0 ;;   # every container reports "running"
-  pause|unpause|stop|start|exec|version) exit 0 ;;
+  stop)
+    if [[ -n "\${DOCKER_FAIL_STOP:-}" && "\${2:-}" == "\$DOCKER_FAIL_STOP" ]]; then
+      exit 1
+    fi
+    exit 0 ;;
+  pause|unpause|start|exec|version) exit 0 ;;
   compose) exit 0 ;;
   *) exit 0 ;;
 esac
@@ -108,6 +125,17 @@ EOF
 cat > "$STUB/sqlite3" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> '${SQLITE_LOG}'
+# A path containing the marker (default 'boom.db') is uncapturable: every
+# invocation for it fails. This simulates a database no capture path can read,
+# without relying on file permissions (CI runs the suite as a non-root user
+# too). SQLITE_FAIL_MARKER lets a case target a fixed path such as the Open
+# WebUI database, which is not discovered by name.
+marker="\${SQLITE_FAIL_MARKER:-boom.db}"
+for a in "\$@"; do
+  case "\$a" in
+    *"\$marker"*) exit 1 ;;
+  esac
+done
 exec '${REAL_SQLITE3}' "\$@"
 EOF
 
@@ -134,7 +162,7 @@ chmod 600 "$CONF/repo-password"
 
 LOG="$TMPROOT/backup.log"
 CAPTURE="$TMPROOT/capture"
-export BACKUP_CONF_DIR="$CONF" BACKUP_LOG="$LOG" HOME="$REPO/home" SQLITE_LOG
+export BACKUP_CONF_DIR="$CONF" BACKUP_LOG="$LOG" HOME="$REPO/home" SQLITE_LOG DOCKER_LOG
 export CAPTURE_DIR="$CAPTURE"
 export PATH="$STUB:$PATH"
 export BACKUP_NO_PAUSE=1
@@ -157,6 +185,7 @@ PY
 
 run_backup() {  # run_backup <label>; sets RUN_RC, writes stdout/stderr to $TMPROOT/out
   : > "$LOG"
+  : > "$DOCKER_LOG"
   rm -rf "$CAPTURE"
   RUN_RC=0
   bash "$BACKUP" --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
@@ -186,6 +215,8 @@ log_has()    { grep -q "event=$1" "$LOG"; }
 log_lacks()  { ! grep -q "event=$1" "$LOG"; }
 sqlite_log_has()   { grep -qF -- "$1" "$SQLITE_LOG"; }
 sqlite_log_lacks() { ! grep -qF -- "$1" "$SQLITE_LOG"; }
+docker_log_has()   { grep -qF -- "stop $1" "$DOCKER_LOG"; }
+docker_log_lacks() { ! grep -qF -- "stop $1" "$DOCKER_LOG"; }
 
 # ---------------------------------------------------------------------------
 # Case a: a single-quote name is rejected; it is never copied and never reaches
@@ -254,6 +285,7 @@ else
   check "case c: incomplete exit code" 3 "$RUN_RC"
   assert "case c: hermes_data_unreadable emitted"  log_has 'hermes_data_unreadable'
   assert "case c: NO backup_failed emitted"        log_lacks 'backup_failed'
+  assert "case c: no container was stopped"        bash -c "! grep -q '^stop ' '$DOCKER_LOG'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -295,6 +327,71 @@ assert "case f: online database staged"   test -f "$STAGED_ON"
 assert "case f: online rows preserved"    bash -c "[[ \"\$( '$REAL_SQLITE3' '$STAGED_ON' 'select count(*) from t;' 2>/dev/null )\" == 3 ]]"
 assert "case f: .backup path used"        sqlite_log_has '.backup "'
 assert "case f: VACUUM INTO never used"   sqlite_log_lacks 'VACUUM INTO'
+
+# ---------------------------------------------------------------------------
+# Case h: a hermes_data database cannot be captured and BACKUP_ALLOW_AGENT_STOP
+# is unset. The cold copy must DECLINE to stop hermes-agent, leave that database
+# out of the snapshot, keep every other database, and exit 3 -- never 1.
+# ---------------------------------------------------------------------------
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/keep.db" 'CREATE TABLE t(a); INSERT INTO t VALUES (1);'
+printf 'SQLite format 3\0' > "$REPO/hermes_data/boom.db"
+rm -f "$REPO/webui_data/webui.db"; mkdir -p "$REPO/webui_data"
+sqlite3 "$REPO/webui_data/webui.db" 'CREATE TABLE chat(id); INSERT INTO chat VALUES (1);'
+unset BACKUP_ALLOW_AGENT_STOP
+run_backup "case-h"
+check "case h: incomplete exit code" 3 "$RUN_RC"
+assert "case h: NO backup_failed"              log_lacks 'backup_failed'
+assert "case h: backup_incomplete logged"      log_has 'backup_incomplete'
+assert "case h: cold_copy_agent_stop_declined" log_has 'cold_copy_agent_stop_declined'
+assert "case h: hermes-agent NOT stopped"      docker_log_lacks 'hermes-agent'
+assert "case h: boom.db not staged"            bash -c "[[ ! -e '$CAPTURE/databases/hermes_data/boom.db' ]]"
+assert "case h: other hermes db still staged"  bash -c "[[ -f '$CAPTURE/databases/hermes_data/keep.db' ]]"
+assert "case h: webui db still staged"         bash -c "[[ -f '$CAPTURE/databases/webui_data/webui.db' ]]"
+
+# ---------------------------------------------------------------------------
+# Case i: the same, but BACKUP_ALLOW_AGENT_STOP=1. The cold copy MAY stop
+# hermes-agent, but the database still cannot be captured cold, so it fails
+# (cold_copy_failed) and the run still exits 3 -- never 1.
+# ---------------------------------------------------------------------------
+unset BACKUP_ALLOW_AGENT_STOP
+export BACKUP_ALLOW_AGENT_STOP=1
+run_backup "case-i"
+unset BACKUP_ALLOW_AGENT_STOP
+check "case i: incomplete exit code" 3 "$RUN_RC"
+assert "case i: hermes-agent IS stopped"      docker_log_has 'hermes-agent'
+assert "case i: cold_copy_failed logged"      log_has 'cold_copy_failed'
+assert "case i: NO backup_failed"             log_lacks 'backup_failed'
+assert "case i: boom.db not staged"           bash -c "[[ ! -e '$CAPTURE/databases/hermes_data/boom.db' ]]"
+
+# ---------------------------------------------------------------------------
+# Case j: a webui_data database cannot be captured. Only open-webui may be
+# stopped; hermes-agent must be left alone. Exit 3.
+# ---------------------------------------------------------------------------
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+export SQLITE_FAIL_MARKER=webui.db
+run_backup "case-j"
+unset SQLITE_FAIL_MARKER
+check "case j: incomplete exit code" 3 "$RUN_RC"
+assert "case j: open-webui IS stopped"    docker_log_has 'open-webui'
+assert "case j: hermes-agent NOT stopped" docker_log_lacks 'hermes-agent'
+assert "case j: NO backup_failed"         log_lacks 'backup_failed'
+
+# ---------------------------------------------------------------------------
+# Case k: stopping open-webui fails. The cold copy is skipped (nothing may be
+# copied while the database is still written) and the run is INCOMPLETE, not a
+# failure. Exit 3, no backup_failed.
+# ---------------------------------------------------------------------------
+export SQLITE_FAIL_MARKER=webui.db
+export DOCKER_FAIL_STOP=open-webui
+run_backup "case-k"
+unset SQLITE_FAIL_MARKER DOCKER_FAIL_STOP
+check "case k: incomplete exit code" 3 "$RUN_RC"
+assert "case k: NO backup_failed"                          log_lacks 'backup_failed'
+assert "case k: backup_incomplete logged"                  log_has 'backup_incomplete'
+assert "case k: stop failure recorded as incomplete reason" bash -c "grep -q 'cold_copy_stop_failed:open-webui' '$LOG'"
+assert "case k: webui db not staged"                       bash -c "[[ ! -e '$CAPTURE/databases/webui_data/webui.db' ]]"
 
 # ---------------------------------------------------------------------------
 # Case g: SPLIT layout. APP, DATA, LOG and WORK are four separate temp dirs
