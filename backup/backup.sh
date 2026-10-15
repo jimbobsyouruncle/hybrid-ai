@@ -82,29 +82,49 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-cd "$REPO_DIR" || exit 1
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/lib" && pwd)"
+# shellcheck source=../scripts/lib/hybrid-ai-env.sh
+source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
+cd "$HYBRID_AI_APP_DIR" || exit 1
 
 # Credentials live OUTSIDE the git repository so that no git operation and no
 # careless 'tar czf' of the project folder can ever sweep them up.
-BACKUP_CONF_DIR="${BACKUP_CONF_DIR:-${HOME}/.config/hybrid-ai-backup}"
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
+export RESTIC_CACHE_DIR
 
 # Where consistent snapshots are staged before upload. Wiped afterwards.
-STAGING_DIR="${REPO_DIR}/.backup-staging"
-BACKUP_LOG="${BACKUP_LOG:-${REPO_DIR}/backup.log}"
+STAGING_DIR="$HYBRID_AI_BACKUP_STAGING_DIR"
+
+# --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
+# Backup credentials are the keys to EVERY backup. Kept inside the deploy
+# tree, a data tree, or the staging work tree, they would be swept into a git
+# operation, a diagnostics bundle, or a backup of the tree itself. A --dry-run
+# writes nothing, but the read of a misplaced credential is what we refuse.
+path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
+for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
+  if path_within "${BACKUP_CONF_DIR%/}" "${_tree%/}"; then
+    printf '[ X ] BACKUP_CONF_DIR is inside %s.\n' "$_tree" >&2
+    printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
+    exit 1
+  fi
+done
+unset _tree
 
 KEEP_DAILY="${KEEP_DAILY:-7}"
 KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
 KEEP_MONTHLY="${KEEP_MONTHLY:-6}"
 
-# Every compose file, so 'config --images' reports the full stack.
-COMPOSE=(docker compose -p hybrid-ai --env-file "${REPO_DIR}/.env"
-         -f "${REPO_DIR}/docker-compose.yml"
-         -f "${REPO_DIR}/openhands/docker-compose.openhands.yml"
-         -f "${REPO_DIR}/hermes/docker-compose.hermes.yml")
+# Every compose file, so 'config --images' reports the full stack. The
+# resolved env file and the app directory are passed explicitly, so the stack
+# is the same one doctor.sh and install.sh operate on.
+COMPOSE=(docker compose -p hybrid-ai --env-file "$HYBRID_AI_ENV_FILE"
+         --project-directory "$HYBRID_AI_APP_DIR"
+         -f "$HYBRID_AI_APP_DIR/docker-compose.yml"
+         -f "$HYBRID_AI_APP_DIR/openhands/docker-compose.openhands.yml"
+         -f "$HYBRID_AI_APP_DIR/hermes/docker-compose.hermes.yml")
 
 # Container names (not compose service names) that write durable state.
 APP_CONTAINERS=(open-webui hermes-agent)
@@ -171,17 +191,18 @@ mark_incomplete() {
 # hermes_data is written by the Hermes container, so every path discovered
 # beneath it is attacker-controlled. Before such a path is used for ANY copy or
 # sqlite3 call it must pass this allow-list:
-#   * the absolute path starts with "$REPO_DIR/" (so the "$db" -> rel
+#   * the absolute path starts with "$HYBRID_AI_DATA_DIR/" (so the "$db" -> rel
 #     derivation below is exact and can never escape via "..")
-#   * the whole repo-relative path matches ^([A-Za-z0-9._@+-]+/)*[A-Za-z0-9._@+-]+$
+#   * the whole data-relative path matches ^([A-Za-z0-9._@+-]+/)*[A-Za-z0-9._@+-]+$
 #   * no component is "." or ".."
 #   * no component starts with "-" (so it can never be read as an option)
-# The absolute prefix ("$REPO_DIR") is not inspected: it is ours, not the
-# container's. A rejected path is counted only -- its raw name is NEVER logged.
+# The absolute prefix ("$HYBRID_AI_DATA_DIR") is not inspected: it is ours, not
+# the container's. A rejected path is counted only -- its raw name is NEVER
+# logged.
 valid_rel_path() {
   local abs="$1" rel
-  [[ "$abs" == "${REPO_DIR}/"* ]] || return 1
-  rel="${abs#"${REPO_DIR}/"}"
+  [[ "$abs" == "${HYBRID_AI_DATA_DIR}/"* ]] || return 1
+  rel="${abs#"${HYBRID_AI_DATA_DIR}/"}"
   [[ -n "$rel" ]] || return 1
   # Match the ENTIRE path against one anchored regex. The char class cannot
   # match a quote, a newline, a '*', a '?' or a space, so a component cannot
@@ -314,7 +335,7 @@ cold_copy_db() {
   local db="$1"
   SNAPSHOT_REL=""
   valid_rel_path "$db" || return 3
-  SNAPSHOT_REL="${db#"${REPO_DIR}/"}"
+  SNAPSHOT_REL="${db#"${HYBRID_AI_DATA_DIR}/"}"
   [[ -f "$db" && ! -L "$db" ]] || return 1
   classify_db_file "$db" || return 1
   (( DB_IS_SQLITE )) || return 2
@@ -445,10 +466,10 @@ fi
 # here because live SQLite is captured as a consistent snapshot instead (see
 # discover_databases below), never copied while in use.
 # ---------------------------------------------------------------------------
-HERMES_DATA="${REPO_DIR}/hermes_data"
+HERMES_DATA="${HYBRID_AI_DATA_DIR}/hermes_data"
 WEBUI_DB_PATHS=(
-  "${REPO_DIR}/webui_data/webui.db"
-  "${REPO_DIR}/webui_data/vector_db/chroma.sqlite3"
+  "${HYBRID_AI_DATA_DIR}/webui_data/webui.db"
+  "${HYBRID_AI_DATA_DIR}/webui_data/vector_db/chroma.sqlite3"
 )
 HERMES_EXCLUDES=(
   'tools/' 'hermes-agent/' 'installs/' 'cache/' 'image_cache/' 'audio_cache/'
@@ -522,7 +543,7 @@ snapshot_one_db() {
   if ! valid_rel_path "$db"; then
     return 3
   fi
-  rel="${db#"${REPO_DIR}/"}"
+  rel="${db#"${HYBRID_AI_DATA_DIR}/"}"
   SNAPSHOT_REL="$rel"
   target="${STAGING_DIR}/databases/${rel}"
 
@@ -650,20 +671,20 @@ rsync_classify() {
   fi
 }
 
-if [[ -d "${REPO_DIR}/webui_data/uploads" ]]; then
+if [[ -d "${HYBRID_AI_DATA_DIR}/webui_data/uploads" ]]; then
   mkdir -p "${STAGING_DIR}/files/webui_data/uploads"
-  rc=0; rsync -a "${REPO_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || rc=$?
+  rc=0; rsync -a "${HYBRID_AI_DATA_DIR}/webui_data/uploads/" "${STAGING_DIR}/files/webui_data/uploads/" 2>/dev/null || rc=$?
   rsync_classify "$rc" "Open WebUI uploads" "webui_uploads"
 fi
 
-if [[ -d "${REPO_DIR}/webui_data/vector_db" ]]; then
+if [[ -d "${HYBRID_AI_DATA_DIR}/webui_data/vector_db" ]]; then
   mkdir -p "${STAGING_DIR}/files/webui_data/vector_db"
   rc=0
   rsync -a \
     --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
     --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*.db-journal' \
     --exclude='*-wal' --exclude='*-shm' \
-    "${REPO_DIR}/webui_data/vector_db/" "${STAGING_DIR}/files/webui_data/vector_db/" 2>/dev/null || rc=$?
+    "${HYBRID_AI_DATA_DIR}/webui_data/vector_db/" "${STAGING_DIR}/files/webui_data/vector_db/" 2>/dev/null || rc=$?
   rsync_classify "$rc" "Open WebUI vector data" "webui_vector_db"
 fi
 
@@ -683,21 +704,21 @@ if [[ -d "$HERMES_DATA" ]]; then
   unset HERMES_RSYNC_EXCL
 fi
 
-if [[ -d "${HOME}/.hermes" ]]; then
+if [[ -d "${HYBRID_AI_HERMES_HOME_DIR}" ]]; then
   rc=0
   rsync -a \
     --exclude='cache/' --exclude='tools/' --exclude='installs/' \
     --exclude='node_modules/' --exclude='.git/' --exclude='venv/' --exclude='.venv/' \
     --exclude='__pycache__/' --exclude='*.pyc' \
     --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
-    "${HOME}/.hermes/" "${STAGING_DIR}/hermes/" 2>/dev/null || rc=$?
+    "${HYBRID_AI_HERMES_HOME_DIR}/" "${STAGING_DIR}/hermes/" 2>/dev/null || rc=$?
   rsync_classify "$rc" "the .hermes durable state" "dot_hermes"
 fi
 
-if [[ -d "${HOME}/.openhands" ]]; then
+if [[ -d "${OPENHANDS_STATE_DIR}" ]]; then
   rc=0
   rsync -a --exclude='cache/' --exclude='tmp/' --exclude='logs/' \
-    "${HOME}/.openhands/" "${STAGING_DIR}/openhands/" 2>/dev/null || rc=$?
+    "${OPENHANDS_STATE_DIR}/" "${STAGING_DIR}/openhands/" 2>/dev/null || rc=$?
   rsync_classify "$rc" "OpenHands state" "openhands"
 fi
 
@@ -773,31 +794,31 @@ if is_running ollama; then
   OLLAMA_MODEL_COUNT="$(wc -l < "${HOST_DIR}/ollama-models.txt" 2>/dev/null | tr -d ' ')"
 fi
 
-if [[ -f "${REPO_DIR}/.env" ]]; then
+if [[ -f "${HYBRID_AI_ENV_FILE}" ]]; then
   "${COMPOSE[@]}" config --images > "${HOST_DIR}/container-images.txt" 2>/dev/null || true
 fi
 
 for f in docker-compose.yml docker-compose.override.yml; do
-  if [[ -f "${REPO_DIR}/${f}" ]]; then
-    cp -a "${REPO_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
+  if [[ -f "${HYBRID_AI_APP_DIR}/${f}" ]]; then
+    cp -a "${HYBRID_AI_APP_DIR}/${f}" "${HOST_DIR}/${f}" 2>/dev/null || true
   fi
 done
 
 for d in openwebui openhands hermes scripts status; do
-  if [[ -d "${REPO_DIR}/${d}" ]]; then
+  if [[ -d "${HYBRID_AI_APP_DIR}/${d}" ]]; then
     mkdir -p "${HOST_DIR}/${d}"
-    cp -a "${REPO_DIR}/${d}/." "${HOST_DIR}/${d}/" 2>/dev/null || true
+    cp -a "${HYBRID_AI_APP_DIR}/${d}/." "${HOST_DIR}/${d}/" 2>/dev/null || true
   fi
 done
 
-if command -v git >/dev/null 2>&1 && [[ -d "${REPO_DIR}/.git" ]]; then
+if command -v git >/dev/null 2>&1 && [[ -d "${HYBRID_AI_APP_DIR}/.git" ]]; then
   {
-    printf 'commit=%s\n' "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-    printf 'branch=%s\n' "$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-    printf 'remote=%s\n' "$(git -C "$REPO_DIR" config --get remote.origin.url 2>/dev/null || echo none)"
-    printf 'dirty=%s\n'  "$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    printf 'commit=%s\n' "$(git -C "$HYBRID_AI_APP_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf 'branch=%s\n' "$(git -C "$HYBRID_AI_APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    printf 'remote=%s\n' "$(git -C "$HYBRID_AI_APP_DIR" config --get remote.origin.url 2>/dev/null || echo none)"
+    printf 'dirty=%s\n'  "$(git -C "$HYBRID_AI_APP_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   } > "${HOST_DIR}/git-state.txt" 2>/dev/null || true
-  git -C "$REPO_DIR" diff HEAD > "${HOST_DIR}/uncommitted.patch" 2>/dev/null || true
+  git -C "$HYBRID_AI_APP_DIR" diff HEAD > "${HOST_DIR}/uncommitted.patch" 2>/dev/null || true
   [[ -s "${HOST_DIR}/uncommitted.patch" ]] || rm -f "${HOST_DIR}/uncommitted.patch"
 fi
 
@@ -847,8 +868,8 @@ MANIFEST
 # ---------------------------------------------------------------------------
 # STEP 6. Stage the configuration file
 # ---------------------------------------------------------------------------
-if [[ -f "${REPO_DIR}/.env" ]]; then
-  cp -a "${REPO_DIR}/.env" "${STAGING_DIR}/env/.env"
+if [[ -f "${HYBRID_AI_ENV_FILE}" ]]; then
+  cp -a "${HYBRID_AI_ENV_FILE}" "${STAGING_DIR}/env/.env"
   chmod 600 "${STAGING_DIR}/env/.env"
 fi
 

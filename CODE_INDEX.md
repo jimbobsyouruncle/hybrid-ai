@@ -29,6 +29,7 @@
 - validate
 
 ## backup/backup.sh
+- path_within()
 - log()
 - ok()
 - warn()
@@ -56,6 +57,7 @@
 - upload_backup()
 
 ## backup/restore.sh
+- path_within()
 - log()
 - ok()
 - warn()
@@ -213,6 +215,15 @@
 ## scripts/deploy-remote.sh
 - (no symbols)
 
+## scripts/lib/hybrid-ai-env.sh
+- _hybrid_ai_canon()
+- _hybrid_ai_expand_tilde()
+- _hybrid_ai_file_get()
+- _hybrid_ai_validate_path()
+- _hybrid_ai_resolve_path()
+- _hybrid_ai_resolve_scalar()
+- hybrid_ai_env_load()
+
 ## scripts/setup-agent-workspace.sh
 - log()
 - ok()
@@ -285,6 +296,14 @@
 - run_check()
 - pass()
 - fail()
+
+## scripts/test-hybrid-ai-env.sh
+- ok()
+- bad()
+- check()
+- assert()
+- resolve()
+- resolve_rc()
 
 ## scripts/test-sync-agent-repos.sh
 - pass()

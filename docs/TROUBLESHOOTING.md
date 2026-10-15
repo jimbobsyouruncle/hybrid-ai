@@ -147,6 +147,26 @@ Warnings (`exit 1`) never fail the deploy. If you want to silence one, fix the u
 
 ---
 
+## Relocated paths (split layout)
+
+Every host path resolves through `scripts/lib/hybrid-ai-env.sh`. If you set
+`HYBRID_AI_APP_DIR`, `HYBRID_AI_ENV_FILE`, `HYBRID_AI_DATA_DIR`,
+`HYBRID_AI_LOG_DIR` or `HYBRID_AI_WORK_DIR` (in the environment or the env file),
+a mistake shows up as one of these:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `hybrid-ai-env: ... must be an absolute path` (or whitespace / `:` / `,` / `/`) | A relocated path is relative or contains a forbidden character | Use a plain absolute path. The helper refuses the value rather than guessing |
+| `doctor.sh` prints `<NAME> = <path>` then warns it does not exist | The setting is named but the directory was never created | Create the directory, or unset the setting to fall back to the default |
+| Compose cannot find the env file | `HYBRID_AI_ENV_FILE` moves with the app; the bind sources still read the env file at `HYBRID_AI_APP_DIR/.env` when it is unset | Point `HYBRID_AI_ENV_FILE` at the file your scripts and compose both read |
+| `BACKUP_CONF_DIR is inside ...` | Backup credentials were placed inside the app, data or work tree | Move `BACKUP_CONF_DIR` outside every relocated tree |
+| `OPENHANDS_WORKSPACE is ... a protected directory` | The workspace is, is inside, or contains a relocated tree | Use a sibling path outside every tree that holds credentials or state |
+
+`./doctor.sh` is the quick check: it prints each resolved path (never a value from the env
+file) and warns about any set path that does not exist.
+
+---
+
 ## Manual triage
 
 If you prefer to check by hand, or `doctor.sh` itself will not run, these five commands isolate the failing layer. The first one that fails tells you which section to read.
@@ -963,9 +983,13 @@ Both the installer and the pod emit structured, greppable records of what happen
 
 | Log | Location | Contents |
 |---|---|---|
-| Installer | `install.log` on the Pi (gitignored, mode 0600) | One entry per `install.sh` run |
+| Installer | `${HYBRID_AI_LOG_DIR:-.}/install.log` on the Pi (gitignored, mode 0600) | One entry per `install.sh` run |
+| Backup | `${HYBRID_AI_LOG_DIR:-.}/backup.log` on the Pi | One entry per backup/restore run |
 | Pod | `/var/log/hybrid-ai-events.log` and the RunPod console | Pod lifecycle, watchdog, vLLM health |
 | Pipe | `docker compose logs open-webui` | Per-request outcomes |
+
+Each path is resolved by `scripts/lib/hybrid-ai-env.sh`. With no settings the
+default is the deployment directory.
 
 ### Pod events
 

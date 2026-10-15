@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# FILE: scripts/test-hybrid-ai-env.sh
+# PURPOSE (plain English):
+#   Checks the ONE shared path helper, scripts/lib/hybrid-ai-env.sh, and the
+#   isolation guards the scripts build on it. Fully OFFLINE: it needs no Docker,
+#   no sqlite3, no rsync and no restic. It runs on any host with bash.
+#
+#   It proves four things:
+#     1. With no settings, every resolved path equals today's default.
+#     2. A value in the env file is treated as DATA and never executed.
+#     3. Every value the helper must refuse is refused (non-zero exit).
+#     4. The isolation guards refuse every forbidden target.
+#   It also greps the tracked scripts to prove no path bypasses the helper.
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+# Ambient settings must never leak into the "defaults" assertions. Clear every
+# setting the helper resolves so the test is deterministic on any host (a CI
+# runner, a developer shell with OPENHANDS_WORKSPACE exported, and so on).
+unset HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR HYBRID_AI_LOG_DIR \
+      HYBRID_AI_WORK_DIR HYBRID_AI_UID HYBRID_AI_GID OPENHANDS_WORKSPACE \
+      AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR RESTIC_CACHE_DIR \
+      BACKUP_LOG 2>/dev/null || true
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd -- "${HERE}/.." && pwd)"
+HELPER="${REPO}/scripts/lib/hybrid-ai-env.sh"
+
+TMPROOT="$(mktemp -d)"
+trap 'rm -rf "$TMPROOT"' EXIT
+
+PASS=0
+FAIL=0
+ok()   { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
+bad()  { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
+check() { # desc expected actual
+  if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi
+}
+assert() { # desc command...
+  local d="$1"; shift
+  if "$@"; then ok "$d"; else bad "$d"; fi
+}
+
+# Run the helper in a fresh shell with a given env file and extra env, and
+# print the value of one resolved variable on stdout. Non-zero exit on refusal.
+resolve() { # envfile var [extra K=V ...]
+  local envfile="$1" var="$2"; shift 2
+  env "$@" HYBRID_AI_ENV_FILE="$envfile" bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$$var\""
+}
+
+# Run the helper and return its exit code only.
+resolve_rc() { # envfile [extra K=V ...]
+  local envfile="$1"; shift
+  env "$@" HYBRID_AI_ENV_FILE="$envfile" bash -c "source '$HELPER'" >/dev/null 2>&1
+  return $?
+}
+
+# ---------------------------------------------------------------------------
+# 1. Defaults equal today's paths
+# ---------------------------------------------------------------------------
+echo "== defaults =="
+EMPTY="${TMPROOT}/empty.env"
+: > "$EMPTY"
+
+check "APP_DIR default is the repo dir" "$REPO" "$(resolve "$EMPTY" HYBRID_AI_APP_DIR)"
+# ENV_FILE default depends on APP_DIR, so resolve it with a fresh APP_DIR and NO
+# explicit HYBRID_AI_ENV_FILE.
+DEFAULT_APPD="${TMPROOT}/default-app"
+mkdir -p "$DEFAULT_APPD"
+check "ENV_FILE default is APP_DIR/.env" "${DEFAULT_APPD}/.env" \
+  "$(env HYBRID_AI_APP_DIR="$DEFAULT_APPD" bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_ENV_FILE\"")"
+check "DATA_DIR default is the repo dir" "$REPO" "$(resolve "$EMPTY" HYBRID_AI_DATA_DIR)"
+check "LOG_DIR default is the repo dir" "$REPO" "$(resolve "$EMPTY" HYBRID_AI_LOG_DIR)"
+check "WORK_DIR default is the repo dir" "$REPO" "$(resolve "$EMPTY" HYBRID_AI_WORK_DIR)"
+check "hermes_data keeps its name" "${REPO}/hermes_data" "$(resolve "$EMPTY" HYBRID_AI_HERMES_DATA_DIR)"
+check "webui_data keeps its name" "${REPO}/webui_data" "$(resolve "$EMPTY" HYBRID_AI_WEBUI_DATA_DIR)"
+check "ollama_data keeps its name" "${REPO}/ollama_data" "$(resolve "$EMPTY" HYBRID_AI_OLLAMA_DATA_DIR)"
+check "install.log default" "${REPO}/install.log" "$(resolve "$EMPTY" HYBRID_AI_INSTALL_LOG)"
+check "backup.log default" "${REPO}/backup.log" "$(resolve "$EMPTY" BACKUP_LOG)"
+check "staging default" "${REPO}/.backup-staging" "$(resolve "$EMPTY" HYBRID_AI_BACKUP_STAGING_DIR)"
+check "restore work default" "${REPO}/.restore-work" "$(resolve "$EMPTY" HYBRID_AI_RESTORE_WORK_DIR)"
+check "OPENHANDS_WORKSPACE default" "$HOME/hybrid-ai-agent" "$(resolve "$EMPTY" OPENHANDS_WORKSPACE)"
+check "AGENT_REPOS_DIR default" "$HOME/hybrid-ai-repos" "$(resolve "$EMPTY" AGENT_REPOS_DIR)"
+check "OPENHANDS_STATE_DIR default" "$HOME/.openhands" "$(resolve "$EMPTY" OPENHANDS_STATE_DIR)"
+check "BACKUP_CONF_DIR default" "$HOME/.config/hybrid-ai-backup" "$(resolve "$EMPTY" BACKUP_CONF_DIR)"
+check "RESTIC_CACHE_DIR default" "$HOME/.cache/restic" "$(resolve "$EMPTY" RESTIC_CACHE_DIR)"
+check "UID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_UID)"
+check "GID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_GID)"
+
+# ---------------------------------------------------------------------------
+# 2. A value in the env file is DATA, not code
+# ---------------------------------------------------------------------------
+echo "== env file is never executed =="
+MARKER="${TMPROOT}/PWNED"
+PWN_ENV="${TMPROOT}/pwn.env"
+printf 'HYBRID_AI_DATA_DIR=$(touch %s; echo /tmp/should_not_appear)\n' "$MARKER" > "$PWN_ENV"
+resolve "$PWN_ENV" HYBRID_AI_DATA_DIR >/dev/null 2>&1 || true
+assert "a \$(...) in the env file is NOT executed" bash -c "[[ ! -e '$MARKER' ]]"
+
+# The same, with a command substitution that has no spaces, must be accepted as
+# a literal path and still not run.
+LITERAL_ENV="${TMPROOT}/lit.env"
+printf 'HYBRID_AI_DATA_DIR=/tmp/hai$(whoami)\n' > "$LITERAL_ENV"
+GOT="$(resolve "$LITERAL_ENV" HYBRID_AI_DATA_DIR 2>/dev/null || true)"
+check "a command substitution is kept literally" '/tmp/hai$(whoami)' "$GOT"
+assert "still not executed when accepted" bash -c "[[ ! -e '$MARKER' ]]"
+
+# ---------------------------------------------------------------------------
+# 3. Every refused value is refused (AC2)
+# ---------------------------------------------------------------------------
+echo "== refused values =="
+REFUSE_CASES=(
+  "relative|sub/dir"
+  "whitespace|/tmp/a b"
+  "control-char|/tmp/a$(printf '\001')b"
+  "colon|/tmp/a:b"
+  "comma|/tmp/a,b"
+  "root-slash|/"
+)
+for case in "${REFUSE_CASES[@]}"; do
+  name="${case%%|*}"; val="${case#*|}"
+  f="${TMPROOT}/refuse_${name}.env"
+  printf 'HYBRID_AI_DATA_DIR=%s\n' "$val" > "$f"
+  if resolve_rc "$f"; then
+    bad "refused '${name}' value (helper accepted it)"
+  else
+    ok "refused '${name}' value"
+  fi
+done
+
+# A valid absolute value IS accepted.
+GOOD_ENV="${TMPROOT}/good.env"
+printf 'HYBRID_AI_DATA_DIR=/tmp/hai-ok\n' > "$GOOD_ENV"
+check "accepts a valid absolute value" "/tmp/hai-ok" "$(resolve "$GOOD_ENV" HYBRID_AI_DATA_DIR)"
+
+# ---------------------------------------------------------------------------
+# 4. Isolation guards (AC6)
+# ---------------------------------------------------------------------------
+echo "== isolation guards =="
+
+# Build a scratch "app" with the helper and the two guard scripts.
+APPD="${TMPROOT}/app"
+mkdir -p "${APPD}/scripts/lib" "${APPD}/backup" "${APPD}/openhands" "${APPD}/hermes"
+cp "$HELPER" "${APPD}/scripts/lib/"
+cp "${REPO}/scripts/setup-agent-workspace.sh" "${APPD}/scripts/"
+cp "${REPO}/scripts/sync-agent-repos.sh" "${APPD}/scripts/"
+cp "${REPO}/backup/backup.sh" "${APPD}/backup/"
+cp "${REPO}/backup/restore.sh" "${APPD}/backup/"
+: > "${APPD}/docker-compose.yml"
+
+DATAD="${TMPROOT}/data"; LOGD="${TMPROOT}/log"; WORKD="${TMPROOT}/work"
+CONFD_GOOD="${TMPROOT}/conf-good"; CONFD_BAD="${TMPROOT}/conf-bad"
+mkdir -p "$DATAD" "$LOGD" "$WORKD" "$CONFD_GOOD" "$CONFD_BAD/inside-app"
+mkdir -p "${TMPROOT}/etc"
+ENVF="${TMPROOT}/etc/env"; : > "$ENVF"
+
+# A helper env shared by the guard runs, relocating every tree.
+GUARD_ENV=(HOME="$TMPROOT/home" HYBRID_AI_APP_DIR="$APPD" HYBRID_AI_ENV_FILE="$ENVF"
+           HYBRID_AI_DATA_DIR="$DATAD" HYBRID_AI_LOG_DIR="$LOGD" HYBRID_AI_WORK_DIR="$WORKD"
+           BACKUP_CONF_DIR="$CONFD_GOOD")
+mkdir -p "${TMPROOT}/home"
+
+# --- setup-agent-workspace.sh refuses a workspace in a protected tree --------
+guarded_targets=(
+  "$APPD"                    # the app dir
+  "${APPD}/child"            # inside the app dir
+  "$DATAD"                   # the data dir
+  "${DATAD}/child"           # inside the data dir
+  "$LOGD"                    # the log dir
+  "$WORKD"                   # the work dir
+  "${TMPROOT}/etc"           # the directory the env file lives in
+  "$CONFD_GOOD"              # the backup credential directory
+  "${TMPROOT}"               # contains every protected dir
+)
+for t in "${guarded_targets[@]}"; do
+  if env "${GUARD_ENV[@]}" OPENHANDS_WORKSPACE="$t" \
+       bash "${APPD}/scripts/setup-agent-workspace.sh" --non-interactive >/dev/null 2>&1; then
+    bad "setup-agent-workspace refused workspace '${t}'"
+  else
+    ok "setup-agent-workspace refused workspace '${t}'"
+  fi
+done
+
+# --- setup-agent-workspace.sh does NOT refuse a clean sibling -----------------
+# The guard must not fire for a path outside every protected tree. --check also
+# fails when no clone exists; we assert only that the GUARD did not fire.
+MSG="$(env "${GUARD_ENV[@]}" OPENHANDS_WORKSPACE="${TMPROOT}/agent-ws" \
+      bash "${APPD}/scripts/setup-agent-workspace.sh" --check 2>&1 || true)"
+if [[ "$MSG" == *"protected directory"* || "$MSG" == *"workspace containment"* ]]; then
+  bad "setup-agent-workspace wrongly refused a clean sibling"
+else
+  ok "setup-agent-workspace did not fire the guard for a clean sibling"
+fi
+
+# --- sync-agent-repos.sh refuses a tree in a protected target ----------------
+for t in "$APPD" "${APPD}/repos" "$DATAD" "$LOGD" "$WORKD" "${TMPROOT}/etc" \
+         "$CONFD_GOOD" "${TMPROOT}"; do
+  if env "${GUARD_ENV[@]}" AGENT_REPOS_DIR="$t" \
+       bash "${APPD}/scripts/sync-agent-repos.sh" --dry-run >/dev/null 2>&1; then
+    bad "sync-agent-repos refused AGENT_REPOS_DIR '${t}'"
+  else
+    ok "sync-agent-repos refused AGENT_REPOS_DIR '${t}'"
+  fi
+done
+
+# --- backup.sh / restore.sh refuse a BACKUP_CONF_DIR inside the trees --------
+for script in backup/backup.sh backup/restore.sh; do
+  for t in "$APPD" "$DATAD" "$WORKD"; do
+    if env "${GUARD_ENV[@]}" BACKUP_CONF_DIR="$t" \
+         bash "${APPD}/${script}" --dry-run >/dev/null 2>&1; then
+      bad "${script} refused BACKUP_CONF_DIR inside '${t}'"
+    else
+      ok "${script} refused BACKUP_CONF_DIR inside '${t}'"
+    fi
+  done
+done
+
+# ---------------------------------------------------------------------------
+# 5. No path bypasses the helper (AC3 grep)
+# ---------------------------------------------------------------------------
+echo "== no bypassing paths =="
+# Search every tracked shell script EXCEPT the helper and this test for the
+# forbidden constructs: a repo-relative data/log/env path, a bare --env-file .env,
+# or a $HOME-derived state/data path.
+BYPASS_FILES="$(cd "$REPO" && git ls-files '*.sh' | grep -vE '^(scripts/lib/hybrid-ai-env\.sh|scripts/test-hybrid-ai-env\.sh)$')"
+HITS="$(cd "$REPO" && printf '%s\n' $BYPASS_FILES | while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  grep -nE '\$\{REPO_DIR\}|\$\{SCRIPT_DIR\}/\.env|--env-file [.]env|\$\{HOME\}/\.openhands|\$\{HOME\}/\.hermes|\$\{HOME\}/\.config/hybrid-ai-backup|\$\{HOME\}/\.cache/restic' "$f" 2>/dev/null | sed "s|^|$f:|"
+done)"
+if [[ -z "$HITS" ]]; then
+  ok "no repo-relative, SCRIPT_DIR, HOME-derived, or bare --env-file paths remain"
+else
+  bad "found paths that bypass the helper:"
+  printf '%s\n' "$HITS" >&2
+fi
+
+# ---------------------------------------------------------------------------
+echo
+if (( FAIL != 0 )); then
+  printf 'FAILED: %d of %d checks\n' "$FAIL" "$(( PASS + FAIL ))" >&2
+  exit 1
+fi
+printf 'All %d hybrid-ai-env checks passed.\n' "$PASS"

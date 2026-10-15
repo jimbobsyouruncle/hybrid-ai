@@ -17,28 +17,28 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../scripts/lib" && pwd)"
+# shellcheck source=../../scripts/lib/hybrid-ai-env.sh
+source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
+ROOT="$HYBRID_AI_APP_DIR"
+ENV_FILE="$HYBRID_AI_ENV_FILE"
 cd "$ROOT"
 
-[[ -f .env ]] || { echo "Missing .env. Run ./install.sh first." >&2; exit 1; }
+[[ -f "$ENV_FILE" ]] || { echo "Missing env file ($ENV_FILE). Run ./install.sh first." >&2; exit 1; }
 
 COMPOSE=(docker compose
-         -f docker-compose.yml
-         -f openhands/docker-compose.openhands.yml
-         -f hermes/docker-compose.hermes.yml
-         --env-file .env)
+         --env-file "$ENV_FILE"
+         --project-directory "$ROOT"
+         -f "$ROOT/docker-compose.yml"
+         -f "$ROOT/openhands/docker-compose.openhands.yml"
+         -f "$ROOT/hermes/docker-compose.hermes.yml")
 
-# Read the configured workspace for display. Parsed line by line, never
-# sourced -- sourcing executes the file as shell code.
+# The configured workspace is resolved by the shared helper (parsed from the env
+# file line by line, never sourced). Print the resolved path for display.
 workspace() {
-  local line v
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^OPENHANDS_WORKSPACE=(.*)$ ]]; then
-      v="${BASH_REMATCH[1]}"; v="${v%\"}"; v="${v#\"}"
-      printf '%s' "$v"; return
-    fi
-  done < .env
-  printf '(unset)'
+  printf '%s' "${OPENHANDS_WORKSPACE:-(unset)}"
 }
 
 case "${1:-status}" in

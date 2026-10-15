@@ -82,16 +82,26 @@ jobs:
         # offline: restic, docker and systemctl are stubbed on PATH.
         run: bash scripts/test-backup.sh
 
+      - name: Shared path helper tests
+        # Offline. Proves defaults equal today's paths, that an env-file value
+        # is parsed and never executed, that every refused value is refused,
+        # and that every isolation case is refused.
+        run: bash scripts/test-hybrid-ai-env.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
-        # validates structure without starting anything.
+        # validates structure without starting anything. The bind sources are
+        # rendered TWICE below: once with the path settings unset (so the
+        # sources default to the project directory) and once with them set to a
+        # temp tree (so the sources move under it).
         run: |
           set -a
           TAILSCALE_IP=100.64.0.1 RUNPOD_API_KEY=x \
           RUNPOD_POD_ID=x WEBUI_SECRET_KEY=x STATUS_UID=1000 DOCKER_GID=999 \
           OLLAMA_MEM_LIMIT=8g WEBUI_MEM_LIMIT=3g OLLAMA_CPUS=3.5 WEBUI_CPUS=2.0 \
           LOCAL_DOMAIN=example.test OPENHANDS_SANDBOX_HOST=example.test \
-          OPENHANDS_WORKSPACE=/tmp/agent-workspace
+          OPENHANDS_WORKSPACE=/tmp/agent-workspace \
+          OPENHANDS_STATE_DIR=/tmp/openhands-state
           set +a
           docker compose -f docker-compose.yml config --quiet
           # The overlays are deployed on every install but were never validated
@@ -102,6 +112,33 @@ jobs:
                          -f openhands/docker-compose.openhands.yml \
                          -f hermes/docker-compose.hermes.yml \
                          config --quiet
+
+          # --- Unset: bind sources are the project directory ------------------
+          # Render ALL three files: hermes_data is bound by the Hermes overlay.
+          RENDER_UNSET="$(docker compose -f docker-compose.yml \
+                                         -f openhands/docker-compose.openhands.yml \
+                                         -f hermes/docker-compose.hermes.yml config)"
+          printf '%s\n' "$RENDER_UNSET" | grep -q "source: $PWD/hermes_data" \
+            || { echo "::error::unset HYBRID_AI_DATA_DIR did not default to \$PWD/hermes_data"; exit 1; }
+          printf '%s\n' "$RENDER_UNSET" | grep -q "source: $PWD/webui_data" \
+            || { echo "::error::unset HYBRID_AI_DATA_DIR did not default to \$PWD/webui_data"; exit 1; }
+          printf '%s\n' "$RENDER_UNSET" | grep -q "source: $PWD/backup.log" \
+            || { echo "::error::unset HYBRID_AI_LOG_DIR did not default to \$PWD/backup.log"; exit 1; }
+
+          # --- Set to a temp tree: bind sources move under it -----------------
+          TMPTREE="$(mktemp -d)"
+          export HYBRID_AI_DATA_DIR="$TMPTREE/data" HYBRID_AI_LOG_DIR="$TMPTREE/log"
+          RENDER_SET="$(docker compose -f docker-compose.yml \
+                                       -f openhands/docker-compose.openhands.yml \
+                                       -f hermes/docker-compose.hermes.yml config)"
+          printf '%s\n' "$RENDER_SET" | grep -q "source: $TMPTREE/data/hermes_data" \
+            || { echo "::error::HYBRID_AI_DATA_DIR was not honoured"; exit 1; }
+          printf '%s\n' "$RENDER_SET" | grep -q "source: $TMPTREE/data/webui_data" \
+            || { echo "::error::HYBRID_AI_DATA_DIR was not honoured"; exit 1; }
+          printf '%s\n' "$RENDER_SET" | grep -q "source: $TMPTREE/log/backup.log" \
+            || { echo "::error::HYBRID_AI_LOG_DIR was not honoured"; exit 1; }
+          rm -rf "$TMPTREE"
+          echo "Compose renders under both the default and a split layout."
 
       - name: Assert proxy allowlist is intact
         # A future edit could remove `import trusted_only` from a sensitive

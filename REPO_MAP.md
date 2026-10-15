@@ -87,7 +87,11 @@
 - scripts/test-check-git-remotes.sh
 - scripts/test-deploy-remote.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
+- scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
+## scripts/lib
+
+- scripts/lib/hybrid-ai-env.sh - FILE: scripts/lib/hybrid-ai-env.sh
 ## status
 
 - status/Caddyfile

@@ -151,7 +151,34 @@ restic has no recovery mechanism. If the drive dies and the password dies with i
 
 **Deliberately outside the git repository.** No `git add`, no stray `tar czf` of the project folder, and no CI checkout can sweep them up. They are also kept separate from `.env`, so a compromise of the application stack does not automatically hand over the ability to destroy your backup history.
 
-Both scripts **refuse to run** if either file is not mode 0600.
+Both scripts **refuse to run** if either file is not mode 0600. They also
+**refuse to run** when `BACKUP_CONF_DIR` is, or is inside, `HYBRID_AI_APP_DIR`,
+`HYBRID_AI_DATA_DIR` or `HYBRID_AI_WORK_DIR`: a credential directory inside one
+of those trees would be swept up by a git operation or by the very data a
+restore writes.
+
+---
+
+## Where the data lives
+
+Both scripts take every host path from the shared helper
+`scripts/lib/hybrid-ai-env.sh`. With no settings the layout is exactly the
+default. When `HYBRID_AI_DATA_DIR` and `HYBRID_AI_WORK_DIR` move, the snapshot
+layout does **not** change: the manifest is still "layout v2", with paths
+relative to `HYBRID_AI_DATA_DIR` and the same names. A snapshot taken before a
+relocation restores into the split layout.
+
+| Setting | Used for | Default |
+|---|---|---|
+| `HYBRID_AI_DATA_DIR` | the data being backed up (`webui_data/`, `hermes_data/`, `ollama_data/`) | the repo directory |
+| `HYBRID_AI_LOG_DIR` | `backup.log` | the repo directory |
+| `HYBRID_AI_WORK_DIR` | `.backup-staging`, `.restore-work`, `.restore-test-*` | the repo directory |
+| `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env` |
+| `BACKUP_CONF_DIR` | the credentials above | `~/.config/hybrid-ai-backup` |
+| `RESTIC_CACHE_DIR` | the restic cache | `~/.cache/restic` |
+
+Pre-restore safety copies (`webui_data.pre-restore-*`,
+`hermes_data.pre-restore-*`) still stay beside the data, on the same filesystem.
 
 ---
 

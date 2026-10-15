@@ -160,7 +160,7 @@ It also means no build step: `app.py` is mounted read-only into the stock `pytho
 | Port 80 already in use | Another web server is running | `sudo ss -tlnp \| grep :80`; stop it, or change the published port in `docker-compose.yml` |
 | Containers show "not found" | Socket permissions | Confirm `DOCKER_GID` in `.env` matches `stat -c '%g' /var/run/docker.sock`, then re-run `./install.sh` |
 | Logs are empty on the page | The app cannot read the socket | Same as above — check `docker compose --env-file .env logs status` |
-| `backup.log` mounted as a directory | Docker created it before the file existed | `./install.sh` now detects and repairs this automatically |
+| `backup.log` mounted as a directory | Docker created it before the file existed | `./install.sh` now detects and repairs this automatically. The host side is `${HYBRID_AI_LOG_DIR:-.}/backup.log` |
 | Download button fails | The service errored while building | Check `docker compose --env-file .env logs status` |
 | Page loads but every check fails | The status container cannot reach the others | Confirm all are on the `hybrid-ai` network: `docker network inspect hybrid-ai` |
 

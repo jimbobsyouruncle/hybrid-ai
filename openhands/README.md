@@ -50,8 +50,10 @@ into the deployment directory when satisfied.
 ./scripts/setup-agent-workspace.sh --check
 ```
 
-The script refuses to proceed if the workspace is, or is inside, the deployment directory,
-and fails if a `.env` or log file is found in the clone.
+The script refuses to proceed if the workspace is, is inside, or contains any protected tree
+— `HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR`, `HYBRID_AI_LOG_DIR`, `HYBRID_AI_WORK_DIR`, the
+directory the env file lives in, or `BACKUP_CONF_DIR` — and fails if an env file or log file is
+found in the clone.
 
 On every run it also refreshes the existing clone, so the workspace-root copy of
 `openhands/AGENTS.md` stays current without a manual pull. The refresh fetches, then
@@ -125,7 +127,7 @@ control for a service that can execute arbitrary code as root.
 1. Run `./install.sh` — it creates the workspace clone and starts the service.
 2. Open OpenHands through the SSH tunnel.
 3. In **Settings → LLM**, choose a provider and model and enter the credential. It is stored
-   in `~/.openhands`, outside the repo and outside the sandbox.
+   in `${OPENHANDS_STATE_DIR}` (default `~/.openhands`), outside the repo and outside the sandbox.
 4. Start a conversation with: *"Read `/workspace/openhands/AGENTS.md` and follow it."* The
    file tells the agent to work in the job's own clone under `project/<repo-name>`, so the
    same instruction works for a job on any owned repository, not just hybrid-ai.
@@ -145,7 +147,8 @@ The short form works for `logs` and `ps`, which is what makes the exception dang
 **`up -d --remove-orphans` without the overlay deletes the OpenHands container**, because
 compose treats it as an orphan. `install.sh` uses `--remove-orphans` on every run.
 
-`scripts/openhands-control.sh` always passes both files. Prefer it:
+`scripts/openhands-control.sh` always passes both files, the resolved `--env-file`, and
+`--project-directory "$HYBRID_AI_APP_DIR"`. Prefer it:
 
 ```bash
 ./openhands/scripts/openhands-control.sh status
@@ -155,7 +158,7 @@ compose treats it as an orphan. `install.sh` uses `--remove-orphans` on every ru
 ./openhands/scripts/openhands-control.sh workspace   # refresh the clone
 ```
 
-State in `~/.openhands` survives container removal, so recovery is just `start` — but the
+State in `${OPENHANDS_STATE_DIR}` (default `~/.openhands`) survives container removal, so recovery is just `start` — but the
 surprise is worth avoiding.
 
 ---
@@ -204,7 +207,7 @@ Verify redaction before exposing a bundle to any cloud-hosted model.
 | No automatic merge | Agent stops after commit; branch protection on `main` |
 | Injection resistance | `AGENTS.md` classifies repo text and logs as untrusted data |
 | Resource bounded | Memory and CPU limits so agent work cannot starve chat |
-| Provider keys isolated | `~/.openhands`, mode 0700, outside repo and sandbox |
+| Provider keys isolated | `${OPENHANDS_STATE_DIR}` (default `~/.openhands`), mode 0700, outside repo and sandbox |
 
 **Residual risk, stated plainly:** the controller has Docker socket access, which is
 root-equivalent on this host. The workspace clone protects the *sandbox* — the part handling

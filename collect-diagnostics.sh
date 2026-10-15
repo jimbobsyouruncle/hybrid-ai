@@ -45,6 +45,13 @@ set -uo pipefail   # deliberately NOT -e: one failed probe must not abort the ru
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
+APP_DIR="$HYBRID_AI_APP_DIR"
+ENV_FILE="$HYBRID_AI_ENV_FILE"
+
 LOG_LINES=100
 REDACT=1
 OUTFILE=""
@@ -63,7 +70,7 @@ done
 
 HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo pi)"
 TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
-OUTFILE="${OUTFILE:-${SCRIPT_DIR}/diagnostics-${HOSTNAME_SHORT}-${TIMESTAMP}.txt}"
+OUTFILE="${OUTFILE:-${APP_DIR}/diagnostics-${HOSTNAME_SHORT}-${TIMESTAMP}.txt}"
 
 if [[ -t 1 ]]; then
   C_RST=$'\033[0m'; C_OK=$'\033[32m'; C_WRN=$'\033[33m'; C_INF=$'\033[36m'; C_ERR=$'\033[31m'
@@ -75,10 +82,11 @@ fi
 # OpenHands -- and a diagnostic bundle that omits a running service is worse
 # than one that says nothing about it, because it looks complete.
 COMPOSE=(docker compose
-         -f docker-compose.yml
-         -f openhands/docker-compose.openhands.yml
-         -f hermes/docker-compose.hermes.yml
-         --env-file .env)
+         --env-file "$ENV_FILE"
+         --project-directory "$APP_DIR"
+         -f "$APP_DIR/docker-compose.yml"
+         -f "$APP_DIR/openhands/docker-compose.openhands.yml"
+         -f "$APP_DIR/hermes/docker-compose.hermes.yml")
 
 # ---------------------------------------------------------------------------
 # THE REDACTION FILTER
@@ -268,14 +276,14 @@ note ""
 note "Values are NEVER shown. Each entry reports whether the key is set and"
 note "how long the value is, which is what actually matters for diagnosis."
 
-sub ".env"
+sub "$ENV_FILE"
 # NOTE: this whole block is wrapped in { ... } >> "$OUTFILE" so that every
 # printf lands in the report. Without the wrapper the output goes to the
 # terminal and this section silently comes out EMPTY -- which is exactly the
 # section you most need when diagnosing a configuration problem.
 {
-if [[ -f .env ]]; then
-  printf 'permissions: %s (expected 600)\n\n' "$(stat -c '%a' .env 2>/dev/null)"
+if [[ -f "$ENV_FILE" ]]; then
+  printf 'permissions: %s (expected 600)\n\n' "$(stat -c '%a' "$ENV_FILE" 2>/dev/null)"
 
   # Keys whose values are safe and useful to show verbatim.
   SAFE_KEYS="OLLAMA_NUM_PARALLEL|OLLAMA_MAX_LOADED_MODELS|OLLAMA_KEEP_ALIVE|OLLAMA_CONTEXT_LENGTH|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MEM_LIMIT|WEBUI_MEM_LIMIT|OLLAMA_CPUS|WEBUI_CPUS|WEBUI_AUTH|VLLM_PORT|VLLM_MODEL_NAME|POD_WARMUP_TIMEOUT|RAG_EMBEDDING_MODEL|ENABLE_OPENAI_API|SCARF_NO_ANALYTICS|DO_NOT_TRACK|ANONYMIZED_TELEMETRY|PEER_HOSTNAME|PEER_HOSTNAMES|OPENHANDS_PORT|OPENHANDS_IMAGE|OPENHANDS_AGENT_IMAGE_REPOSITORY|OPENHANDS_AGENT_IMAGE_TAG|OPENHANDS_LOG_ALL_EVENTS|OPENHANDS_MEM_LIMIT|OPENHANDS_CPUS|STATUS_UID|DOCKER_GID"
@@ -300,7 +308,7 @@ if [[ -f .env ]]; then
       elif [[ "$k" =~ ^(OPENHANDS_WORKSPACE|OPENHANDS_STATE_DIR)$ ]]; then
         # Path shape matters a great deal here: if the workspace IS the
         # deployment directory, the agent sandbox can read .env.
-        if [[ "$(readlink -f "$v" 2>/dev/null)" == "$(readlink -f "$SCRIPT_DIR")" ]]; then
+        if [[ "$(readlink -f "$v" 2>/dev/null)" == "$(readlink -f "$APP_DIR")" ]]; then
           printf '  %-32s <deployment dir>  <-- ISOLATION BROKEN, sandbox can read .env\n' "$k"
         else
           printf '  %-32s <set, outside the repo>\n' "$k"
@@ -309,14 +317,14 @@ if [[ -f .env ]]; then
         printf '  %-32s <REDACTED:length=%s>\n' "$k" "${#v}"
       fi
     fi
-  done < .env
+  done < "$ENV_FILE"
 else
-  printf '  .env NOT FOUND -- run ./install.sh\n'
+  printf '  env file NOT FOUND -- run ./install.sh\n'
 fi
 } 2>&1 | redact >> "$OUTFILE"
 
 sub "Backup credentials"
-BC="${HOME}/.config/hybrid-ai-backup"
+BC="$BACKUP_CONF_DIR"
 if [[ -d "$BC" ]]; then
   {
     for f in r2.env repo-password; do
@@ -338,10 +346,10 @@ fi
 
 sub "OpenHands credential store"
 {
-  if [[ -d "${HOME}/.openhands" ]]; then
-    printf '  ~/.openhands      present, permissions %s (expected 700)\n' "$(stat -c '%a' "${HOME}/.openhands" 2>/dev/null)"
+  if [[ -d "$OPENHANDS_STATE_DIR" ]]; then
+    printf '  OpenHands state   present, permissions %s (expected 700)\n' "$(stat -c '%a' "$OPENHANDS_STATE_DIR" 2>/dev/null)"
     printf '  contents          %s file(s) -- NOT read, only counted\n' \
-      "$(find "${HOME}/.openhands" -type f 2>/dev/null | wc -l | tr -d ' ')"
+      "$(find "$OPENHANDS_STATE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
   else
     printf '  ~/.openhands      not present (OpenHands not configured yet)\n'
   fi
@@ -403,15 +411,15 @@ sub "Errors and exceptions across all containers"
     | grep -iE 'error|exception|traceback|critical|fatal|refused|timeout|denied' \
     | tail -60 || printf '(none found)\n'; } | redact >> "$OUTFILE"
 
-run "install.sh events" bash -c "grep '^EVENT' install.log 2>/dev/null | tail -25 || echo '(no install.log)'"
+run "install.sh events" bash -c "grep '^EVENT' '$HYBRID_AI_INSTALL_LOG' 2>/dev/null | tail -25 || echo '(no install.log)'"
 
 sub "Scheduled job history (last outcome per job)"
 {
-  if [[ -f backup.log || -f install.log ]]; then
+  if [[ -f "$BACKUP_LOG" || -f "$HYBRID_AI_INSTALL_LOG" ]]; then
     for ev in backup_success backup_incomplete backup_failed check_success check_failed \
               restore_success restore_test_success restore_test_failed \
               retention_applied retention_failed install_success install_failed; do
-      line="$(grep "event=${ev}" backup.log install.log 2>/dev/null | tail -1)"
+      line="$(grep "event=${ev}" "$BACKUP_LOG" "$HYBRID_AI_INSTALL_LOG" 2>/dev/null | tail -1)"
       [[ -n "$line" ]] && printf '  %-24s %s\n' "$ev" "${line#*ts=}"
     done
   else
@@ -439,9 +447,9 @@ sub "Tailscale detail"
 
 sub "GPU pod reachability"
 {
-  if [[ -f .env ]]; then
-    TS_IP="$(grep -E '^TAILSCALE_IP=' .env 2>/dev/null | cut -d= -f2-)"
-    VP="$(grep -E '^VLLM_PORT=' .env 2>/dev/null | cut -d= -f2-)"; VP="${VP:-8000}"
+  if [[ -f "$ENV_FILE" ]]; then
+    TS_IP="$(grep -E '^TAILSCALE_IP=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+    VP="$(grep -E '^VLLM_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"; VP="${VP:-8000}"
     if [[ -n "$TS_IP" ]]; then
       printf 'probing http://<pod>:%s/v1/models ...\n' "$VP"
       if curl -fsS --max-time 8 "http://${TS_IP}:${VP}/v1/models" 2>&1 | jq -c '.data[].id' 2>/dev/null; then
@@ -452,7 +460,7 @@ sub "GPU pod reachability"
         printf '      The pod is stopped by design to avoid billing.\n'
       fi
     else
-      printf 'TAILSCALE_IP not set in .env\n'
+      printf 'TAILSCALE_IP not set in the env file\n'
     fi
   fi
 } 2>&1 | redact >> "$OUTFILE"
@@ -480,27 +488,27 @@ sec "8. DATA AND MODELS"
 note ""
 note "Sizes and counts only. No chat content, document text, or vectors are read."
 
-run "Data directory sizes" bash -c "du -sh webui_data ollama_data 2>/dev/null || echo 'not present'"
-run "webui_data layout"    bash -c "du -sh webui_data/* 2>/dev/null | sort -rh | head -15 || echo 'not present'"
+run "Data directory sizes" bash -c "du -sh '$HYBRID_AI_WEBUI_DATA_DIR' '$HYBRID_AI_OLLAMA_DATA_DIR' 2>/dev/null || echo 'not present'"
+run "webui_data layout"    bash -c "du -sh '$HYBRID_AI_WEBUI_DATA_DIR'/* 2>/dev/null | sort -rh | head -15 || echo 'not present'"
 
 sub "Database health and row counts"
 {
-  if command -v sqlite3 >/dev/null 2>&1 && [[ -f webui_data/webui.db ]]; then
-    printf 'webui.db integrity : %s\n' "$(sqlite3 'file:webui_data/webui.db?mode=ro' 'PRAGMA quick_check;' 2>&1 | head -1)"
-    printf 'webui.db size      : %s\n' "$(du -h webui_data/webui.db 2>/dev/null | cut -f1)"
+  if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$HYBRID_AI_WEBUI_DATA_DIR/webui.db" ]]; then
+    printf 'webui.db integrity : %s\n' "$(sqlite3 "file:$HYBRID_AI_WEBUI_DATA_DIR/webui.db?mode=ro" 'PRAGMA quick_check;' 2>&1 | head -1)"
+    printf 'webui.db size      : %s\n' "$(du -h "$HYBRID_AI_WEBUI_DATA_DIR/webui.db" 2>/dev/null | cut -f1)"
     printf '\nrow counts (how much is configured, not what it contains):\n'
     for t in chat user function tool model knowledge prompt config; do
-      c="$(sqlite3 'file:webui_data/webui.db?mode=ro' "SELECT COUNT(*) FROM ${t};" 2>/dev/null || echo 'n/a')"
+      c="$(sqlite3 "file:$HYBRID_AI_WEBUI_DATA_DIR/webui.db?mode=ro" "SELECT COUNT(*) FROM ${t};" 2>/dev/null || echo 'n/a')"
       printf '  %-12s %s\n' "$t" "$c"
     done
     printf '\ninstalled functions/pipes (ids only):\n'
-    sqlite3 'file:webui_data/webui.db?mode=ro' "SELECT '  ' || id || '  active=' || is_active FROM function;" 2>/dev/null || printf '  (none or table absent)\n'
+    sqlite3 "file:$HYBRID_AI_WEBUI_DATA_DIR/webui.db?mode=ro" "SELECT '  ' || id || '  active=' || is_active FROM function;" 2>/dev/null || printf '  (none or table absent)\n'
   else
     printf 'sqlite3 unavailable or webui.db not present\n'
   fi
-  if [[ -f webui_data/vector_db/chroma.sqlite3 ]]; then
-    printf '\nchroma.sqlite3     : %s\n' "$(du -h webui_data/vector_db/chroma.sqlite3 2>/dev/null | cut -f1)"
-    printf 'vector index dirs  : %s\n' "$(find webui_data/vector_db -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+  if [[ -f "$HYBRID_AI_WEBUI_DATA_DIR/vector_db/chroma.sqlite3" ]]; then
+    printf '\nchroma.sqlite3     : %s\n' "$(du -h "$HYBRID_AI_WEBUI_DATA_DIR/vector_db/chroma.sqlite3" 2>/dev/null | cut -f1)"
+    printf 'vector index dirs  : %s\n' "$(find "$HYBRID_AI_WEBUI_DATA_DIR/vector_db" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
   fi
 } 2>&1 | redact >> "$OUTFILE"
 
@@ -513,7 +521,7 @@ printf '  %s[9/9]%s Backups...\n' "$C_INF" "$C_RST"
 sec "9. BACKUPS"
 run "Timers" bash -c "systemctl --user list-timers 'hybrid-ai-*' --no-pager 2>/dev/null || echo 'no user timers'"
 run "Linger (required for backups to run while logged out)" bash -c "loginctl show-user \"\$USER\" 2>/dev/null | grep -i linger || echo 'unknown'"
-run "Recent backup events" bash -c "grep '^EVENT' backup.log 2>/dev/null | tail -25 || echo '(no backup.log)'"
+run "Recent backup events" bash -c "grep '^EVENT' '$BACKUP_LOG' 2>/dev/null | tail -25 || echo '(no backup.log)'"
 run "Backup service journal" bash -c "journalctl --user -u hybrid-ai-backup.service -n 40 --no-pager 2>/dev/null || echo 'unavailable'"
 
 # ---------------------------------------------------------------------------

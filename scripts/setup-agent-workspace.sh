@@ -39,8 +39,11 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$SCRIPT_DIR"
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/lib" && pwd)"
+# shellcheck source=lib/hybrid-ai-env.sh
+source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
 
 NON_INTERACTIVE=0
 CHECK_ONLY=0
@@ -71,58 +74,56 @@ die()  { printf '%s[ X ]%s %s\n'  "$C_ERR" "$C_RST" "$*" >&2; exit 1; }
 # --- Work out the target ---------------------------------------------------
 # Default: a SIBLING of the deployment directory, never inside it. Inside would
 # mean the agent's clone is itself swept up by backups, diagnostics and
-# git status -- and .env would sit one directory traversal away.
+# git status -- and the env file would sit one directory traversal away.
+# OPENHANDS_WORKSPACE is resolved by the shared helper (environment, then the
+# env file parsed line by line, then the default), so nothing is parsed twice.
 DEFAULT_WORKSPACE="${HOME}/hybrid-ai-agent"
-WORKSPACE="${OPENHANDS_WORKSPACE:-$DEFAULT_WORKSPACE}"
+WORKSPACE="$OPENHANDS_WORKSPACE"
 
-# If .env already names a workspace, honour it -- install.sh writes it there.
-#
-# SECURITY: parsed line by line, never sourced. `source` executes the file as
-# shell code, so a value containing $(...) or backticks would run as a command.
-if [[ -f "${SCRIPT_DIR}/.env" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^OPENHANDS_WORKSPACE=(.*)$ ]] || continue
-    candidate="${BASH_REMATCH[1]}"
-    candidate="${candidate%\"}"; candidate="${candidate#\"}"
-    candidate="${candidate%\'}"; candidate="${candidate#\'}"
-    [[ -n "$candidate" ]] && WORKSPACE="$candidate"
-  done < "${SCRIPT_DIR}/.env"
-  unset line candidate
-fi
-
-# Expand a leading ~ ourselves: a value read from a file is not tilde-expanded
-# by the shell, and mounting a literal "~/hybrid-ai-agent" directory is a
-# genuinely confusing failure to diagnose.
-# A value read from .env is not tilde-expanded, so match a literal ~ on purpose.
-# shellcheck disable=SC2088
-case "$WORKSPACE" in
-  "~/"*) WORKSPACE="${HOME}/${WORKSPACE#\~/}" ;;
-  "~")   WORKSPACE="${HOME}" ;;
-esac
-
-# --- THE CONTROL: workspace must not be the deployment directory -----------
-# Everything else in this file is convenience. This is the boundary.
+# --- THE CONTROL: the workspace must not reach protected trees -------------
+# Everything else in this file is convenience. This is the boundary. The clone
+# must not be, live inside, or contain any tree that holds credentials or
+# deployment state: the app, data, log and work directories, the directory the
+# env file lives in, and the backup credential directory.
 WORKSPACE_REAL="$(readlink -f "$WORKSPACE" 2>/dev/null || echo "$WORKSPACE")"
-DEPLOY_REAL="$(readlink -f "$SCRIPT_DIR")"
+APP_REAL="$(readlink -f "$HYBRID_AI_APP_DIR" 2>/dev/null || echo "$HYBRID_AI_APP_DIR")"
+ENV_DIR_REAL="$(dirname "$(readlink -f "$HYBRID_AI_ENV_FILE" 2>/dev/null || echo "$HYBRID_AI_ENV_FILE")")"
+GUARDED_REAL=(
+  "$APP_REAL"
+  "$(readlink -f "$HYBRID_AI_DATA_DIR" 2>/dev/null || echo "$HYBRID_AI_DATA_DIR")"
+  "$(readlink -f "$HYBRID_AI_LOG_DIR" 2>/dev/null || echo "$HYBRID_AI_LOG_DIR")"
+  "$(readlink -f "$HYBRID_AI_WORK_DIR" 2>/dev/null || echo "$HYBRID_AI_WORK_DIR")"
+  "$ENV_DIR_REAL"
+  "$(readlink -f "$BACKUP_CONF_DIR" 2>/dev/null || echo "$BACKUP_CONF_DIR")"
+)
 
-if [[ "$WORKSPACE_REAL" == "$DEPLOY_REAL" ]]; then
-  die "OPENHANDS_WORKSPACE points at the deployment directory (${DEPLOY_REAL}).
-     The agent sandbox would be able to read .env and the log files.
-     Set it to a separate path, e.g. ${DEFAULT_WORKSPACE}"
-fi
-
-case "$WORKSPACE_REAL/" in
-  "$DEPLOY_REAL"/*)
-    die "OPENHANDS_WORKSPACE is inside the deployment directory.
-     Backups, diagnostics and git status would all sweep it up, and .env sits
-     one traversal away. Use a sibling path, e.g. ${DEFAULT_WORKSPACE}"
-    ;;
-esac
+for guarded in "${GUARDED_REAL[@]}"; do
+  if [[ "$WORKSPACE_REAL" == "$guarded" ]]; then
+    die "OPENHANDS_WORKSPACE is '${guarded}', a protected directory.
+     The agent sandbox would be able to read the env file, the logs, or the
+     backup credentials. Set it to a separate path, e.g. ${DEFAULT_WORKSPACE}"
+  fi
+  case "$WORKSPACE_REAL/" in
+    "$guarded"/*)
+      die "OPENHANDS_WORKSPACE is inside the protected directory '${guarded}'.
+     Backups, diagnostics and git status would all sweep it up, and the env
+     file sits one traversal away. Use a sibling path, e.g. ${DEFAULT_WORKSPACE}"
+      ;;
+  esac
+  case "$guarded/" in
+    "$WORKSPACE_REAL"/*)
+      die "OPENHANDS_WORKSPACE contains the protected directory '${guarded}'.
+     The clone would sit above deployment state. Use a path that is not a
+     parent of it, e.g. ${DEFAULT_WORKSPACE}"
+      ;;
+  esac
+done
+unset guarded
 
 # --- Find the origin URL ---------------------------------------------------
 ORIGIN_URL=""
-if git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-  ORIGIN_URL="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+if git -C "$HYBRID_AI_APP_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  ORIGIN_URL="$(git -C "$HYBRID_AI_APP_DIR" remote get-url origin 2>/dev/null || true)"
 fi
 
 # --- Check mode ------------------------------------------------------------
