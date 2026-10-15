@@ -197,8 +197,26 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     if err="$(systemd-analyze verify "$f" 2>&1)"; then
       ok "systemd-analyze verify: $(basename -- "$f")"
     else
-      bad "systemd-analyze verify: $(basename -- "$f")"
-      printf '%s\n' "$err" | sed 's/^/      /' >&2
+      # On a host where the units are not installed there is no /opt/hybrid-ai,
+      # so verify reports each ExecStart=/ExecStartPre= path as
+      #   <unit>: Command /opt/hybrid-ai/... is not executable: No such file or directory
+      # and exits non-zero. That is a property of THIS host, not of the unit, so
+      # it is a documented skip -- but ONLY when every diagnostic line is that
+      # missing-host-path form. Any other non-zero result stays a hard failure.
+      host_path_only=1
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        case "$line" in
+          *"/opt/hybrid-ai/"*"is not executable: No such file or directory") ;;
+          *) host_path_only=0 ;;
+        esac
+      done <<< "$err"
+      if (( host_path_only )) && [[ -n "$err" ]]; then
+        echo "skip: $(basename -- "$f") (host paths not installed)"
+      else
+        bad "systemd-analyze verify: $(basename -- "$f")"
+        printf '%s\n' "$err" | sed 's/^/      /' >&2
+      fi
     fi
   done
 else
