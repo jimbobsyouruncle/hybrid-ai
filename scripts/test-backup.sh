@@ -60,13 +60,28 @@ cat > "$STUB/restic" <<'EOF'
 #!/usr/bin/env bash
 # Assume the repository exists and every operation succeeds. On "backup" the
 # staging directory (still present) is copied aside so the test can inspect the
-# exact artifact that would have been uploaded.
+# exact artifact that would have been uploaded. On "restore" it lays down a
+# fixture snapshot given in SNAPSHOT_SRC, so restore.sh --test has something
+# real to verify.
 case "$1" in
   snapshots) exit 0 ;;
   backup)
     if [[ -n "${CAPTURE_DIR:-}" && -d "${2:-}" ]]; then
       rm -rf "$CAPTURE_DIR"
       cp -a "$2" "$CAPTURE_DIR" 2>/dev/null || true
+    fi
+    exit 0 ;;
+  restore)
+    if [[ -n "${SNAPSHOT_SRC:-}" && -d "${SNAPSHOT_SRC:-}" ]]; then
+      target=""; prev=""
+      for a in "$@"; do
+        [[ "$prev" == "--target" ]] && target="$a"
+        prev="$a"
+      done
+      if [[ -n "$target" ]]; then
+        mkdir -p "$target"
+        cp -a "$SNAPSHOT_SRC/." "$target/" 2>/dev/null || true
+      fi
     fi
     exit 0 ;;
   forget)  exit 0 ;;
@@ -102,7 +117,10 @@ chmod +x "$STUB/restic" "$STUB/docker" "$STUB/systemctl" "$STUB/sqlite3"
 REPO="$TMPROOT/repo"
 mkdir -p "$REPO"
 cp -a "${REPO_SRC}/backup" "$REPO/backup"
-chmod +x "$REPO/backup/backup.sh"
+# backup.sh and restore.sh source the shared path helper from
+# <repo>/scripts/lib/. A scratch repo needs its own copy of it.
+cp -a "${REPO_SRC}/scripts" "$REPO/scripts"
+chmod +x "$REPO/backup/backup.sh" "$REPO/backup/restore.sh"
 mkdir -p "$REPO/webui_data/vector_db" "$REPO/hermes_data" "$REPO/home"
 
 # Credentials live outside the repo; the script only checks mode 0600.
@@ -277,6 +295,71 @@ assert "case f: online database staged"   test -f "$STAGED_ON"
 assert "case f: online rows preserved"    bash -c "[[ \"\$( '$REAL_SQLITE3' '$STAGED_ON' 'select count(*) from t;' 2>/dev/null )\" == 3 ]]"
 assert "case f: .backup path used"        sqlite_log_has '.backup "'
 assert "case f: VACUUM INTO never used"   sqlite_log_lacks 'VACUUM INTO'
+
+# ---------------------------------------------------------------------------
+# Case g: SPLIT layout. APP, DATA, LOG and WORK are four separate temp dirs
+# (plus a separate HOME). backup stages from DATA_DIR, writes nothing under
+# APP_DIR, and restore --test restores a snapshot made with the DEFAULT layout.
+# This exercises the shared path helper's relocation, not just the defaults.
+# ---------------------------------------------------------------------------
+SPLIT="$TMPROOT/split"
+APP2="$SPLIT/app";  DATA2="$SPLIT/data"; LOG2="$SPLIT/log"; WORK2="$SPLIT/work"
+HOME2="$SPLIT/home"
+mkdir -p "$APP2/openhands" "$APP2/hermes" "$APP2/scripts" "$DATA2" "$LOG2" "$WORK2" "$HOME2"
+# A minimal APP_DIR: compose files, the helper, and the backup/restore scripts.
+cp -a "${REPO_SRC}/scripts/." "$APP2/scripts/"
+cp -a "${REPO_SRC}/backup" "$APP2/backup"
+: > "$APP2/docker-compose.yml"
+sqlite3 "$DATA2/webui_data/webui.db" 'CREATE TABLE chat(id); INSERT INTO chat VALUES (1);' 2>/dev/null \
+  || { mkdir -p "$DATA2/webui_data"; sqlite3 "$DATA2/webui_data/webui.db" 'CREATE TABLE chat(id); INSERT INTO chat VALUES (1);'; }
+sqlite3 "$DATA2/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);' 2>/dev/null \
+  || { mkdir -p "$DATA2/hermes_data"; sqlite3 "$DATA2/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'; }
+
+# Snapshot the APP_DIR contents before the split run so we can prove it is
+# untouched afterwards.
+APP_BEFORE="$(find "$APP2" -mindepth 1 | sort)"
+
+: > "$LOG"
+rm -rf "$CAPTURE"
+RUN_RC=0
+env -u BACKUP_LOG HOME="$HOME2" \
+    HYBRID_AI_APP_DIR="$APP2" \
+    HYBRID_AI_DATA_DIR="$DATA2" \
+    HYBRID_AI_LOG_DIR="$LOG2" \
+    HYBRID_AI_WORK_DIR="$WORK2" \
+    BACKUP_CONF_DIR="$CONF" \
+    BACKUP_NO_PAUSE=1 \
+    CAPTURE_DIR="$CAPTURE" \
+    PATH="$STUB:$PATH" \
+  bash "$APP2/backup/backup.sh" --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case g: split-layout backup exit code" 0 "$RUN_RC"
+assert "case g: database staged from DATA_DIR" \
+  test -f "$CAPTURE/databases/webui_data/webui.db"
+assert "case g: hermes db staged from DATA_DIR" \
+  test -f "$CAPTURE/databases/hermes_data/state.db"
+assert "case g: backup.log written under LOG_DIR" test -f "$LOG2/backup.log"
+APP_AFTER="$(find "$APP2" -mindepth 1 | sort)"
+assert "case g: nothing written under APP_DIR" test "$APP_BEFORE" = "$APP_AFTER"
+
+# restore --test reads a DEFAULT-layout snapshot (CAPTURE) and writes only
+# under WORK_DIR. The restic stub lays the snapshot down at --target.
+RESTORE_RC=0
+env -u BACKUP_LOG HOME="$HOME2" \
+    HYBRID_AI_APP_DIR="$APP2" \
+    HYBRID_AI_DATA_DIR="$DATA2" \
+    HYBRID_AI_LOG_DIR="$LOG2" \
+    HYBRID_AI_WORK_DIR="$WORK2" \
+    BACKUP_CONF_DIR="$CONF" \
+    SNAPSHOT_SRC="$CAPTURE" \
+    PATH="$STUB:$PATH" \
+  bash "$APP2/backup/restore.sh" --test > "$TMPROOT/out" 2>&1 || RESTORE_RC=$?
+check "case g: restore --test exit code" 0 "$RESTORE_RC"
+assert "case g: restore log has restore_test_success" \
+  bash -c "grep -q 'event=restore_test_success' '$LOG2/backup.log'"
+assert "case g: restore test dir made under WORK_DIR" \
+  bash -c "compgen -G '$WORK2/.restore-test-*' >/dev/null"
+assert "case g: restore wrote nothing under APP_DIR" \
+  bash -c "[[ \"\$(find '$APP2' -mindepth 1 | sort)\" == '$APP_BEFORE' ]]"
 
 # ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then

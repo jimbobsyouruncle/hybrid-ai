@@ -67,7 +67,7 @@ services:
       - "127.0.0.1:11434:11434"
     volumes:
       # Format is  <folder on the Pi>:<folder inside the container>
-      - ./ollama_data:/root/.ollama
+      - ${HYBRID_AI_DATA_DIR:-.}/ollama_data:/root/.ollama
     # A REAL, kernel-enforced memory cap. This is what actually stops a model
     # from taking the whole machine down -- unlike OLLAMA_MAX_VRAM, which was
     # never honoured by Ollama and has been removed upstream.
@@ -152,7 +152,7 @@ services:
       # Reachable from your whole network (and tailnet) on port 3000.
       - "3000:8080"
     volumes:
-      - ./webui_data:/app/backend/data
+      - ${HYBRID_AI_DATA_DIR:-.}/webui_data:/app/backend/data
       # Mounted read-only (":ro"). This just makes the pipe source visible
       # inside the container for reference; you still import it through the UI.
       #
@@ -267,9 +267,9 @@ services:
       # Read-only Docker socket: needed for container state and log tails.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Measured, never read for content.
-      - ./webui_data:/data/webui_data:ro
-      - ./backup.log:/data/backup.log:ro
-      - ./install.log:/data/install.log:ro
+      - ${HYBRID_AI_DATA_DIR:-.}/webui_data:/data/webui_data:ro
+      - ${HYBRID_AI_LOG_DIR:-.}/backup.log:/data/backup.log:ro
+      - ${HYBRID_AI_LOG_DIR:-.}/install.log:/data/install.log:ro
     environment:
       TAILSCALE_IP: ${TAILSCALE_IP:-}
       STATUS_PORT: "8088"
@@ -289,7 +289,7 @@ services:
       DO_NOT_TRACK: "true"
     dns:
       - 100.100.100.100
-    user: "${STATUS_UID:-1000}:${DOCKER_GID:-999}"
+    user: "${HYBRID_AI_UID:-${STATUS_UID:-1000}}:${DOCKER_GID:-999}"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -336,7 +336,7 @@ services:
       - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
       # Caddy validates its config at boot; a syntax error here stops the
       # proxy only, leaving Open WebUI reachable on :3000.
-      - ./webui_data/caddy:/data
+      - ${HYBRID_AI_DATA_DIR:-.}/webui_data/caddy:/data
     environment:
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       DO_NOT_TRACK: "true"

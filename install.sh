@@ -50,7 +50,16 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-ENV_FILE="${SCRIPT_DIR}/.env"
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
+
+APP_DIR="$HYBRID_AI_APP_DIR"
+ENV_FILE="$HYBRID_AI_ENV_FILE"
+DATA_DIR="$HYBRID_AI_DATA_DIR"
+LOG_DIR="$HYBRID_AI_LOG_DIR"
+WORK_DIR="$HYBRID_AI_WORK_DIR"
 TARGET_ENV_VERSION="2"
 
 # Peer hostnames to search for, in priority order.
@@ -86,7 +95,7 @@ warn() { printf '%s[ ! ]%s %s\n'  "$C_WRN" "$C_RST" "$*" >&2; }
 die()  { printf '%s[ X ]%s %s\n'  "$C_ERR" "$C_RST" "$*" >&2; exit 1; }
 hr()   { printf '%s%s%s\n' "$C_DIM" "------------------------------------------------------------" "$C_RST"; }
 
-INSTALL_LOG="${SCRIPT_DIR}/install.log"
+INSTALL_LOG="$HYBRID_AI_INSTALL_LOG"
 event() {
   local name="$1"; shift
   printf 'EVENT ts=%s event=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$*" \
@@ -147,7 +156,7 @@ for _s in scripts/setup-agent-workspace.sh scripts/sync-agent-repos.sh \
           openhands/scripts/openhands-control.sh \
           doctor.sh collect-diagnostics.sh backup/backup.sh backup/restore.sh \
           runpod/start.sh; do
-  _f="${SCRIPT_DIR}/${_s}"
+  _f="${APP_DIR}/${_s}"
   [[ -f "$_f" ]] || continue
   if [[ ! -x "$_f" ]]; then
     if chmod +x "$_f" 2>/dev/null; then
@@ -167,8 +176,8 @@ unset _s _f
 # back to the same defaults this installer writes below.
 # ---------------------------------------------------------------------------
 log "Syncing the read-only agent repo reference tree..."
-"${SCRIPT_DIR}/scripts/sync-agent-repos.sh" \
-  || warn "Agent repo sync failed; Hermes sees a stale tree at ${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}. Re-run scripts/sync-agent-repos.sh by hand."
+"${APP_DIR}/scripts/sync-agent-repos.sh" \
+  || warn "Agent repo sync failed; Hermes sees a stale tree at ${AGENT_REPOS_DIR}. Re-run scripts/sync-agent-repos.sh by hand."
 
 # ---------------------------------------------------------------------------
 # STEP 2. Load existing .env
@@ -289,9 +298,14 @@ case "$ROOT_SRC" in
 esac
 
 # ---------------------------------------------------------------------------
-# STEP 3b. Identity for the status container
+# STEP 3b. Identity for the status container and the sandbox
 # ---------------------------------------------------------------------------
-STATUS_UID="$(id -u)"
+# When HYBRID_AI_UID/HYBRID_AI_GID are set, they drive BOTH the status
+# container uid and the OpenHands sandbox uid, so the whole stack runs as the
+# dedicated non-root service account. Unset keeps today's behaviour exactly:
+# the login account's uid/gid.
+STATUS_UID="${HYBRID_AI_UID:-$(id -u)}"
+STACK_GID="${HYBRID_AI_GID:-$(id -g)}"
 if [[ -S /var/run/docker.sock ]]; then
   DOCKER_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 999)"
 else
@@ -299,6 +313,9 @@ else
   DOCKER_GID="${DOCKER_GID:-999}"
 fi
 ok "status page identity: uid=${STATUS_UID} docker gid=${DOCKER_GID}"
+if [[ -n "${HYBRID_AI_UID:-}" ]]; then
+  ok "stack runs as HYBRID_AI_UID=${STATUS_UID} gid=${STACK_GID}"
+fi
 
 # ---------------------------------------------------------------------------
 # STEP 4. Session encryption key
@@ -474,11 +491,10 @@ if [[ -n "${TAILSCALE_IP:-}" && ! "$TAILSCALE_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9
 fi
 
 # --- OpenHands: workspace path and browser-reachable sandbox host ----------
-OPENHANDS_WORKSPACE="${OPENHANDS_WORKSPACE:-${HOME}/hybrid-ai-agent}"
-# Read-only local copy of every non-fork repo you own, mounted into Hermes at
-# /agent-repos. Refreshed near the start of every run by
-# scripts/sync-agent-repos.sh, before .env is loaded.
-AGENT_REPOS_DIR="${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}"
+# OPENHANDS_WORKSPACE is resolved by the shared helper above, from the
+# environment, an existing env file, or the default sibling directory.
+# AGENT_REPOS_DIR is resolved by the shared helper the same way. Refreshed near
+# the start of every run by scripts/sync-agent-repos.sh, before .env is loaded.
 if [[ -z "${OPENHANDS_SANDBOX_HOST:-}" ]]; then
   _default_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
   if (( NON_INTERACTIVE )); then
@@ -497,28 +513,28 @@ fi
 # ---------------------------------------------------------------------------
 log "Ensuring persistent host mounts..."
 
-for f in backup.log install.log; do
+for f in "$HYBRID_AI_INSTALL_LOG" "$BACKUP_LOG"; do
   [[ -e "$f" ]] || { : > "$f"; chmod 600 "$f"; }
   if [[ -d "$f" ]]; then
-    warn "${f} is a directory (created by an earlier Docker run). Replacing it."
+    warn "$(basename "$f") is a directory (created by an earlier Docker run). Replacing it."
     rmdir "$f" 2>/dev/null && : > "$f" && chmod 600 "$f"
   fi
 done
 
-mkdir -p webui_data/caddy
-mkdir -p hermes_data
+mkdir -p "$HYBRID_AI_WEBUI_DATA_DIR/caddy"
+mkdir -p "$HYBRID_AI_HERMES_DATA_DIR"
 
-mkdir -p "${HOME}/.openhands"
-chmod 700 "${HOME}/.openhands"
+mkdir -p "$OPENHANDS_STATE_DIR"
+chmod 700 "$OPENHANDS_STATE_DIR"
 
-mkdir -p "${HOME}/.cache/restic"
+mkdir -p "$RESTIC_CACHE_DIR"
 
-for d in ollama_data webui_data hermes_data; do
+for d in "$HYBRID_AI_OLLAMA_DATA_DIR" "$HYBRID_AI_WEBUI_DATA_DIR" "$HYBRID_AI_HERMES_DATA_DIR"; do
   if [[ -d "$d" ]]; then
-    ok "./${d} exists ($(du -sh "$d" 2>/dev/null | cut -f1 || echo '0') on disk) -- untouched."
+    ok "$d exists ($(du -sh "$d" 2>/dev/null | cut -f1 || echo '0') on disk) -- untouched."
   else
     mkdir -p "$d"
-    ok "./${d} created."
+    ok "$d created."
   fi
 done
 
@@ -527,7 +543,7 @@ done
 # ---------------------------------------------------------------------------
 log "Writing ${ENV_FILE} ..."
 
-TMP_ENV="$(mktemp "${SCRIPT_DIR}/.env.XXXXXX")"
+TMP_ENV="$(mktemp "$(dirname -- "$ENV_FILE")/.env.XXXXXX")"
 chmod 600 "$TMP_ENV"
 
 cat > "$TMP_ENV" <<EOF
@@ -597,6 +613,14 @@ HERMES_CPUS=${HERMES_CPUS:-1.5}
 HYBRID_AI_UID=${HYBRID_AI_UID:-}
 HYBRID_AI_GID=${HYBRID_AI_GID:-}
 
+# --- Host paths (optional relocation) --------------------------------------
+# All host paths resolve through scripts/lib/hybrid-ai-env.sh. Left commented,
+# they default to the deployment directory; uncomment to split the layout.
+#HYBRID_AI_APP_DIR=${APP_DIR}
+#HYBRID_AI_DATA_DIR=${DATA_DIR}
+#HYBRID_AI_LOG_DIR=${LOG_DIR}
+#HYBRID_AI_WORK_DIR=${WORK_DIR}
+
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
 OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE}
@@ -604,7 +628,7 @@ OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE}
 # /agent-repos. Refreshed on every deploy by scripts/sync-agent-repos.sh.
 AGENT_REPOS_DIR=${AGENT_REPOS_DIR}
 OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}
-OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR:-${HOME}/.openhands}
+OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
 OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
 OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}
@@ -629,10 +653,10 @@ ok ".env written (0600)."
 hr
 log "Preparing the OpenHands workspace..."
 if (( NON_INTERACTIVE )); then
-  "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" --non-interactive \
+  "${APP_DIR}/scripts/setup-agent-workspace.sh" --non-interactive \
     || warn "Agent workspace setup failed; OpenHands will not start until it exists."
 else
-  "${SCRIPT_DIR}/scripts/setup-agent-workspace.sh" \
+  "${APP_DIR}/scripts/setup-agent-workspace.sh" \
     || warn "Agent workspace setup failed; OpenHands will not start until it exists."
 fi
 
@@ -649,7 +673,7 @@ prepare_openhands_workspace() {
   uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
   [[ -d "$OPENHANDS_WORKSPACE/.git" ]] || return 1
   mkdir -p "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
-  "${SUDO[@]}" chown -R "$(id -u):$(id -g)" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations" || return 1
+  "${SUDO[@]}" chown -R "${STATUS_UID}:${STACK_GID}" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations" || return 1
   "${SUDO[@]}" setfacl -R -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   "${SUDO[@]}" setfacl -R -d -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   # Keep agent runtime folders out of the clone's git status
@@ -667,9 +691,10 @@ fi
 COMPOSE=(
   docker compose
   --env-file "$ENV_FILE"
-  -f docker-compose.yml
-  -f openhands/docker-compose.openhands.yml
-  -f hermes/docker-compose.hermes.yml
+  --project-directory "$APP_DIR"
+  -f "$APP_DIR/docker-compose.yml"
+  -f "$APP_DIR/openhands/docker-compose.openhands.yml"
+  -f "$APP_DIR/hermes/docker-compose.hermes.yml"
 )
 
 export COMPOSE_HTTP_TIMEOUT=600
@@ -698,7 +723,7 @@ fi
 # It refuses (before anything is started) when the uid is not a system account,
 # or when hermes_data holds entries that uid cannot read. Read-only; no sudo.
 # See scripts/check-hermes-nonroot.sh.
-if ! "${SCRIPT_DIR}/scripts/check-hermes-nonroot.sh"; then
+if ! "${APP_DIR}/scripts/check-hermes-nonroot.sh"; then
   die "Refusing to start: the Hermes non-root uid is not usable (see above)."
 fi
 
@@ -790,7 +815,7 @@ done
 # ---------------------------------------------------------------------------
 # STEP 11. Encrypted offsite backups (Cloudflare R2 via restic)
 # ---------------------------------------------------------------------------
-BACKUP_CONF_DIR="${HOME}/.config/hybrid-ai-backup"
+# BACKUP_CONF_DIR is resolved by the shared helper above.
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
 BACKUP_UNITS=(
@@ -818,7 +843,7 @@ install_backup_scheduler() {
 
   log "Installing backup systemd user units..."
   for unit in "${BACKUP_UNITS[@]}"; do
-    source_file="${SCRIPT_DIR}/backup/${unit}"
+    source_file="${APP_DIR}/backup/${unit}"
     target_file="${unit_dir}/${unit}"
 
     if [[ ! -f "$source_file" ]]; then
@@ -828,7 +853,7 @@ install_backup_scheduler() {
       continue
     fi
 
-    if ! sed "s|__REPO_DIR__|${SCRIPT_DIR}|g" "$source_file" > "${target_file}.tmp"; then
+    if ! sed "s|__REPO_DIR__|${APP_DIR}|g" "$source_file" > "${target_file}.tmp"; then
       warn "Could not render ${unit}."
       rm -f "${target_file}.tmp"
       event "backup_unit_install_failed" "unit=${unit}" "reason=render_failed"
@@ -924,7 +949,7 @@ setup_backups() {
     return 1
   fi
 
-  if ! bash -n "${SCRIPT_DIR}/backup/backup.sh"; then
+  if ! bash -n "${APP_DIR}/backup/backup.sh"; then
     warn "backup/backup.sh has a syntax error. Backup scheduling was not changed."
     event "backup_setup_failed" "reason=backup_script_syntax"
     return 1
@@ -1023,7 +1048,7 @@ EOF2
     ok "Credentials written to ${R2_ENV_FILE} (0600)."
 
     log "Initialising the encrypted repository..."
-    if "${SCRIPT_DIR}/backup/backup.sh" --init; then
+    if "${APP_DIR}/backup/backup.sh" --init; then
       newly_configured=1
       event "backup_repo_ready" "bucket=${cf_bucket}"
     else
@@ -1039,7 +1064,7 @@ EOF2
   if (( newly_configured )); then
     read -r -p "  Run the first backup now? [Y/n]: " _first < /dev/tty
     if [[ "${_first,,}" != "n" ]]; then
-      if "${SCRIPT_DIR}/backup/backup.sh"; then
+      if "${APP_DIR}/backup/backup.sh"; then
         ok "First backup completed successfully."
         event "backup_validation_success"
       else

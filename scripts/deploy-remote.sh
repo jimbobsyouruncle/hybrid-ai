@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
+APP_DIR="$HYBRID_AI_APP_DIR"
+ENV_FILE="$HYBRID_AI_ENV_FILE"
+COMPOSE=(docker compose -p hybrid-ai --env-file "$ENV_FILE" --project-directory "$APP_DIR"
+         -f "$APP_DIR/docker-compose.yml"
+         -f "$APP_DIR/openhands/docker-compose.openhands.yml"
+         -f "$APP_DIR/hermes/docker-compose.hermes.yml")
+
 # ---------------------------------------------------------------------------
 # FILE: scripts/deploy-remote.sh
 # PURPOSE (plain English):
@@ -62,7 +75,7 @@ echo "==> Reprovisioning (non-interactive; existing .env preserved)"
 sleep 20
 
 echo "==> Post-deploy verification"
-docker compose --env-file .env ps
+"${COMPOSE[@]}" ps
 
 # Poll the health endpoint for up to two minutes. If it never comes back, dump
 # the last 50 log lines so the failure is diagnosable from the Actions output.
@@ -75,7 +88,7 @@ for i in $(seq 1 12); do
   sleep 10
   if [ "$i" -eq 12 ]; then
     echo "::error::Open WebUI failed its health check."
-    docker compose --env-file .env logs --tail 50 open-webui
+    "${COMPOSE[@]}" logs --tail 50 open-webui
     exit 1
   fi
 done
@@ -97,7 +110,7 @@ fi
 
 # --- Informational steps (always run, even when doctor.sh failed) -----------
 echo "==> Persistent data intact:"
-du -sh webui_data ollama_data 2>/dev/null || true
+du -sh "$HYBRID_AI_WEBUI_DATA_DIR" "$HYBRID_AI_OLLAMA_DATA_DIR" 2>/dev/null || true
 
 # Backups are a data-loss control; a deploy that silently disables them is
 # worth flagging even though it is not a failure.

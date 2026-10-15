@@ -99,8 +99,11 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$SCRIPT_DIR"
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/lib" && pwd)"
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
 
 # --- Output helpers (match install.sh / setup-agent-workspace.sh) ----------
 if [[ -t 1 ]]; then
@@ -119,13 +122,13 @@ usage() {
   awk 'NR==1{next} /^set -Eeuo pipefail/{exit} {sub(/^# ?/,""); print}' "${BASH_SOURCE[0]}"
 }
 
-# --- Read one value from .env, never sourced -------------------------------
-# Same convention as scripts/setup-agent-workspace.sh: read the file line by
-# line and match KEY=... exactly. Never `source` it -- a value containing
-# $(...) or backticks would otherwise run as a command.
+# --- Read one value from the env file, never sourced -----------------------
+# Used only for the settings the shared helper does not resolve (the freshness
+# window, the owner, the optional manifest). The path settings come from the
+# helper. Never `source` it -- a value containing $(...) would run as code.
 env_value() {
   local key="$1" line candidate
-  [[ -f "${SCRIPT_DIR}/.env" ]] || return 0
+  [[ -f "${HYBRID_AI_ENV_FILE}" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*${key}=(.*)$ ]] || continue
     candidate="${BASH_REMATCH[1]}"
@@ -133,7 +136,7 @@ env_value() {
     candidate="${candidate%\'}"; candidate="${candidate#\'}"
     printf '%s' "$candidate"
     return 0
-  done < "${SCRIPT_DIR}/.env"
+  done < "${HYBRID_AI_ENV_FILE}"
 }
 
 # Expand a leading ~ by hand: a value read from .env is not tilde-expanded.
@@ -175,19 +178,13 @@ MAX_AGE_HOURS="${MAX_AGE_HOURS:-48}"
 [[ "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || die "AGENT_REPOS_MAX_AGE_HOURS must be a whole number of hours. Got: ${MAX_AGE_HOURS}"
 
 # --- Resolve the reference-tree directory ----------------------------------
-# Environment wins, then .env, then a sibling default. Never the deployment
-# directory: a separate tree is the whole point of this script.
+# Resolved by the shared helper: environment, then the env file, then a sibling
+# default. Never the deployment directory: a separate tree is the whole point.
 DEFAULT_AGENT_REPOS_DIR="${HOME}/hybrid-ai-repos"
-AGENT_REPOS_DIR="${AGENT_REPOS_DIR:-$(env_value AGENT_REPOS_DIR)}"
-AGENT_REPOS_DIR="${AGENT_REPOS_DIR:-$DEFAULT_AGENT_REPOS_DIR}"
-AGENT_REPOS_DIR="$(expand_tilde "$AGENT_REPOS_DIR")"
 [[ -n "$AGENT_REPOS_DIR" ]] || die "AGENT_REPOS_DIR resolved to an empty path."
 
 # --- Resolve the OpenHands workspace (only for the refusal check) ----------
-DEFAULT_WORKSPACE="${HOME}/hybrid-ai-agent"
-OPENHANDS_WORKSPACE="${OPENHANDS_WORKSPACE:-$(env_value OPENHANDS_WORKSPACE)}"
-OPENHANDS_WORKSPACE="${OPENHANDS_WORKSPACE:-$DEFAULT_WORKSPACE}"
-OPENHANDS_WORKSPACE="$(expand_tilde "$OPENHANDS_WORKSPACE")"
+# Resolved by the shared helper (OPENHANDS_WORKSPACE).
 
 AGENT_REPOS_REAL="$(readlink -f "$AGENT_REPOS_DIR" 2>/dev/null || echo "$AGENT_REPOS_DIR")"
 
@@ -225,34 +222,39 @@ relay_cred() {
   done <<<"$1"
 }
 
-CRED_CHECK="${SCRIPT_DIR}/scripts/check-git-remotes.sh"
+CRED_CHECK="${HYBRID_AI_APP_DIR}/scripts/check-git-remotes.sh"
 
-# --- THE CONTROL: the tree must never touch the deployment dir or workspace -
+# --- THE CONTROL: the tree must never touch protected trees -----------------
 # Everything else here is convenience. These checks are the boundary. A
-# read-only mount of the wrong path would expose .env and the log files to the
-# component that processes untrusted text. A --check writes nothing, so it is
-# exempt.
+# read-only mount of the wrong path would expose the env file, the log files or
+# the backup credentials to the component that processes untrusted text. The
+# tree must not be, live inside, or contain any of: the app, data, log and work
+# directories, the directory the env file lives in, the OpenHands workspace, and
+# the backup credential directory. A --check writes nothing, so it is exempt.
 if [[ "$MODE" != "check" ]]; then
-  DEPLOY_REAL="$(readlink -f "$SCRIPT_DIR")"
   WORKSPACE_REAL="$(readlink -f "$OPENHANDS_WORKSPACE" 2>/dev/null || echo "$OPENHANDS_WORKSPACE")"
-  if path_is_within "$AGENT_REPOS_REAL" "$DEPLOY_REAL"; then
-    die "AGENT_REPOS_DIR is the deployment directory, or is inside it (${DEPLOY_REAL}).
-     Hermes would mount .env and the log files. Choose a separate path, e.g.
-     ${DEFAULT_AGENT_REPOS_DIR}"
-  fi
-  if path_is_within "$AGENT_REPOS_REAL" "$WORKSPACE_REAL"; then
-    die "AGENT_REPOS_DIR is the OpenHands workspace, or is inside it (${WORKSPACE_REAL}).
-     The reference tree must be separate from the working clone. Choose another
-     path, e.g. ${DEFAULT_AGENT_REPOS_DIR}"
-  fi
-  if path_is_within "$DEPLOY_REAL" "$AGENT_REPOS_REAL"; then
-    die "AGENT_REPOS_DIR contains the deployment directory (${DEPLOY_REAL}).
+  ENV_DIR_REAL="$(dirname "$(readlink -f "$HYBRID_AI_ENV_FILE" 2>/dev/null || echo "$HYBRID_AI_ENV_FILE")")"
+  GUARDED_REAL=(
+    "$(readlink -f "$HYBRID_AI_APP_DIR" 2>/dev/null || echo "$HYBRID_AI_APP_DIR")"
+    "$(readlink -f "$HYBRID_AI_DATA_DIR" 2>/dev/null || echo "$HYBRID_AI_DATA_DIR")"
+    "$(readlink -f "$HYBRID_AI_LOG_DIR" 2>/dev/null || echo "$HYBRID_AI_LOG_DIR")"
+    "$(readlink -f "$HYBRID_AI_WORK_DIR" 2>/dev/null || echo "$HYBRID_AI_WORK_DIR")"
+    "$ENV_DIR_REAL"
+    "$WORKSPACE_REAL"
+    "$(readlink -f "$BACKUP_CONF_DIR" 2>/dev/null || echo "$BACKUP_CONF_DIR")"
+  )
+  for guarded in "${GUARDED_REAL[@]}"; do
+    if path_is_within "$AGENT_REPOS_REAL" "$guarded"; then
+      die "AGENT_REPOS_DIR is '${guarded}', or is inside it.
+     Hermes would mount credentials or deployment state. Choose a separate path,
+     e.g. ${DEFAULT_AGENT_REPOS_DIR}"
+    fi
+    if path_is_within "$guarded" "$AGENT_REPOS_REAL"; then
+      die "AGENT_REPOS_DIR contains '${guarded}'.
      Choose a path that is not a parent of it, e.g. ${DEFAULT_AGENT_REPOS_DIR}"
-  fi
-  if path_is_within "$WORKSPACE_REAL" "$AGENT_REPOS_REAL"; then
-    die "AGENT_REPOS_DIR contains the OpenHands workspace (${WORKSPACE_REAL}).
-     Choose a path that is not a parent of it, e.g. ${DEFAULT_AGENT_REPOS_DIR}"
-  fi
+    fi
+  done
+  unset guarded
 fi
 
 # --- Validation ------------------------------------------------------------
@@ -347,7 +349,7 @@ fi
 # ===========================================================================
 OWNER="${AGENT_REPOS_OWNER:-$(env_value AGENT_REPOS_OWNER)}"
 if [[ -z "$OWNER" ]]; then
-  ORIGIN_URL="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+  ORIGIN_URL="$(git -C "$HYBRID_AI_APP_DIR" remote get-url origin 2>/dev/null || true)"
   if [[ "$ORIGIN_URL" =~ github\.com[:/]+([^/]+)/[^/]+$ ]]; then
     OWNER="${BASH_REMATCH[1]}"
   fi
@@ -466,7 +468,7 @@ fi
 # Excluding a repo stops future syncing of it; it does NOT delete a copy that
 # already exists on disk. This script never deletes anything.
 AGENT_REPOS_MANIFEST="${AGENT_REPOS_MANIFEST:-$(env_value AGENT_REPOS_MANIFEST)}"
-AGENT_REPOS_MANIFEST="${AGENT_REPOS_MANIFEST:-${SCRIPT_DIR}/agent-repos.local}"
+AGENT_REPOS_MANIFEST="${AGENT_REPOS_MANIFEST:-${HYBRID_AI_APP_DIR}/agent-repos.local}"
 AGENT_REPOS_MANIFEST="$(expand_tilde "$AGENT_REPOS_MANIFEST")"
 
 manifest_default_branch() {  # owner/name base -> branch on stdout, non-zero on failure

@@ -483,6 +483,48 @@ Put that in a password manager. Rehearse a restore before you need one:
 
 ---
 
+## Host paths (relocation)
+
+Every host path the project uses is worked out in ONE place,
+`scripts/lib/hybrid-ai-env.sh`. Each script sources it, and every compose call
+passes the resolved `--env-file` and `--project-directory`. With no settings,
+every path is exactly the default above.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `HYBRID_AI_APP_DIR` | Program/repository directory | the repo directory |
+| `HYBRID_AI_ENV_FILE` | The env file | `$HYBRID_AI_APP_DIR/.env` |
+| `HYBRID_AI_DATA_DIR` | Durable data (`hermes_data/`, `webui_data/`, `ollama_data/`) | the repo directory |
+| `HYBRID_AI_LOG_DIR` | Logs (`install.log`, `backup.log`) | the repo directory |
+| `HYBRID_AI_WORK_DIR` | Backup/restore scratch (`.backup-staging`, `.restore-work`, `.restore-test-*`) | the repo directory |
+
+Resolution order is: the process environment, then the env file (parsed line by
+line, **never** sourced), then the default. A set value must be an absolute path
+with no whitespace, control character, `:` or `,`, and it must not be `/`.
+
+The settings that already existed keep their names and defaults:
+`OPENHANDS_WORKSPACE`, `AGENT_REPOS_DIR`, `OPENHANDS_STATE_DIR`,
+`BACKUP_CONF_DIR`, `RESTIC_CACHE_DIR`, `BACKUP_LOG`, and `HYBRID_AI_UID` /
+`HYBRID_AI_GID`.
+
+A split layout for a dedicated system account looks like this (commented example
+in `.env.example`):
+
+```
+HYBRID_AI_APP_DIR=/opt/hybrid-ai
+HYBRID_AI_DATA_DIR=/var/lib/hybrid-ai
+HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+HYBRID_AI_LOG_DIR=/var/log/hybrid-ai
+HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai/work
+```
+
+`./doctor.sh` prints every resolved path (never an env-file value) and warns when
+a set path does not exist. The isolation guards still refuse a workspace, agent
+repo tree or backup credential directory that is, is inside, or contains any
+protected tree, whichever layout is in use.
+
+---
+
 ## Privacy design
 
 Claims are only worth what enforces them. Each one below maps to a specific mechanism you can go and read:
