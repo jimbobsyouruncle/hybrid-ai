@@ -117,11 +117,13 @@ services:
     # A Pi 5 with 16 GB runs Ollama and Open WebUI alongside this. Without a
     # ceiling, a long agent session can starve the serving path -- and what you
     # would notice is chat getting slow, not OpenHands misbehaving.
+    # The ceiling is 2.5 CPUs and 3 GB of memory. The host has four cores, so
+    # 2.5 CPUs leaves headroom for Ollama, Open WebUI, and Hermes.
     deploy:
       resources:
         limits:
-          memory: ${OPENHANDS_MEM_LIMIT:-2g}
-          cpus: "${OPENHANDS_CPUS:-1.5}"
+          memory: ${OPENHANDS_MEM_LIMIT:-3g}
+          cpus: "${OPENHANDS_CPUS:-2.5}"
 
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000', timeout=5)\""]
