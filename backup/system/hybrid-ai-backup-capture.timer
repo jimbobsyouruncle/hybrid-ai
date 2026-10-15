@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-capture.timer
+# PURPOSE (plain English):
+#   Decides WHEN the system-mode capture runs. Same schedule as the per-user
+#   timer it replaces: nightly at 03:15, run-on-boot if the Pi was off, and a
+#   15-minute randomised delay.
+#
+#   It starts the CAPTURE unit; the capture unit starts the upload unit when the
+#   capture succeeds (OnSuccess=), so this timer never starts the upload itself.
+#
+# INSTALLED BY (card F later): install.sh in system mode enables this timer.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Nightly hybrid-ai backup capture (system mode)
+
+[Timer]
+# 03:15 local time every day -- the same schedule as the user timer.
+OnCalendar=*-*-* 03:15:00
+# If the Pi was off at 03:15, run shortly after it next boots.
+Persistent=true
+# Spread the start over a 15-minute window.
+RandomizedDelaySec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

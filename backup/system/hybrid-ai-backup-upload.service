@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-upload.service
+# PURPOSE (plain English):
+#   The UPLOAD half of a system-mode backup. It is started by the capture unit
+#   (OnSuccess=) after a capture has staged a consistent copy, and it does one
+#   thing: send that staged copy to the encrypted R2 repository with restic.
+#
+#   IT HOLDS THE CREDENTIALS AND THE NETWORK, AND NOTHING ELSE. That is the
+#   other half of the privilege split:
+#     * LoadCredential=      -- systemd hands over the two credential files
+#                               into a private, read-only directory that only
+#                               this unit can see. They never sit in a data tree.
+#     * NO capability        -- CapabilityBoundingSet= is empty, so this unit
+#                               cannot read data it does not own. It does not
+#                               need to: the capture already copied what it
+#                               could read.
+#     * docker sockets       -- made inaccessible. Uploading has no reason to
+#                               touch a container.
+#
+#   Restart= IS allowed here (unlike the capture unit): an upload that failed
+#   because R2 blipped should retry, and this unit starts and stops no
+#   container, so a retry can never disturb the running stack. The retries are
+#   bounded (StartLimitIntervalSec/StartLimitBurst) and an incomplete capture
+#   (exit 3) is never retried (RestartPreventExitStatus=3).
+#
+# INSTALLED BY (card F later): install.sh in system mode copies this file to
+#   /etc/systemd/system/ and writes /etc/credstore/hybrid-ai-backup/{r2.env,
+#   repo-password}. See backup/README.md, "System mode (fresh install and
+#   migration)".
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai backup upload (credentials and network, no read privilege)
+Documentation=file:///opt/hybrid-ai/backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Bounded retries: at most two starts in any hour, so a persistent upload
+# failure settles instead of looping.
+StartLimitIntervalSec=1h
+StartLimitBurst=2
+
+[Service]
+Type=oneshot
+User=hybrid-ai-backup
+Group=hybrid-ai-backup
+
+ExecStart=/opt/hybrid-ai/backup/backup.sh --upload-only
+
+# Retry a transient failure (R2 blip, network down). Bounded, and exit 3 (an
+# incomplete capture) is not retried: the data was already missing when it was
+# captured, so re-uploading cannot fix it.
+Restart=on-failure
+RestartSec=15min
+RestartPreventExitStatus=3
+
+# The R2 credentials. systemd copies these into $CREDENTIALS_DIRECTORY, a
+# private tmpfs, readable only by this unit; backup.sh reads them from there.
+# Only the two credentials this host needs -- never a copy in a data tree.
+LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env
+LoadCredential=repo-password:/etc/credstore/hybrid-ai-backup/repo-password
+
+# The staged capture and the restic cache are the only places this unit reads
+# or writes. StateDirectory= is the staging root (the capture unit writes it,
+# this unit reads it and later removes the whole tree); CacheDirectory= is
+# RESTIC_CACHE_DIR. Names and paths only.
+StateDirectory=hybrid-ai-backup
+RuntimeDirectory=hybrid-ai-backup
+CacheDirectory=hybrid-ai-backup
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_BACKUP_MODE=system
+Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
+Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup
+Environment=BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log
+
+# Give up rather than run forever. A hung upload holding the staging directory
+# open is worse than a missed night.
+TimeoutStartSec=4h
+
+# --- Hardening -------------------------------------------------------------
+# No capability at all: this unit cannot read the data trees, by design.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+# Staging is READ-ONLY to this unit except for its own removal: ProtectSystem=
+# strict makes all of /var read-only, and the ONLY write re-granted is the
+# staging root, so `rm -rf` can clear it after a successful upload. The script
+# reads the captured files and never writes them.
+ReadWritePaths=-/var/lib/hybrid-ai-backup
+
+# No Docker: the socket is not reachable from this unit.
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Outbound HTTPS to R2 is the whole point; AF_UNIX stays for journald.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

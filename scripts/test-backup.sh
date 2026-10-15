@@ -191,6 +191,21 @@ run_backup() {  # run_backup <label>; sets RUN_RC, writes stdout/stderr to $TMPR
   bash "$BACKUP" --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
 }
 
+# Run backup.sh with extra arguments and a caller-supplied environment. Used by
+# the stage/upload/external-mode cases below. Does NOT touch CAPTURE_DIR.
+run_backup_env() {  # run_backup_env <env K=V...> -- <backup args...>
+  local -a envs=() args=()
+  local seen_sep=0
+  for a in "$@"; do
+    if [[ "$a" == "--" ]]; then seen_sep=1; continue; fi
+    if (( seen_sep )); then args+=("$a"); else envs+=("$a"); fi
+  done
+  : > "$LOG"
+  : > "$DOCKER_LOG"
+  RUN_RC=0
+  env "${envs[@]}" bash "$BACKUP" "${args[@]}" > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+}
+
 FAILURES=0
 check() {  # check <description> <expected-rc> <actual-rc>
   if [[ "$3" == "$2" ]]; then
@@ -457,6 +472,107 @@ assert "case g: restore test dir made under WORK_DIR" \
   bash -c "compgen -G '$WORK2/.restore-test-*' >/dev/null"
 assert "case g: restore wrote nothing under APP_DIR" \
   bash -c "[[ \"\$(find '$APP2' -mindepth 1 | sort)\" == '$APP_BEFORE' ]]"
+
+# ---------------------------------------------------------------------------
+# Cases l-p: the stage/upload split (system-mode units call these flags).
+# Everything stays offline: an empty CONF proves --stage-only loads no
+# credentials, and the restic stub stands in for the network.
+# ---------------------------------------------------------------------------
+STAGE_WORK="$TMPROOT/stage-work"; mkdir -p "$STAGE_WORK"
+STAGE="$STAGE_WORK/.backup-staging"
+EMPTYCONF="$TMPROOT/emptyconf"; mkdir -p "$EMPTYCONF"
+
+# Case l: --stage-only KEEPS the staging directory, writes STATUS complete,
+# loads NO credentials (CONF points at an empty dir) and exits 0.
+rm -rf "$REPO/hermes_data" "$STAGE"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/webui_data/webui.db" 'CREATE TABLE chat(id); INSERT INTO chat VALUES (1);'
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" BACKUP_NO_PAUSE=1 -- --non-interactive --stage-only
+check "case l: --stage-only exit code" 0 "$RUN_RC"
+assert "case l: staging directory kept"        test -d "$STAGE"
+assert "case l: STATUS file written"           test -f "$STAGE/STATUS"
+assert "case l: STATUS is complete"            bash -c "grep -qx 'status=complete' '$STAGE/STATUS'"
+assert "case l: STATUS has a consistency word" bash -c "grep -qE '^consistency=(paused|online|cold)$' '$STAGE/STATUS'"
+assert "case l: stage-only loaded no credentials" bash -c "! grep -q 'No credentials' '$TMPROOT/out'"
+
+# Case m: --stage-only with an uncapturable db leaves the run INCOMPLETE: STATUS
+# says incomplete with a fixed reason code, and the exit is 3 (never 1).
+rm -rf "$REPO/hermes_data" "$STAGE"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/keep.db" 'CREATE TABLE t(a); INSERT INTO t VALUES (1);'
+printf 'SQLite format 3\0' > "$REPO/hermes_data/boom.db"
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" BACKUP_NO_PAUSE=1 -- --non-interactive --stage-only
+check "case m: incomplete --stage-only exit code" 3 "$RUN_RC"
+assert "case m: staging kept"                       test -d "$STAGE"
+assert "case m: STATUS is incomplete"               bash -c "grep -qx 'status=incomplete' '$STAGE/STATUS'"
+assert "case m: STATUS carries a fixed reason code" bash -c "grep -qE '^reason=[A-Za-z_]+[:A-Za-z_]*$' '$STAGE/STATUS'"
+assert "case m: raw db name never in STATUS"        bash -c "! grep -q 'boom' '$STAGE/STATUS'"
+
+# Case n: --upload-only refuses when the staging directory / STATUS is missing.
+rm -rf "$STAGE"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" -- --non-interactive --upload-only
+check "case n: --upload-only refuses without staging" 1 "$RUN_RC"
+assert "case n: refusal names the missing staging" bash -c "grep -qi 'staging' '$TMPROOT/out'"
+
+# Case n2: staging exists but STATUS is missing -- also refused.
+rm -rf "$STAGE"; mkdir -p "$STAGE"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" -- --non-interactive --upload-only
+check "case n2: --upload-only refuses without STATUS" 1 "$RUN_RC"
+assert "case n2: refusal names the missing STATUS" bash -c "grep -qi 'STATUS' '$TMPROOT/out'"
+
+# Case o: a complete --stage-only run followed by --upload-only: the upload
+# succeeds, the staging directory is removed, and the exit is 0.
+rm -rf "$REPO/hermes_data" "$STAGE"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" BACKUP_NO_PAUSE=1 -- --non-interactive --stage-only
+check "case o: stage complete" 0 "$RUN_RC"
+assert "case o: staging present before upload" test -d "$STAGE"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" -- --non-interactive --upload-only
+check "case o: --upload-only exit code" 0 "$RUN_RC"
+assert "case o: staging REMOVED after successful upload" bash -c "[[ ! -d '$STAGE' ]]"
+assert "case o: complete:true tag used"  log_has 'backup_success'
+
+# Case p: --upload-only of an INCOMPLETE capture still uploads but exits 3, and
+# the snapshot is tagged complete:false.
+rm -rf "$REPO/hermes_data" "$STAGE"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/keep.db" 'CREATE TABLE t(a); INSERT INTO t VALUES (1);'
+printf 'SQLite format 3\0' > "$REPO/hermes_data/boom.db"
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" BACKUP_NO_PAUSE=1 -- --non-interactive --stage-only
+check "case p: stage incomplete exit code" 3 "$RUN_RC"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" -- --non-interactive --upload-only
+check "case p: --upload-only incomplete exit code" 3 "$RUN_RC"
+assert "case p: staging removed after upload" bash -c "[[ ! -d '$STAGE' ]]"
+assert "case p: backup_incomplete emitted"    log_has 'backup_incomplete'
+
+# ---------------------------------------------------------------------------
+# Case q: CREDENTIALS_DIRECTORY. When systemd sets it, backup.sh reads r2.env
+# and repo-password from there and NOT from BACKUP_CONF_DIR.
+# ---------------------------------------------------------------------------
+CRED="$TMPROOT/cred"; mkdir -p "$CRED"
+cp "$CONF/r2.env" "$CRED/r2.env"; chmod 600 "$CRED/r2.env"
+cp "$CONF/repo-password" "$CRED/repo-password"; chmod 600 "$CRED/repo-password"
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" CREDENTIALS_DIRECTORY="$CRED" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case q: credentials-directory run exit code" 0 "$RUN_RC"
+assert "case q: credentials read from CREDENTIALS_DIRECTORY" log_has 'backup_success'
+
+# ---------------------------------------------------------------------------
+# Case r: BACKUP_CONTAINER_CONTROL=external. backup.sh must issue NO docker
+# command at all; it reads the paused list and host facts from the runtime dir.
+# ---------------------------------------------------------------------------
+CONTROL_RUN="$TMPROOT/control-run"; mkdir -p "$CONTROL_RUN/host-info"
+printf 'open-webui\nhermes-agent\n' > "$CONTROL_RUN/paused"
+chmod 600 "$CONTROL_RUN/paused"
+printf '27.0.0\n' > "$CONTROL_RUN/host-info/platform-docker.txt"
+printf 'llama3:latest\n' > "$CONTROL_RUN/host-info/ollama-models.txt"
+rm -rf "$REPO/hermes_data" "$STAGE"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$STAGE_WORK" BACKUP_CONTAINER_CONTROL=external BACKUP_CONTROL_RUN_DIR="$CONTROL_RUN" -- --non-interactive --stage-only
+check "case r: external-control --stage-only exit code" 0 "$RUN_RC"
+assert "case r: NO docker command was called in external mode" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+assert "case r: CONSISTENCY is paused from the runtime file" bash -c "grep -qx 'consistency=paused' '$STAGE/STATUS'"
+assert "case r: host facts copied into staging/host" bash -c "[[ -f '$STAGE/host/platform-docker.txt' ]]"
+assert "case r: docker version came from the helper file" bash -c "grep -qx 'docker=27.0.0' '$STAGE/host/platform.txt'"
 
 # ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then

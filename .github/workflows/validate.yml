@@ -88,6 +88,37 @@ jobs:
         # and that every isolation case is refused.
         run: bash scripts/test-hybrid-ai-env.sh
 
+      - name: Readability probe tests
+        # Offline. Proves the open(2)-based readability probe used in system
+        # mode succeeds where access(2)-based `[[ -r ]]`/`find -readable` would
+        # misreport a CAP_DAC_READ_SEARCH-readable file as unreadable.
+        run: bash scripts/test-read-probe.sh
+
+      - name: Backup system-unit static tests
+        # Offline. Asserts every directive of the privilege split: the capture
+        # unit's capability and no-network/no-credential shape, the upload
+        # unit's credentials and no-read-privilege shape, and the fixed
+        # schedules. Also runs systemd-analyze verify, skipping only when every
+        # diagnostic is the missing-host-path form.
+        run: bash scripts/test-backup-system-units.sh
+
+      - name: Backup mode / timer tests
+        # Offline. Proves HYBRID_AI_BACKUP_MODE steers doctor.sh,
+        # collect-diagnostics.sh, scripts/deploy-remote.sh and backup.sh to the
+        # right timer and systemctl scope in both modes.
+        run: bash scripts/test-backup-mode-timers.sh
+
+      - name: Backup container-control helper tests
+        # Offline. Proves backup/backup-containers.sh is root-only, uses a fixed
+        # container list, writes only under /run/hybrid-ai-backup, is idempotent
+        # on unpause and never starts or stops a container.
+        run: bash scripts/test-backup-containers.sh
+
+      - name: Deploy-remote tests
+        # Offline. Proves scripts/deploy-remote.sh refuses a wrong revision
+        # before running install.sh, and maps doctor.sh's exit code correctly.
+        run: bash scripts/test-deploy-remote.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. The bind sources are

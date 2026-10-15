@@ -21,7 +21,8 @@ set -uo pipefail
 unset HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR HYBRID_AI_LOG_DIR \
       HYBRID_AI_WORK_DIR HYBRID_AI_UID HYBRID_AI_GID OPENHANDS_WORKSPACE \
       AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR RESTIC_CACHE_DIR \
-      BACKUP_LOG 2>/dev/null || true
+      BACKUP_LOG HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
+      BACKUP_CONTAINER_CONTROL 2>/dev/null || true
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd -- "${HERE}/.." && pwd)"
@@ -85,8 +86,64 @@ check "AGENT_REPOS_DIR default" "$HOME/hybrid-ai-repos" "$(resolve "$EMPTY" AGEN
 check "OPENHANDS_STATE_DIR default" "$HOME/.openhands" "$(resolve "$EMPTY" OPENHANDS_STATE_DIR)"
 check "BACKUP_CONF_DIR default" "$HOME/.config/hybrid-ai-backup" "$(resolve "$EMPTY" BACKUP_CONF_DIR)"
 check "RESTIC_CACHE_DIR default" "$HOME/.cache/restic" "$(resolve "$EMPTY" RESTIC_CACHE_DIR)"
+check "HYBRID_AI_HERMES_HOME_DIR default" "$HOME/.hermes" "$(resolve "$EMPTY" HYBRID_AI_HERMES_HOME_DIR)"
+check "HYBRID_AI_BACKUP_MODE default is user" "user" "$(resolve "$EMPTY" HYBRID_AI_BACKUP_MODE)"
+check "BACKUP_CONTAINER_CONTROL default is self" "self" "$(resolve "$EMPTY" BACKUP_CONTAINER_CONTROL)"
 check "UID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_UID)"
 check "GID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_GID)"
+
+# The whole resolved set, byte for byte, with nothing set. This is the strongest
+# form of "with no settings, every path is identical to today": the complete
+# sorted KEY=VALUE dump of the new helper must equal the expected dump.
+CLONE="${TMPROOT}/clone-app"
+mkdir -p "${CLONE}/scripts/lib" "${CLONE}/backup" "${CLONE}/openhands" "${CLONE}/hermes"
+: > "${CLONE}/docker-compose.yml"
+cp "$HELPER" "${CLONE}/scripts/lib/"
+CH="${TMPROOT}/clonehome"
+mkdir -p "$CH"
+DUMP_SCRIPT="${TMPROOT}/dump.sh"
+cat > "$DUMP_SCRIPT" <<'DUMPEOF'
+# shellcheck source=/dev/null
+source "$HYBRID_AI_LIB" >/dev/null 2>&1
+for v in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR \
+         HYBRID_AI_LOG_DIR HYBRID_AI_WORK_DIR \
+         HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR \
+         HYBRID_AI_OLLAMA_DATA_DIR HYBRID_AI_INSTALL_LOG \
+         HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR \
+         HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
+         BACKUP_CONTAINER_CONTROL BACKUP_LOG BACKUP_CONF_DIR \
+         RESTIC_CACHE_DIR OPENHANDS_WORKSPACE AGENT_REPOS_DIR \
+         OPENHANDS_STATE_DIR; do
+  printf '%s=%s\n' "$v" "${!v}"
+done
+DUMPEOF
+DUMP="$(env -i HOME="$CH" PATH="$PATH" HYBRID_AI_LIB="${CLONE}/scripts/lib/hybrid-ai-env.sh" \
+        HYBRID_AI_APP_DIR="$CLONE" bash "$DUMP_SCRIPT" | sort)"
+EXPECT="$(sort <<EOF
+HYBRID_AI_APP_DIR=${CLONE}
+HYBRID_AI_ENV_FILE=${CLONE}/.env
+HYBRID_AI_DATA_DIR=${CLONE}
+HYBRID_AI_LOG_DIR=${CLONE}
+HYBRID_AI_WORK_DIR=${CLONE}
+HYBRID_AI_HERMES_DATA_DIR=${CLONE}/hermes_data
+HYBRID_AI_WEBUI_DATA_DIR=${CLONE}/webui_data
+HYBRID_AI_OLLAMA_DATA_DIR=${CLONE}/ollama_data
+HYBRID_AI_INSTALL_LOG=${CLONE}/install.log
+HYBRID_AI_BACKUP_STAGING_DIR=${CLONE}/.backup-staging
+HYBRID_AI_RESTORE_WORK_DIR=${CLONE}/.restore-work
+HYBRID_AI_HERMES_HOME_DIR=${CH}/.hermes
+HYBRID_AI_BACKUP_MODE=user
+BACKUP_CONTAINER_CONTROL=self
+BACKUP_LOG=${CLONE}/backup.log
+BACKUP_CONF_DIR=${CH}/.config/hybrid-ai-backup
+RESTIC_CACHE_DIR=${CH}/.cache/restic
+OPENHANDS_WORKSPACE=${CH}/hybrid-ai-agent
+AGENT_REPOS_DIR=${CH}/hybrid-ai-repos
+OPENHANDS_STATE_DIR=${CH}/.openhands
+EOF
+)"
+check "the full resolved set with no settings is byte-identical to today" \
+      "$EXPECT" "$DUMP"
 
 # ---------------------------------------------------------------------------
 # 2. A value in the env file is DATA, not code
@@ -136,6 +193,54 @@ done
 GOOD_ENV="${TMPROOT}/good.env"
 printf 'HYBRID_AI_DATA_DIR=/tmp/hai-ok\n' > "$GOOD_ENV"
 check "accepts a valid absolute value" "/tmp/hai-ok" "$(resolve "$GOOD_ENV" HYBRID_AI_DATA_DIR)"
+
+# ENUM settings: the allowed words are accepted; any other value is refused.
+for v in user system; do
+  fe="${TMPROOT}/mode_${v}.env"; printf 'HYBRID_AI_BACKUP_MODE=%s\n' "$v" > "$fe"
+  check "HYBRID_AI_BACKUP_MODE accepts '${v}'" "$v" "$(resolve "$fe" HYBRID_AI_BACKUP_MODE)"
+done
+for v in self external; do
+  fe="${TMPROOT}/ctrl_${v}.env"; printf 'BACKUP_CONTAINER_CONTROL=%s\n' "$v" > "$fe"
+  check "BACKUP_CONTAINER_CONTROL accepts '${v}'" "$v" "$(resolve "$fe" BACKUP_CONTAINER_CONTROL)"
+done
+for bad_val in "System" "host" "yes" "USER" "systemd"; do
+  fe="${TMPROOT}/bad_mode.env"; printf 'HYBRID_AI_BACKUP_MODE=%s\n' "$bad_val" > "$fe"
+  if resolve_rc "$fe"; then
+    bad "refused HYBRID_AI_BACKUP_MODE value '${bad_val}' (helper accepted it)"
+  else
+    ok "refused HYBRID_AI_BACKUP_MODE value '${bad_val}'"
+  fi
+done
+# An empty value means "unset": the default applies, exactly as for a path.
+fe="${TMPROOT}/empty_mode.env"; printf 'HYBRID_AI_BACKUP_MODE=\n' > "$fe"
+check "an empty HYBRID_AI_BACKUP_MODE falls back to user" "user" "$(resolve "$fe" HYBRID_AI_BACKUP_MODE)"
+for bad_val in "docker" "none" "TRUE"; do
+  fe="${TMPROOT}/bad_ctrl.env"; printf 'BACKUP_CONTAINER_CONTROL=%s\n' "$bad_val" > "$fe"
+  if resolve_rc "$fe"; then
+    bad "refused BACKUP_CONTAINER_CONTROL value '${bad_val}' (helper accepted it)"
+  else
+    ok "refused BACKUP_CONTAINER_CONTROL value '${bad_val}'"
+  fi
+done
+
+# The mode-derived unit names and credential directory are resolved by the ONE
+# helper, so doctor.sh/install.sh/deploy-remote.sh/collect-diagnostics.sh/
+# backup.sh cannot disagree about which units run.
+echo "== mode-derived names =="
+check "user-mode backup timer"       "hybrid-ai-backup.timer"         "$(resolve "$EMPTY" HYBRID_AI_BACKUP_TIMER_UNIT)"
+check "user-mode backup service"     "hybrid-ai-backup.service"       "$(resolve "$EMPTY" HYBRID_AI_BACKUP_SERVICE_UNIT)"
+check "user-mode check timer"        "hybrid-ai-check.timer"          "$(resolve "$EMPTY" HYBRID_AI_BACKUP_CHECK_TIMER_UNIT)"
+check "user-mode systemctl scope"    "--user"                         "$(resolve "$EMPTY" HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE)"
+check "user-mode journal scope"      "--user"                         "$(resolve "$EMPTY" HYBRID_AI_BACKUP_JOURNAL_SCOPE)"
+check "user-mode cred dir is BACKUP_CONF_DIR" "$HOME/.config/hybrid-ai-backup" "$(resolve "$EMPTY" HYBRID_AI_BACKUP_CRED_DIR)"
+
+SYSMODE="${TMPROOT}/sysmode.env"; printf 'HYBRID_AI_BACKUP_MODE=system\n' > "$SYSMODE"
+check "system-mode backup timer"     "hybrid-ai-backup-capture.timer" "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_TIMER_UNIT)"
+check "system-mode backup service"   "hybrid-ai-backup-capture.service" "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_SERVICE_UNIT)"
+check "system-mode check timer"      "hybrid-ai-backup-check.timer"   "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_CHECK_TIMER_UNIT)"
+check "system-mode systemctl scope"  "--system"                       "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE)"
+check "system-mode journal scope"    "--system"                       "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_JOURNAL_SCOPE)"
+check "system-mode cred dir is the credstore" "/etc/credstore/hybrid-ai-backup" "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_CRED_DIR)"
 
 # ---------------------------------------------------------------------------
 # 4. Isolation guards (AC6)

@@ -519,10 +519,12 @@ run "Ollama models" bash -c "docker exec ollama ollama list 2>/dev/null || echo 
 # ---------------------------------------------------------------------------
 printf '  %s[9/9]%s Backups...\n' "$C_INF" "$C_RST"
 sec "9. BACKUPS"
-run "Timers" bash -c "systemctl --user list-timers 'hybrid-ai-*' --no-pager 2>/dev/null || echo 'no user timers'"
-run "Linger (required for backups to run while logged out)" bash -c "loginctl show-user \"\$USER\" 2>/dev/null | grep -i linger || echo 'unknown'"
+# The shared helper resolves which units and which scopes apply for the
+# configured mode, so this section cannot disagree with doctor.sh or install.sh.
+run "Timers" bash -c "systemctl $HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE list-timers 'hybrid-ai-*' --no-pager 2>/dev/null || echo 'no timers in scope'"
+run "Linger (required for user-mode backups to run while logged out)" bash -c "loginctl show-user \"\$USER\" 2>/dev/null | grep -i linger || echo 'unknown'"
 run "Recent backup events" bash -c "grep '^EVENT' '$BACKUP_LOG' 2>/dev/null | tail -25 || echo '(no backup.log)'"
-run "Backup service journal" bash -c "journalctl --user -u hybrid-ai-backup.service -n 40 --no-pager 2>/dev/null || echo 'unavailable'"
+run "Backup service journal" bash -c "journalctl $HYBRID_AI_BACKUP_JOURNAL_SCOPE -u $HYBRID_AI_BACKUP_SERVICE_UNIT -n 40 --no-pager 2>/dev/null || echo 'unavailable'"
 
 # ---------------------------------------------------------------------------
 # 10. Self-audit -- scan the finished file for anything still secret-shaped

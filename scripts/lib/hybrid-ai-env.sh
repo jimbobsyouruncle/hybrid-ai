@@ -147,6 +147,36 @@ _hybrid_ai_resolve_path() {
   return 0
 }
 
+# Resolve one ENUM setting: environment, then env file, then default. The value
+# must be one of the allowed words; any other value is refused (non-zero exit),
+# so a typo cannot silently select the wrong behaviour. The message names the
+# SETTING and the allowed words -- never the rejected value, which may have come
+# from the env file.
+_hybrid_ai_resolve_enum() {
+  local name="$1" default="$2" allowed="$3" envfile="$4" val origin a matched
+  val="${!name:-}"
+  if [[ -n "$val" ]]; then
+    origin="environment"
+  else
+    val="$(_hybrid_ai_file_get "$envfile" "$name")"
+    if [[ -n "$val" ]]; then origin="env file"; else origin="default"; fi
+  fi
+  if [[ "$origin" == "default" ]]; then
+    val="$default"
+  else
+    matched=0
+    for a in $allowed; do [[ "$val" == "$a" ]] && matched=1; done
+    if (( ! matched )); then
+      printf 'hybrid-ai-env: %s must be one of: %s.\n' "$name" "$allowed" >&2
+      printf 'hybrid-ai-env: refused the %s value for %s.\n' "$origin" "$name" >&2
+      return 1
+    fi
+  fi
+  printf -v "$name" '%s' "$val"
+  export "${name?}"
+  return 0
+}
+
 # Resolve one NON-path setting (a uid, gid, or other scalar): environment, then
 # env file, then default. No path validation is applied.
 _hybrid_ai_resolve_scalar() {
@@ -209,6 +239,21 @@ hybrid_ai_env_load() {
   _hybrid_ai_resolve_path OPENHANDS_STATE_DIR "${HOME:-}/.openhands"      "$ef" || return 1
   _hybrid_ai_resolve_path BACKUP_CONF_DIR     "${HOME:-}/.config/hybrid-ai-backup" "$ef" || return 1
   _hybrid_ai_resolve_path RESTIC_CACHE_DIR    "${HOME:-}/.cache/restic"   "$ef" || return 1
+  # Durable per-user Hermes state captured by the backup. Derived from HOME by
+  # default (exactly where backup.sh and restore.sh already looked), but now a
+  # named path setting so a system-mode unit can relocate it.
+  _hybrid_ai_resolve_path HYBRID_AI_HERMES_HOME_DIR "${HOME:-}/.hermes" "$ef" || return 1
+
+  # --- Mode selectors -------------------------------------------------------
+  # HYBRID_AI_BACKUP_MODE picks WHICH system units run the backup. "user" keeps
+  # today's per-user units; "system" selects the two-unit privilege split. Any
+  # other value is refused. It selects units only -- backup.sh's own behaviour
+  # is chosen by its --stage-only/--upload-only flags, not by this setting.
+  _hybrid_ai_resolve_enum HYBRID_AI_BACKUP_MODE "user" "user system" "$ef" || return 1
+  # BACKUP_CONTAINER_CONTROL=external tells backup.sh that a root helper pauses
+  # and unpauses the containers, so backup.sh itself must call no docker command.
+  # Default "self" is today's behaviour (the script pauses/execs docker itself).
+  _hybrid_ai_resolve_enum BACKUP_CONTAINER_CONTROL "self" "self external" "$ef" || return 1
 
   # --- Derived paths (names unchanged) --------------------------------------
   HYBRID_AI_HERMES_DATA_DIR="${HYBRID_AI_DATA_DIR}/hermes_data"
@@ -217,16 +262,41 @@ hybrid_ai_env_load() {
   HYBRID_AI_INSTALL_LOG="${HYBRID_AI_LOG_DIR}/install.log"
   HYBRID_AI_BACKUP_STAGING_DIR="${HYBRID_AI_WORK_DIR}/.backup-staging"
   HYBRID_AI_RESTORE_WORK_DIR="${HYBRID_AI_WORK_DIR}/.restore-work"
-  # Durable per-user state captured by the backup. Derived from HOME, exactly
-  # where backup.sh and restore.sh already looked.
-  HYBRID_AI_HERMES_HOME_DIR="${HOME:-}/.hermes"
   export HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR HYBRID_AI_OLLAMA_DATA_DIR
   export HYBRID_AI_INSTALL_LOG HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR
-  export HYBRID_AI_HERMES_HOME_DIR
 
   # BACKUP_LOG keeps its name and default: $LOG_DIR/backup.log. The resolved
   # value is exported so backup.sh/restore.sh/doctor.sh share one path.
   _hybrid_ai_resolve_path BACKUP_LOG "${HYBRID_AI_LOG_DIR}/backup.log" "$ef" || return 1
+
+  # --- Mode-derived unit names and credential directory ---------------------
+  # ONE place resolves which backup units a mode uses, so install.sh, doctor.sh,
+  # deploy-remote.sh, collect-diagnostics.sh and backup.sh cannot disagree. In
+  # system mode the credentials live in the root-owned credstore the units read;
+  # in user mode they live in BACKUP_CONF_DIR, exactly as today. Names and paths
+  # only -- never a value.
+  if [[ "$HYBRID_AI_BACKUP_MODE" == "system" ]]; then
+    HYBRID_AI_BACKUP_TIMER_UNIT="hybrid-ai-backup-capture.timer"
+    HYBRID_AI_BACKUP_SERVICE_UNIT="hybrid-ai-backup-capture.service"
+    HYBRID_AI_BACKUP_CHECK_TIMER_UNIT="hybrid-ai-backup-check.timer"
+    HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE="--system"
+    HYBRID_AI_BACKUP_JOURNAL_SCOPE="--system"
+    _hybrid_ai_backup_cred_default="/etc/credstore/hybrid-ai-backup"
+  else
+    HYBRID_AI_BACKUP_TIMER_UNIT="hybrid-ai-backup.timer"
+    HYBRID_AI_BACKUP_SERVICE_UNIT="hybrid-ai-backup.service"
+    HYBRID_AI_BACKUP_CHECK_TIMER_UNIT="hybrid-ai-check.timer"
+    HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE="--user"
+    HYBRID_AI_BACKUP_JOURNAL_SCOPE="--user"
+    _hybrid_ai_backup_cred_default="$BACKUP_CONF_DIR"
+  fi
+  # The credential directory is a NAMED path setting (env file or environment may
+  # relocate it) whose DEFAULT follows the mode. Names and paths only.
+  _hybrid_ai_resolve_path HYBRID_AI_BACKUP_CRED_DIR "$_hybrid_ai_backup_cred_default" "$ef" || return 1
+  unset _hybrid_ai_backup_cred_default
+  export HYBRID_AI_BACKUP_CRED_DIR HYBRID_AI_BACKUP_TIMER_UNIT
+  export HYBRID_AI_BACKUP_SERVICE_UNIT HYBRID_AI_BACKUP_CHECK_TIMER_UNIT
+  export HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE HYBRID_AI_BACKUP_JOURNAL_SCOPE
 
   return 0
 }

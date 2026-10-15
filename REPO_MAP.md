@@ -32,12 +32,20 @@
 ## backup
 
 - backup/README.md - backup/ — Encrypted Offsite Backups
+- backup/backup-containers.sh - FILE: backup/backup-containers.sh
 - backup/backup.sh - FILE: backup/backup.sh
 - backup/hybrid-ai-backup.service
 - backup/hybrid-ai-backup.timer
 - backup/hybrid-ai-check.service
 - backup/hybrid-ai-check.timer
 - backup/restore.sh - FILE: backup/restore.sh
+## backup/system
+
+- backup/system/hybrid-ai-backup-capture.service
+- backup/system/hybrid-ai-backup-capture.timer
+- backup/system/hybrid-ai-backup-check.service
+- backup/system/hybrid-ai-backup-check.timer
+- backup/system/hybrid-ai-backup-upload.service
 ## docs
 
 - docs/BUILDER_PUBLISH_SMOKE_TEST.md
@@ -82,16 +90,21 @@
 - scripts/deploy-remote.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
+- scripts/test-backup-containers.sh - FILE: scripts/test-backup-containers.sh
+- scripts/test-backup-mode-timers.sh - FILE: scripts/test-backup-mode-timers.sh
+- scripts/test-backup-system-units.sh - FILE: scripts/test-backup-system-units.sh
 - scripts/test-backup.sh - shellcheck disable=SC2317,SC2329 # helpers and the EXIT trap are called indirectly
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
 - scripts/test-deploy-remote.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
+- scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 ## scripts/lib
 
 - scripts/lib/hybrid-ai-env.sh - FILE: scripts/lib/hybrid-ai-env.sh
+- scripts/lib/read-probe.sh - FILE: scripts/lib/read-probe.sh
 ## status
 
 - status/Caddyfile

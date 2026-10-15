@@ -848,6 +848,47 @@ journalctl --user -u hybrid-ai-backup.service -n 50
 
 A healthy run logs `backup_success` followed by `retention_applied`. A run that uploaded but missed durable state logs `backup_incomplete` and exits **3** — it is expected sometimes and is not retried.
 
+### System mode (two units, one account)
+
+With `HYBRID_AI_BACKUP_MODE=system` there are two units, not one, and the
+commands change scope. Use `--system` and the two unit names:
+
+```bash
+systemctl list-timers 'hybrid-ai-*'                       # next capture
+journalctl --system -u hybrid-ai-backup-capture.service -n 50
+journalctl --system -u hybrid-ai-backup-upload.service  -n 50
+systemctl start hybrid-ai-backup-capture.service          # run one now
+cat /var/lib/hybrid-ai-backup/.backup-staging/STATUS                      # complete|incomplete
+```
+
+The capture unit stops a run by exit code:
+
+| Exit | Meaning | What happens |
+|---|---|---|
+| 0 | capture complete | `STATUS` is `complete`; `OnSuccess=` starts the upload unit |
+| 3 | capture incomplete (durable state was missed) | `STATUS` is `incomplete`; `SuccessExitStatus=3` still starts the upload, which tags the snapshot `complete:false`. The upload never retries it (`RestartPreventExitStatus=3`) |
+| 1 | capture failed | no upload; the capture unit has no `Restart=`, so it does not loop |
+| killed | capture interrupted | `ExecStopPost=+backup-containers.sh unpause` resumes the containers |
+
+If a capture is killed hard, `unpause` is idempotent, so it is always safe to run
+by hand as root:
+
+```bash
+sudo /opt/hybrid-ai/backup/backup-containers.sh unpause
+```
+
+The upload unit holds the R2 credentials (from
+`/etc/credstore/hybrid-ai-backup/`) and retries a transient failure, bounded to
+`StartLimitBurst=2` per `StartLimitIntervalSec=1h`. The capture unit holds no
+credentials and has no network.
+
+**`skip: <unit> (host paths not installed)`.** The static test
+`scripts/test-backup-system-units.sh` runs `systemd-analyze verify` on the
+system units. On a host that has no `/opt/hybrid-ai` (the builder host,
+`ubuntu-latest`), verify reports only the missing-host-path diagnostic for each
+`ExecStart=`, so the test prints that skip line and does not count a failure. Any
+OTHER diagnostic is a real failure, alone or mixed with the host-path line.
+
 ### Backup events
 
 | Event | Meaning | Action |

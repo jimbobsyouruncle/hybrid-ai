@@ -4,8 +4,18 @@
 |---|---|
 | `backup.sh` | Snapshots your data consistently and uploads it, encrypted, to Cloudflare R2 |
 | `restore.sh` | Brings it all back — including a rehearsal mode that touches nothing live |
-| `hybrid-ai-backup.{service,timer}` | Nightly schedule at 03:15 |
-| `hybrid-ai-check.{service,timer}` | Monthly integrity verification |
+| `hybrid-ai-backup.{service,timer}` | Nightly schedule at 03:15 (**user mode**, the default) |
+| `hybrid-ai-check.{service,timer}` | Monthly integrity verification (**user mode**) |
+| `system/` | The **system mode** units: a two-unit privilege split (see below) |
+| `backup-containers.sh` | Root-only helper the system-mode capture unit calls; the only part of a system-mode backup that touches Docker |
+
+There are two ways to run the nightly backup, chosen by the
+`HYBRID_AI_BACKUP_MODE` setting:
+
+- **user** (the default) — today's per-user units, unchanged.
+- **system** — two system units under a dedicated unprivileged account that
+  together can capture all durable state without root and without any account in
+  the `docker` group. See [System mode](#system-mode-fresh-install-and-migration).
 
 ---
 
@@ -314,6 +324,74 @@ RESTIC_REPOSITORY=/mnt/usb-backup RESTIC_PASSWORD_FILE=~/.config/hybrid-ai-backu
 ```
 
 Two providers, two failure modes, one password to remember.
+
+---
+
+## System mode (fresh install and migration)
+
+System mode runs the backup as two system units under a dedicated, unprivileged
+account. It exists so the nightly backup can read ALL durable state — including
+the container-owned data trees — without running as root and without putting any
+account in the `docker` group. The two units split the job:
+
+| Unit | Reads durable state | Docker | Network | Credentials |
+|---|---|---|---|---|
+| `hybrid-ai-backup-capture.service` | yes, with `CAP_DAC_READ_SEARCH` | no | no (`PrivateNetwork=yes`) | no |
+| `hybrid-ai-backup-upload.service` | no | no | yes | yes (`LoadCredential=`) |
+
+The capture writes a consistent copy to its `StateDirectory`; the upload sends
+that copy to R2 and holds the only copy of the credentials. Neither unit can do
+the other's job, so a compromise of either half is contained. A single fixed,
+root-owned helper (`backup-containers.sh`) bridges the only gap — pausing the
+containers for a point-in-time capture — and it never starts or stops a
+container.
+
+### What card F creates (one bootstrap, on the host)
+
+Installing the account and the credentials on a host is card F's job. It is the
+ONLY manual step; everything after it runs from the units. Card F must create:
+
+1. **The account** — a no-login system account `hybrid-ai-backup`
+   (`User=`/`Group=` in the units). It is NOT added to the `docker` group.
+2. **The runtime directory** — `/run/hybrid-ai-backup`, owned by that account
+   (`RuntimeDirectory=hybrid-ai-backup` recreates it per run).
+3. **The credential store** — `/etc/credstore/hybrid-ai-backup/` (root, mode
+   `0700`), holding:
+   - `/etc/credstore/hybrid-ai-backup/r2.env` (root, mode `0600`)
+   - `/etc/credstore/hybrid-ai-backup/repo-password` (root, mode `0600`)
+4. **The system env file** — `/etc/hybrid-ai/hybrid-ai.env`, with these settings
+   (names and paths only):
+   - `HYBRID_AI_BACKUP_MODE=system`
+   - `BACKUP_CONTAINER_CONTROL=external`
+   - `HYBRID_AI_APP_DIR=/opt/hybrid-ai`
+   - `HYBRID_AI_DATA_DIR` (the durable data root)
+   - `HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup`
+   - `HYBRID_AI_LOG_DIR=/var/log/hybrid-ai-backup`
+   - `HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`
+   - `HYBRID_AI_HERMES_HOME_DIR` (the per-user Hermes home to capture)
+5. **The units** — `install.sh`, run as root, installs `backup/system/*` into
+   `/etc/systemd/system/`, daemon-reloads, and enables
+   `hybrid-ai-backup-capture.timer` and `hybrid-ai-backup-check.timer`.
+
+When `HYBRID_AI_BACKUP_MODE` is unset (or `user`), none of this applies and the
+per-user units behave exactly as before.
+
+### Verify a run
+
+```bash
+systemctl list-timers 'hybrid-ai-*'                  # see the next capture
+systemctl start hybrid-ai-backup-capture.service     # run one now
+journalctl --system -u hybrid-ai-backup-capture.service -n 50
+journalctl --system -u hybrid-ai-backup-upload.service  -n 50
+systemctl show -p Result hybrid-ai-backup-capture.service
+cat /var/lib/hybrid-ai-backup/.backup-staging/STATUS                 # complete | incomplete
+```
+
+A capture that finishes with `STATUS` `complete` starts the upload immediately
+(`OnSuccess=`), and the uploaded snapshot is tagged `complete:true`. An
+`incomplete` capture still uploads (so partial data is kept) but is tagged
+`complete:false` and never retried, because the data was already missing when it
+was captured.
 
 ---
 

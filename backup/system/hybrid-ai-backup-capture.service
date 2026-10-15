@@ -1,0 +1,105 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-capture.service
+# PURPOSE (plain English):
+#   The CAPTURE half of a system-mode backup. It runs as the unprivileged
+#   hybrid-ai-backup account and does exactly one thing: read the durable state
+#   and stage a consistent copy under StateDirectory. It then tells systemd to
+#   start the upload unit (OnSuccess=) and stops.
+#
+#   IT HOLDS NO NETWORK AND NO CREDENTIALS. That is the point of the split:
+#     * PrivateNetwork=yes   -- no network, so it cannot reach R2 even if it
+#                               wanted to, and no upload can leak from here.
+#     * no LoadCredential    -- the R2 keys are simply not present. The upload
+#                               unit is the ONLY unit that gets them.
+#     * docker socket paths  -- made inaccessible, so it cannot drive Docker.
+#   A root helper (backup-containers.sh, run via the leading "+" on the Exec
+#   lines below, which alone lifts the sandbox for one fixed command) pauses the
+#   containers and collects host facts; it never starts or stops a container.
+#
+#   ONE capability is granted: CAP_DAC_READ_SEARCH, so the account can read the
+#   container-owned data. Nothing else.
+#
+#   NO Restart=: a capture that failed must not loop. An incomplete capture
+#   (exit 3) is a success for systemd (SuccessExitStatus=3) so the upload still
+#   runs -- partial data is worth keeping.
+#
+# INSTALLED BY (card F later): install.sh in system mode copies this file to
+#   /etc/systemd/system/ and enables hybrid-ai-backup-capture.timer. See
+#   backup/README.md, "System mode (fresh install and migration)".
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai backup capture (stage, no network, no credentials)
+Documentation=file:///opt/hybrid-ai/backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+# When the capture finishes successfully (including an INCOMPLETE capture, which
+# is a success exit status -- see SuccessExitStatus= below), systemd starts the
+# upload unit. OnSuccess lives in the [Unit] section.
+OnSuccess=hybrid-ai-backup-upload.service
+
+[Service]
+Type=oneshot
+User=hybrid-ai-backup
+Group=hybrid-ai-backup
+
+# Fixed, root-owned commands run with privilege: the leading "+" drops every
+# sandbox restriction for that single command so it can talk to Docker. It only
+# ever pauses/unpauses the FIXED container list and reads host facts.
+ExecStartPre=+/opt/hybrid-ai/backup/backup-containers.sh host-info
+ExecStartPre=+/opt/hybrid-ai/backup/backup-containers.sh pause
+ExecStart=/opt/hybrid-ai/backup/backup.sh --stage-only
+# Always unpause, whether the capture succeeded, failed, or was killed.
+ExecStopPost=+/opt/hybrid-ai/backup/backup-containers.sh unpause
+
+# An INCOMPLETE capture (exit 3) is a valid outcome: the upload unit still runs
+# (OnSuccess= fires for a success exit status) and tags the snapshot
+# complete:false. No Restart= here -- a failed capture must not loop.
+SuccessExitStatus=3
+
+# Where the staged capture lives (StateDirectory=), the runtime records the root
+# helper writes (RuntimeDirectory=), the backup log (LogsDirectory=), and the
+# fixed paths everything is told to use. Only names and paths, no values.
+StateDirectory=hybrid-ai-backup
+RuntimeDirectory=hybrid-ai-backup
+LogsDirectory=hybrid-ai-backup
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_BACKUP_MODE=system
+Environment=BACKUP_CONTAINER_CONTROL=external
+Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
+Environment=BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log
+
+# Give up rather than run forever.
+TimeoutStartSec=4h
+
+# --- The privilege split ---------------------------------------------------
+# The ONE capability that makes container-owned data readable. Nothing else.
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# No network: the capture can never reach R2.
+PrivateNetwork=yes
+
+# No Docker: the socket is not reachable from this unit.
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+
+# Filesystem: read-only except the staging, runtime and log directories systemd
+# hands this unit by name.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Only a local Unix socket is needed to write to journald; no IP traffic at all
+# (PrivateNetwork already removed it).
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
