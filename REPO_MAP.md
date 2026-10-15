@@ -46,6 +46,11 @@
 - backup/system/hybrid-ai-backup-check.service
 - backup/system/hybrid-ai-backup-check.timer
 - backup/system/hybrid-ai-backup-upload.service
+## deploy
+
+- deploy/50-hybrid-ai-deploy.rules
+- deploy/README.md - deploy/ — headless deploy (one commit, one unit)
+- deploy/hybrid-ai-deploy@.service
 ## docs
 
 - docs/BUILDER_PUBLISH_SMOKE_TEST.md
@@ -87,6 +92,8 @@
 - scripts/check-agent-context.sh - Check that the checked-in agent context maps are fresh.
 - scripts/check-git-remotes.sh - FILE: scripts/check-git-remotes.sh
 - scripts/check-hermes-nonroot.sh - FILE: scripts/check-hermes-nonroot.sh
+- scripts/deploy-forced-command.sh
+- scripts/deploy-instance.sh
 - scripts/deploy-remote.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
@@ -96,6 +103,8 @@
 - scripts/test-backup.sh - shellcheck disable=SC2317,SC2329 # helpers and the EXIT trap are called indirectly
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
+- scripts/test-deploy-forced-command.sh
+- scripts/test-deploy-instance.sh
 - scripts/test-deploy-remote.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh

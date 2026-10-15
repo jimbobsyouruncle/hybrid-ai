@@ -229,6 +229,14 @@
 ## scripts/check-hermes-nonroot.sh
 - err()
 
+## scripts/deploy-forced-command.sh
+- refuse()
+
+## scripts/deploy-instance.sh
+- die()
+- url_has_userinfo()
+- url_is_https()
+
 ## scripts/deploy-remote.sh
 - (no symbols)
 
@@ -326,6 +334,22 @@
 - mk_repo()
 - run_check()
 - no_leak()
+
+## scripts/test-deploy-forced-command.sh
+- ok()
+- bad()
+- has_line()
+- hasnt_regex()
+- run()
+
+## scripts/test-deploy-instance.sh
+- ok()
+- bad()
+- has_line()
+- hasnt_regex()
+- run_instance()
+- check_line()
+- run_verify()
 
 ## scripts/test-deploy-remote.sh
 - pass()

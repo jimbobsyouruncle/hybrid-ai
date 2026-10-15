@@ -131,6 +131,27 @@ The workflow holds `permissions: contents: read`, adds no write permission, and 
 
 ---
 
+## Headless deploy (not active until migration)
+
+`deploy/` and `scripts/deploy-*.sh` hold the in-repo pieces of a **headless
+deploy**: a dedicated, unprivileged `hybrid-ai-deploy` account with a
+forced-command SSH entrypoint that can do exactly one thing — start the system
+unit `hybrid-ai-deploy@<sha>.service` for a 40-character commit.
+
+**Nothing in this path is active yet, and `deploy.yml` is unchanged.** The
+migration is two later owner steps: **card F** installs the unit, the polkit
+rule, the scripts and the `authorized_keys` line on the host; a later card
+switches `deploy.yml` to call the forced command instead of the current
+`appleboy/ssh-action` step. See [`../deploy/README.md`](../deploy/README.md) for
+the `authorized_keys` line, the install locations, the refusal exit codes and the
+least-privilege statement.
+
+The account holds no login shell beyond the forced command, no sudo, and is in
+neither the `docker` nor the `systemd-journal` group. The polkit rule grants only
+`start` of a matching unit.
+
+---
+
 
 ## Why your data is safe during a deploy
 

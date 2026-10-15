@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/hybrid-ai-deploy@.service
+# PURPOSE (plain English):
+#   The systemd unit behind the headless deploy. It is an INSTANTIATED system
+#   unit: the `%i` in the name is the 40-character lowercase hex commit to
+#   deploy, and ExecStart passes that same `%i` to the deploy script as its
+#   single argument.
+#
+#   The forced-command SSH entrypoint (scripts/deploy-forced-command.sh) is the
+#   only thing the `hybrid-ai-deploy` account is allowed to do, and it does
+#   exactly one thing: ask the SYSTEM systemd manager to start THIS unit for a
+#   given commit. Everything privileged happens here and in the script, never
+#   in the SSH command.
+#
+#   It runs as root because it resets the program tree and reprovisions the
+#   host, which needs root. The commit argument is re-validated inside
+#   scripts/deploy-instance.sh, so a malformed `%i` cannot reach the tree.
+#
+#   NO Restart= AT ALL:
+#     An earlier backup upload unit used Restart=on-failure and its retry loop
+#     stopped hermes-agent every 15 minutes (incident B1). A deploy that failed
+#     must NEVER be retried automatically: a retry could reset the tree again
+#     and disturb the running stack mid-interval. A failed deploy stays failed
+#     and is diagnosed from its log. Do not add any Restart= policy here.
+#
+#   NOT ACTIVE UNTIL MIGRATION:
+#     Nothing here is active until the owner's migration. Card F installs this
+#     unit under /etc/systemd/system/ (see deploy/README.md); a later card
+#     switches .github/workflows/deploy.yml over to it. Until then the file is
+#     inert and today's deploy path is unchanged.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai headless deploy for commit %i
+Documentation=file:///opt/hybrid-ai/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The deploy resets the program tree and reprovisions the host: it needs root.
+User=root
+WorkingDirectory=/opt/hybrid-ai
+
+# Paths by name only, never a value. The env file carries the host layout.
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+
+# `%i` is the 40-hex commit; deploy-instance.sh re-validates it, then fetches,
+# checks ancestry, resets, asserts HEAD, and execs deploy-remote.sh.
+ExecStart=/opt/hybrid-ai/scripts/deploy-instance.sh %i
+
+# Give up rather than run forever. A hung deploy holding the lock is worse than
+# a failed one.
+TimeoutStartSec=20min
+
+# Deliberately NO Restart= policy. See the file header: an automatic retry must
+# never re-reset the tree or disturb the running stack (incident B1).
+
+[Install]
+# Instantiated units are started explicitly, never enabled or wanted by boot.
+WantedBy=multi-user.target

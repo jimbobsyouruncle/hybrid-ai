@@ -485,9 +485,31 @@ Put that in a password manager. Rehearse a restore before you need one:
 | `hermes/` | Hermes Agent system orchestrator | [hermes/README.md](hermes/README.md) |
 | `openhands/` | Natural-language code-maintenance agent | [openhands/README.md](openhands/README.md) |
 | `backup/` | Encrypted backups to Cloudflare R2 | [`backup/README.md`](backup/README.md) |
+| `deploy/` | Headless deploy pieces (**not active until migration**) | [`deploy/README.md`](deploy/README.md) |
 | `webui_data/` | **Your data.** Chats, documents, vectors | Created at runtime, never committed |
 | `hermes_data/` | **Your data.** Persistent agent memories/skills | Created at runtime, never committed |
 | `ollama_data/` | Downloaded model files | Created at runtime, never committed |
+
+---
+
+## Headless deploy (not active until migration)
+
+The `deploy/` directory and `scripts/deploy-*.sh` hold the in-repo pieces of a
+**headless deploy**: a dedicated, unprivileged `hybrid-ai-deploy` account that
+can do exactly one thing over SSH — start the system unit
+`hybrid-ai-deploy@<sha>.service` for a 40-character commit, which runs
+`scripts/deploy-instance.sh` and then the existing `scripts/deploy-remote.sh`.
+
+**Nothing in this path is active yet.** Today's deploy runs through
+`.github/workflows/deploy.yml`, unchanged. The migration happens in two later
+owner steps: **card F** installs the unit, the polkit rule, the scripts and the
+`authorized_keys` line on the host; a later card switches `deploy.yml` over to
+the forced command. Until then these files are inert source and documentation.
+
+The account holds no login shell beyond the forced command, no sudo, and is in
+neither the `docker` nor the `systemd-journal` group. Full detail, including the
+`authorized_keys` line and the refusal exit codes, is in
+[`deploy/README.md`](deploy/README.md).
 
 ---
 
