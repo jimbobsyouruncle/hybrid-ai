@@ -618,18 +618,27 @@ what the image `CMD` starts, and an `exec`ed one is not tracked as that process.
 
 ## The Hermes image at a pinned commit: smoke-job failure modes
 
-The `hermes-nonroot-smoke` CI job builds `hermes/Dockerfile` and runs the image on an empty
-data volume as uid `10001`. It fails closed on these modes. Each maps to one build or
+The `hermes-nonroot-smoke` CI job builds `hermes/Dockerfile` and runs the image as uid
+`10001` on a data volume seeded with a **decoy** agent (a valid Agent source root that would
+leave a marker if imported). It fails closed on these modes. Each maps to one build or
 configuration change.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | The build fails on `sha256sum -c -` for `/tmp/hermes-install.sh` | The installer at `HERMES_COMMIT` no longer matches `HERMES_INSTALL_SHA256`. Upstream rewrote `scripts/install.sh` at a tag, or the pin moved without the checksum. | Download `https://raw.githubusercontent.com/NousResearch/hermes-agent/<sha>/scripts/install.sh` and set `HERMES_INSTALL_SHA256` to its sha256. Never disable the check. |
+| The build fails on `git rev-parse` for `/app`, or `--detach` fails | The WebUI clone at `HERMES_WEBUI_COMMIT` no longer resolves, or `main` moved. | Set `HERMES_WEBUI_COMMIT` to a commit that still exists and bump the matching string in `validate.yml`. Never clone `main` and never drop the `git rev-parse` assert. |
+| The build fails on `test -x /opt/hermes-agent/.hermes/venv/bin/python` | `/opt/manifest.json` names no venv, or the venv has no interpreter. | The Agent install changed shape. Do not hand-edit the manifest; rebuild and re-check the Agent pin. |
 | `git apply` fails, or `rev-parse HEAD` is not `HERMES_COMMIT` | The local patch no longer applies at the pin, or the checkout is at a different commit. | Rebase `patches/0001-kanban-prompt-body-chars.patch` onto the pinned commit, or bump `HERMES_COMMIT` deliberately. |
 | `exec: /opt/hermes-agent/.hermes/bin/hermes: not found`, or the WebUI exits at once | The launcher is missing or not on `PATH`. The old failure was the launcher living under the `/root/.hermes` mount point, which the volume hid. | Confirm the build published `/opt/hermes-agent/.hermes/bin/hermes` and that `ENV PATH` names it. Never put the launcher under `/root` — that tree is `chown`ed to the runtime uid. |
+| The login-shell step fails: `command -v hermes` is empty or not `/usr/local/bin/hermes` | The `/usr/local/bin/hermes` symlink is missing, or `PATH` no longer reaches `/usr/local/bin` in a login shell. | Keep the root-owned `ln -sfn ${HERMES_INSTALL_DIR}/.hermes/bin/hermes /usr/local/bin/hermes` step. A login shell rebuilds `PATH` from `/etc/profile`, so a shell-only prepend is not enough. |
 | The gateway-not-running step fails (`docker top` finds no `gateway run`) | The image `CMD` did not start the gateway, or the profile pin was dropped. | Keep `hermes -p default gateway run --replace` in `hermes/Dockerfile`'s `CMD`. `validate.yml` asserts the exact string and fails closed if it is gone. |
-| `bootstrap.py: error: unrecognized arguments: --port` | A `--port` flag was added. `bootstrap.py` takes the port **positionally**. | Use `... bootstrap.py --host 0.0.0.0 --foreground --no-browser 8501`. |
-| The `docker diff` step reports paths under `/opt/hermes-agent` | The runtime uid wrote under the install dir: a git checkout (the image ships none), or missing build-time bytecode. | Do not make the install writable. Confirm the build still byte-compiles with the pinned interpreter and removes `.git`. If Hermes needs to write there, stop and report rather than loosen the tree. |
+| `bootstrap.py: error: unrecognized arguments: --port` | A `--port` flag was added. `bootstrap.py` takes the port **positionally**. | Use `... bootstrap.py --host 0.0.0.0 --foreground --no-browser --skip-agent-install 8501`. |
+| `Hermes Agent was not found and auto-install was disabled.` and PID 1 exits | `--skip-agent-install` is set and the pinned agent was not found where `HERMES_WEBUI_AGENT_DIR` points. This is the intended fail-closed behaviour. | Confirm `HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent` and that the agent installed. Never remove `--skip-agent-install`; without it bootstrap downloads an unpinned installer from `main`. |
+| The PID 1 maps step reports a path under `/root/.hermes` | The WebUI resolved the agent dir or interpreter from the data volume (the old copy). | Confirm `HERMES_WEBUI_AGENT_DIR` and `HERMES_WEBUI_PYTHON` are set in the image ENV and that the `/opt/hermes-agent/.hermes/venv` symlink exists. Do not delete the data-volume copy to make this pass — pin the image instead. |
+| The dependency-lease step fails: `HERMES_HOME` is under `/opt` | `HERMES_HOME` was pointed at the read-only install dir, moving the runtime generation lease (`installs/<key>/environments/<uuid>/.leases`) off the writable volume. | Leave `HERMES_HOME` unset so `get_default_hermes_root()` falls back to `$HOME/.hermes`. Never make `/opt` writable to route around it. |
+| The decoy-marker step finds `/root/.hermes/DECOY_AGENT_IMPORTED` | The WebUI imported the data-volume copy. Same cause as the row above. | Same fix. The marker must never appear. |
+| `Python environment cannot import both WebUI dependencies and Hermes Agent, and local .venv creation is disabled` | The pinned interpreter (`HERMES_WEBUI_PYTHON`) cannot import `run_agent` and a YAML backend. | This is the intended fail-closed path (`HERMES_WEBUI_DISABLE_LOCAL_VENV=1`); without it bootstrap would create `/app/.venv` at runtime. Re-check the Agent pin and the `/opt/manifest.json` venv. Do not re-enable the local venv. |
+| The `docker diff` step reports paths under `/app` or `/opt` | The runtime uid wrote under the WebUI or agent code: a git checkout (the image ships none), or missing build-time bytecode. | Do not make the trees writable. Confirm the build byte-compiles `/app` and `/opt/hermes-agent` with the pinned interpreter and removes `.git`. If Hermes needs to write there, stop and report rather than loosen the tree. |
 
 ---
 

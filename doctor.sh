@@ -466,6 +466,26 @@ if docker info >/dev/null 2>&1; then
            "The kanban dispatcher will not run. Fix: ${COMPOSE_CMD} up -d --force-recreate hermes"
     fi
 
+    # --- Hermes code location (WARN only) ---------------------------------
+    # The WebUI is PID 1 and hosts every chat and tool. It must load Hermes code
+    # and Python from the pinned, root-owned /opt/hermes-agent -- never from the
+    # data-volume copy at /root/.hermes. Until the migration removes that old copy
+    # (kept for rollback), a volume that still holds it wins unless the image pins
+    # the agent dir and interpreter. This reads PID 1's mapped files read-only. It
+    # WARNS and never fails: a legacy image on an older host legitimately maps
+    # /root/.hermes today, and the remedy is an image rebuild, not a live edit.
+    PID1_CODE_PATHS="$(docker exec hermes-agent sh -c 'cat /proc/1/maps' 2>/dev/null \
+                       | awk '{print $NF}' | grep -E '/venv/|/site-packages/' || true)"
+    if [[ -z "$PID1_CODE_PATHS" ]]; then
+      warn "Hermes WebUI code location could not be read" \
+           "Could not read PID 1's mapped Python paths (container not running or no shell). Re-run when Hermes is up."
+    elif printf '%s\n' "$PID1_CODE_PATHS" | grep -q '/root/\.hermes'; then
+      warn "Hermes WebUI (PID 1) is running code from the data volume (/root/.hermes)" \
+           "It must load only the pinned /opt/hermes-agent. Rebuild and recreate: ${COMPOSE_CMD} up -d --build hermes"
+    else
+      pass "Hermes WebUI (PID 1) maps code from the pinned install, not the data volume"
+    fi
+
     # --- Hermes effective uid ---------------------------------------------
     # WARN (never fail) while Hermes runs as uid 0: that is the legacy default
     # on every existing host, and the account migration sets HYBRID_AI_UID to
