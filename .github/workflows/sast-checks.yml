@@ -118,8 +118,6 @@ jobs:
         run: |
           set -euo pipefail
           DATA="$(mktemp -d)"
-          sudo chown 10001:10001 "$DATA"
-          sudo chmod 0755 "$DATA"
 
           # Seed the data volume with a DECOY agent the way a real host volume
           # carries the old copy. The decoy is a valid Agent source root
@@ -127,7 +125,10 @@ jobs:
           # marker file if anything imports it. The WebUI must pin the /opt
           # agent, so the decoy must never be imported and the marker must
           # never appear. The old copy is NOT deleted (rollback), which is the
-          # whole point: pinning must win without removing it.
+          # whole point: pinning must win without removing it. The tree is
+          # seeded now, while the runner still owns DATA: the runner cannot
+          # write into a tree already owned by 10001, so ownership is applied
+          # afterwards.
           mkdir -p "$DATA/hermes-agent/hermes_cli" "$DATA/hermes-agent/cron"
           cat > "$DATA/hermes-agent/run_agent.py" <<'PY'
           # Decoy Agent module. Imported => the WebUI ran the data-volume copy.
@@ -139,6 +140,9 @@ jobs:
           : > "$DATA/hermes-agent/hermes_cli/main.py"
           : > "$DATA/hermes-agent/hermes_cli/__init__.py"
           : > "$DATA/hermes-agent/cron/jobs.py"
+
+          sudo chown 10001:10001 "$DATA"
+          sudo chmod 0755 "$DATA"
           sudo chown -R 10001:10001 "$DATA"
 
           docker run -d --name hermes-nonroot-smoke \
