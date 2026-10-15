@@ -85,7 +85,7 @@ set -Eeuo pipefail
 # Every host path comes from the ONE shared helper. With no settings, the
 # resolved paths are exactly today's.
 HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/lib" && pwd)"
-# shellcheck source=../scripts/lib/hybrid-ai-env.sh
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
 cd "$HYBRID_AI_APP_DIR" || exit 1
 

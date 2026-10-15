@@ -94,16 +94,19 @@ check "GID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_GID)"
 echo "== env file is never executed =="
 MARKER="${TMPROOT}/PWNED"
 PWN_ENV="${TMPROOT}/pwn.env"
-printf 'HYBRID_AI_DATA_DIR=$(touch %s; echo /tmp/should_not_appear)\n' "$MARKER" > "$PWN_ENV"
+# A single literal dollar sign. Built this way so shellcheck sees the dollar as
+# data being assembled, not as a single-quoted expression that can never expand.
+DOLLAR='$'
+printf 'HYBRID_AI_DATA_DIR=%s(touch %s; echo /tmp/should_not_appear)\n' "$DOLLAR" "$MARKER" > "$PWN_ENV"
 resolve "$PWN_ENV" HYBRID_AI_DATA_DIR >/dev/null 2>&1 || true
 assert "a \$(...) in the env file is NOT executed" bash -c "[[ ! -e '$MARKER' ]]"
 
 # The same, with a command substitution that has no spaces, must be accepted as
 # a literal path and still not run.
 LITERAL_ENV="${TMPROOT}/lit.env"
-printf 'HYBRID_AI_DATA_DIR=/tmp/hai$(whoami)\n' > "$LITERAL_ENV"
+printf 'HYBRID_AI_DATA_DIR=/tmp/hai%s%s\n' "$DOLLAR" '(whoami)' > "$LITERAL_ENV"
 GOT="$(resolve "$LITERAL_ENV" HYBRID_AI_DATA_DIR 2>/dev/null || true)"
-check "a command substitution is kept literally" '/tmp/hai$(whoami)' "$GOT"
+check "a command substitution is kept literally" "/tmp/hai${DOLLAR}(whoami)" "$GOT"
 assert "still not executed when accepted" bash -c "[[ ! -e '$MARKER' ]]"
 
 # ---------------------------------------------------------------------------
@@ -224,7 +227,7 @@ echo "== no bypassing paths =="
 # forbidden constructs: a repo-relative data/log/env path, a bare --env-file .env,
 # or a $HOME-derived state/data path.
 BYPASS_FILES="$(cd "$REPO" && git ls-files '*.sh' | grep -vE '^(scripts/lib/hybrid-ai-env\.sh|scripts/test-hybrid-ai-env\.sh)$')"
-HITS="$(cd "$REPO" && printf '%s\n' $BYPASS_FILES | while IFS= read -r f; do
+HITS="$(cd "$REPO" && printf '%s\n' "$BYPASS_FILES" | while IFS= read -r f; do
   [[ -n "$f" ]] || continue
   grep -nE '\$\{REPO_DIR\}|\$\{SCRIPT_DIR\}/\.env|--env-file [.]env|\$\{HOME\}/\.openhands|\$\{HOME\}/\.hermes|\$\{HOME\}/\.config/hybrid-ai-backup|\$\{HOME\}/\.cache/restic' "$f" 2>/dev/null | sed "s|^|$f:|"
 done)"
