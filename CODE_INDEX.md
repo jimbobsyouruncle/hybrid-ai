@@ -215,6 +215,44 @@
 - def sse(text, finish)
 - async def collect(lines, status)
 
+## scripts/bootstrap.sh
+- log()
+- ok()
+- warn()
+- die()
+- hr()
+- host_path()
+- usage()
+- print_paths()
+- read_pubkey()
+- detect_polkit()
+- url_has_userinfo()
+- git_public()
+- prepare_app_dir()
+- account_exists()
+- account_uid()
+- account_gid()
+- account_shell()
+- account_home()
+- group_exists()
+- in_group()
+- verify_not_privileged()
+- ensure_account()
+- make_dir()
+- render_layout()
+- write_layout()
+- prove_readable()
+- install_deploy_key()
+- check_sshd_allow()
+- manifest_record()
+- file_get()
+- preflight_move()
+- move_into()
+- move_file_byte_identical()
+- run_migration()
+- run_install()
+- run_cutoff()
+
 ## scripts/check-agent-context.sh
 - (no symbols)
 
@@ -243,11 +281,14 @@
 ## scripts/lib/hybrid-ai-env.sh
 - _hybrid_ai_canon()
 - _hybrid_ai_expand_tilde()
+- _hybrid_ai_file_unreadable()
 - _hybrid_ai_file_get()
+- _hybrid_ai_file_require_readable()
 - _hybrid_ai_validate_path()
 - _hybrid_ai_resolve_path()
 - _hybrid_ai_resolve_enum()
 - _hybrid_ai_resolve_scalar()
+- hybrid_ai_env_dirs()
 - hybrid_ai_env_load()
 
 ## scripts/lib/read-probe.sh
@@ -318,6 +359,17 @@
 - sqlite_log_lacks()
 - docker_log_has()
 - docker_log_lacks()
+
+## scripts/test-bootstrap.sh
+- ok()
+- bad()
+- check()
+- have()
+- pub_ed25519()
+- priv_ed25519()
+- new_root()
+- run_bootstrap()
+- run_real_install()
 
 ## scripts/test-check-agent-context.sh
 - greet()

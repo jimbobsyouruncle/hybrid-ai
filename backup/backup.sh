@@ -190,7 +190,7 @@ CONTROL_RUN_DIR="${BACKUP_CONTROL_RUN_DIR:-/run/hybrid-ai-backup}"
 # Every compose file, so 'config --images' reports the full stack. The
 # resolved env file and the app directory are passed explicitly, so the stack
 # is the same one doctor.sh and install.sh operate on.
-COMPOSE=(docker compose -p hybrid-ai --env-file "$HYBRID_AI_ENV_FILE"
+COMPOSE=(docker compose -p hybrid-ai --env-file "$HYBRID_AI_STACK_ENV_FILE"
          --project-directory "$HYBRID_AI_APP_DIR"
          -f "$HYBRID_AI_APP_DIR/docker-compose.yml"
          -f "$HYBRID_AI_APP_DIR/openhands/docker-compose.openhands.yml"

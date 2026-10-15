@@ -359,16 +359,31 @@ ONLY manual step; everything after it runs from the units. Card F must create:
    `0700`), holding:
    - `/etc/credstore/hybrid-ai-backup/r2.env` (root, mode `0600`)
    - `/etc/credstore/hybrid-ai-backup/repo-password` (root, mode `0600`)
-4. **The system env file** — `/etc/hybrid-ai/hybrid-ai.env`, with these settings
-   (names and paths only):
+4. **The layout env file** — `/etc/hybrid-ai/hybrid-ai.env`, root-owned, mode
+   `0644`, with these settings (names and paths only, never a secret):
+   - `HYBRID_AI_APP_DIR=/opt/hybrid-ai`
+   - `HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`
+   - `HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/stack.env`
+   - `HYBRID_AI_DATA_DIR=/var/lib/hybrid-ai`
+   - `HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai/work`
+   - `HYBRID_AI_LOG_DIR=/var/log/hybrid-ai`
+   - `OPENHANDS_WORKSPACE` (`/var/lib/hybrid-ai/agent-workspace`)
+   - `AGENT_REPOS_DIR` (`/var/lib/hybrid-ai/agent-repos`)
+   - `OPENHANDS_STATE_DIR` (`/var/lib/hybrid-ai/openhands`)
+   - `RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup`
+   - `HYBRID_AI_HERMES_HOME_DIR=/var/lib/hybrid-ai/hermes-home`
    - `HYBRID_AI_BACKUP_MODE=system`
    - `BACKUP_CONTAINER_CONTROL=external`
-   - `HYBRID_AI_APP_DIR=/opt/hybrid-ai`
-   - `HYBRID_AI_DATA_DIR` (the durable data root)
-   - `HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup`
-   - `HYBRID_AI_LOG_DIR=/var/log/hybrid-ai-backup`
-   - `HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`
-   - `HYBRID_AI_HERMES_HOME_DIR` (the per-user Hermes home to capture)
+   - `HYBRID_AI_UID` / `HYBRID_AI_GID` (the `hybrid-ai` account's ids)
+
+   The units carry their OWN `Environment=` values
+   (`HYBRID_AI_BACKUP_MODE=system`, `BACKUP_CONTAINER_CONTROL=external`,
+   `HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup`,
+   `RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup`,
+   `BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log`). A systemd `Environment=`
+   value takes precedence over the env file, so a drifted layout file cannot
+   change what a unit does. Only the paths a unit does NOT pin come from
+   `/etc/hybrid-ai/hybrid-ai.env`.
 5. **The units** — `install.sh`, run as root, installs `backup/system/*` into
    `/etc/systemd/system/`, daemon-reloads, and enables
    `hybrid-ai-backup-capture.timer` and `hybrid-ai-backup-check.timer`.

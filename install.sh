@@ -56,7 +56,11 @@ cd "$SCRIPT_DIR"
 source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
 
 APP_DIR="$HYBRID_AI_APP_DIR"
-ENV_FILE="$HYBRID_AI_ENV_FILE"
+# The stack's env file: the one handed to `docker compose --env-file` and the
+# one this installer WRITES. HYBRID_AI_ENV_FILE is the layout file and is only
+# ever read. With HYBRID_AI_STACK_ENV_FILE unset the two are the same path, so
+# behaviour is byte-identical to before.
+ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 DATA_DIR="$HYBRID_AI_DATA_DIR"
 LOG_DIR="$HYBRID_AI_LOG_DIR"
 WORK_DIR="$HYBRID_AI_WORK_DIR"
@@ -210,6 +214,25 @@ if [[ -f "$ENV_FILE" ]]; then
 else
   log "No .env present -- generating from scratch (v${TARGET_ENV_VERSION})."
 fi
+
+# The shared helper above already resolved every LAYOUT-managed setting from
+# HYBRID_AI_ENV_FILE (the layout file): the host paths, the agent workspace, the
+# Hermes home, the mode selectors and the identity that decides which uid the
+# whole stack runs as. The stack file loaded just above supplies runtime config
+# and secrets only. On a bootstrapped host the two files are DIFFERENT, and a
+# legacy stack file still carries the OLD values (empty HYBRID_AI_UID=, the login
+# home's OPENHANDS_WORKSPACE, and so on). Letting those win would drop the stack
+# to uid 0 and point the containers at the trees migration moved away, so restore
+# the layout-resolved values here.
+#
+# When HYBRID_AI_STACK_ENV_FILE is unset the stack file IS the layout file and
+# the helper read the SAME file, so every line below is an exact no-op.
+HYBRID_AI_UID="$HYBRID_AI_LAYOUT_UID"
+HYBRID_AI_GID="$HYBRID_AI_LAYOUT_GID"
+OPENHANDS_WORKSPACE="$HYBRID_AI_LAYOUT_OPENHANDS_WORKSPACE"
+AGENT_REPOS_DIR="$HYBRID_AI_LAYOUT_AGENT_REPOS_DIR"
+OPENHANDS_STATE_DIR="$HYBRID_AI_LAYOUT_OPENHANDS_STATE_DIR"
+export HYBRID_AI_UID HYBRID_AI_GID OPENHANDS_WORKSPACE AGENT_REPOS_DIR OPENHANDS_STATE_DIR
 
 # ---------------------------------------------------------------------------
 # STEP 3. Work out memory budget

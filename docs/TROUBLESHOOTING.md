@@ -182,23 +182,76 @@ without any systemd-journal access. Full detail is in
 
 ---
 
+## Host bootstrap: refusal exit codes
+
+`scripts/bootstrap.sh` is the ONE privileged, one-time command run per device.
+Every refusal class has its own exit code, so a failed run tells you which
+control fired.
+
+| Exit | Meaning | Fix |
+|---|---|---|
+| `0` | Success, including a no-change re-run | — |
+| `1` | Usage error, or an existing host object (account, directory, file) that fails verification | Fix the invocation, or reconcile the existing object by hand |
+| `2` | Not run as root | Re-run with `sudo` |
+| `3` | The deploy public key was refused: a private key, more than one key, or a line that already carries options | Pass exactly one public key, with no options |
+| `4` | `/opt/hybrid-ai` exists but is not a clone of the public remote, or its origin carries a credential | Move the existing `/opt/hybrid-ai` aside, or remove the credential from its origin URL |
+| `5` | polkitd is absent, or its version predates `.rules` (JavaScript) support | Install or upgrade polkit; the bootstrap never edits polkit's own config |
+| `6` | A migration move is cross-device, or a move target already exists and is not empty (refused BEFORE any move) | Put the data on one filesystem, or empty the target, then re-run |
+| `7` | `install.sh` failed | Read the install log under `HYBRID_AI_LOG_DIR`; the cut-off steps did not run |
+| `8` | `doctor.sh` failed | Fix the reported problem, then re-run the bootstrap |
+
+In migration mode the three cut-off steps (disable the login account's timers,
+remove the deploy key line from the login account's `authorized_keys`, remove the
+login account from the `docker` group) run ONLY when both `install.sh` and
+`doctor.sh` succeed. On exit `7` or `8` none of them runs. Full detail is in
+[`deploy/README.md`](../deploy/README.md) and [`SECURITY.md`](../SECURITY.md).
+
+---
+
 ## Relocated paths (split layout)
 
 Every host path resolves through `scripts/lib/hybrid-ai-env.sh`. If you set
-`HYBRID_AI_APP_DIR`, `HYBRID_AI_ENV_FILE`, `HYBRID_AI_DATA_DIR`,
-`HYBRID_AI_LOG_DIR` or `HYBRID_AI_WORK_DIR` (in the environment or the env file),
-a mistake shows up as one of these:
+`HYBRID_AI_APP_DIR`, `HYBRID_AI_ENV_FILE`, `HYBRID_AI_STACK_ENV_FILE`,
+`HYBRID_AI_DATA_DIR`, `HYBRID_AI_LOG_DIR` or `HYBRID_AI_WORK_DIR` (in the
+environment or the env file), a mistake shows up as one of these:
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `hybrid-ai-env: ... must be an absolute path` (or whitespace / `:` / `,` / `/`) | A relocated path is relative or contains a forbidden character | Use a plain absolute path. The helper refuses the value rather than guessing |
+| `hybrid-ai-env: ... exists and cannot be read. refusing to fall back to the built-in defaults` | `HYBRID_AI_ENV_FILE` or `HYBRID_AI_STACK_ENV_FILE` names a file that exists but this user cannot read | Fix the file's permissions, or run as a user that can read it. The helper fails closed rather than silently using the wrong paths |
 | `doctor.sh` prints `<NAME> = <path>` then warns it does not exist | The setting is named but the directory was never created | Create the directory, or unset the setting to fall back to the default |
-| Compose cannot find the env file | `HYBRID_AI_ENV_FILE` moves with the app; the bind sources still read the env file at `HYBRID_AI_APP_DIR/.env` when it is unset | Point `HYBRID_AI_ENV_FILE` at the file your scripts and compose both read |
+| Compose cannot find the env file | The stack file moved, or `HYBRID_AI_STACK_ENV_FILE` is unset while compose reads a different file | Point `HYBRID_AI_STACK_ENV_FILE` at the file compose and the installer share. With it unset it defaults to `HYBRID_AI_ENV_FILE` |
 | `BACKUP_CONF_DIR is inside ...` | Backup credentials were placed inside the app, data or work tree | Move `BACKUP_CONF_DIR` outside every relocated tree |
 | `OPENHANDS_WORKSPACE is ... a protected directory` | The workspace is, is inside, or contains a relocated tree | Use a sibling path outside every tree that holds credentials or state |
 
 `./doctor.sh` is the quick check: it prints each resolved path (never a value from the env
 file) and warns about any set path that does not exist.
+
+### The layout file and the stack file
+
+Two files matter here. `HYBRID_AI_ENV_FILE` is the LAYOUT file: it holds path
+and identity settings only, never a secret. `HYBRID_AI_STACK_ENV_FILE` is the
+STACK file: the one handed to `docker compose --env-file` and the one
+`install.sh` writes, holding the secrets. On a bootstrapped host the layout file
+is `/etc/hybrid-ai/hybrid-ai.env` and the stack file is
+`/etc/hybrid-ai/stack.env`; they are separate files, and `install.sh` writes ONLY
+the stack file. When `HYBRID_AI_STACK_ENV_FILE` is unset the two resolve to the
+same path, which is today's single-file behaviour.
+
+For the settings that decide host paths and the stack's identity
+(`HYBRID_AI_UID`, `HYBRID_AI_GID`, `OPENHANDS_WORKSPACE`, `AGENT_REPOS_DIR`,
+`OPENHANDS_STATE_DIR`), the LAYOUT file wins. `install.sh` reads the stack file
+for runtime config and secrets, then restores those settings from the layout
+file before it writes the new stack file. This matters after a migration: the
+legacy `.env` becomes the stack file and still carries the OLD values (an empty
+`HYBRID_AI_UID=`, the login account's workspace paths). Without the restore, the
+empty id would make the whole stack run as uid 0 and the old paths would point
+the containers at trees the migration had already moved away.
+
+If the whole stack unexpectedly runs as root (`docker compose ... ps` shows
+`root` for the Hermes or status container), check `HYBRID_AI_UID` in the layout
+file, then confirm the stack file's copy after the next `install.sh` run matches
+it.
 
 ---
 

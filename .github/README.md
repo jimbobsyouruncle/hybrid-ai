@@ -40,6 +40,7 @@ the Pi.
 | `build_pipe.py --check` | A forgotten rebuild — the pasted pipe not matching its reviewed sources |
 | `pip install httpx==0.28.1` | Installs the pinned dependency the behavioural tests import (`runpod_core.py` imports `httpx`, which the job does not otherwise install) |
 | `test_refactor.py` | Regressions in mesh enforcement, credential scrubbing, truncation detection |
+| `scripts/test-bootstrap.sh` | Regressions in the one-time host bootstrap: account/layout creation, the layout/stack env split, migration moves, refusal exit codes, and no-secret-in-output |
 | `docker compose config`, all three files | Malformed compose file, OpenHands overlay, or Hermes overlay |
 | **Caddy allowlist assertion** | A sensitive route losing its `trusted_only` IP allowlist |
 | **Hermes gateway pin assertion** | The `hermes -p default gateway run --replace` CMD being dropped from `hermes/Dockerfile` |
@@ -139,15 +140,18 @@ forced-command SSH entrypoint that can do exactly one thing — start the system
 unit `hybrid-ai-deploy@<sha>.service` for a 40-character commit.
 
 **Nothing in this path is active yet, and `deploy.yml` is unchanged.** The
-migration is two later owner steps: **card F** installs the unit, the polkit
-rule, the scripts and the `authorized_keys` line on the host; a later card
-switches `deploy.yml` to call the forced command instead of the current
+migration is two later owner steps: **card F**, `scripts/bootstrap.sh`, installs
+the unit, the polkit rule, the scripts and the `authorized_keys` line on the host
+and creates the account as a system account with `/bin/sh` and a locked password
+(sshd runs the forced command through the login shell); a later card switches
+`deploy.yml` to call the forced command instead of the current
 `appleboy/ssh-action` step. See [`../deploy/README.md`](../deploy/README.md) for
 the `authorized_keys` line, the install locations, the refusal exit codes and the
 least-privilege statement.
 
-The account holds no login shell beyond the forced command, no sudo, and is in
-neither the `docker` nor the `systemd-journal` group. The polkit rule grants only
+The account holds no login beyond the forced command (its password is locked), no
+sudo, and is in neither the `docker` nor the `systemd-journal` group. The polkit
+rule grants only
 `start` of a matching unit.
 
 ---
