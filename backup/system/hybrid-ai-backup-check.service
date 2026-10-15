@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-check.service
+# PURPOSE (plain English):
+#   Runs the monthly repository integrity check (backup.sh --check) in system
+#   mode. The check reads ~5% of the stored data and confirms it decrypts and
+#   matches its checksums, so it needs the SAME shape as the upload unit:
+#   credentials via LoadCredential= and network -- but NOT the capture unit's
+#   read capability. It reads the repository, not the live data trees.
+#
+#   WHY SEPARATE from the nightly capture: verification downloads data, which is
+#   slow, and must not delay the nightly run. A backup nobody has verified is a
+#   hypothesis, not a backup -- so it runs on its own monthly schedule.
+#
+# INSTALLED BY (card F later): install.sh in system mode copies this file to
+#   /etc/systemd/system/ and enables hybrid-ai-backup-check.timer.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai backup integrity verification (system mode)
+Documentation=file:///opt/hybrid-ai/backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hybrid-ai-backup
+Group=hybrid-ai-backup
+
+ExecStart=/opt/hybrid-ai/backup/backup.sh --check
+
+# An INCOMPLETE outcome (exit 3) is valid, not a check failure; a real failure
+# (exit 1) stays retryable if a retry policy is ever added.
+RestartPreventExitStatus=3
+
+# The same credentials the upload unit uses, from the same root-owned store.
+LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env
+LoadCredential=repo-password:/etc/credstore/hybrid-ai-backup/repo-password
+
+StateDirectory=hybrid-ai-backup
+RuntimeDirectory=hybrid-ai-backup
+CacheDirectory=hybrid-ai-backup
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_BACKUP_MODE=system
+Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
+Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup
+Environment=BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log
+
+TimeoutStartSec=6h
+
+# --- Hardening (the upload unit's shape) -----------------------------------
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+InaccessiblePaths=-/run/docker.sock
+InaccessiblePaths=-/var/run/docker.sock
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

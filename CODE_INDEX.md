@@ -28,6 +28,16 @@
 ## .github/workflows/validate.yml
 - validate
 
+## backup/backup-containers.sh
+- log()
+- die()
+- is_running()
+- hand_to_service()
+- ensure_run_dir()
+- cmd_pause()
+- cmd_unpause()
+- cmd_host_info()
+
 ## backup/backup.sh
 - path_within()
 - log()
@@ -38,6 +48,7 @@
 - mark_incomplete()
 - valid_rel_path()
 - is_running()
+- read_paused_containers()
 - unpause_webui()
 - restart_stopped()
 - pause_webui()
@@ -46,6 +57,10 @@
 - sqlite_snapshot_online()
 - cold_copy_db()
 - cleanup()
+- master_timer_state()
+- readable_path()
+- write_status()
+- read_status()
 - stage_backup()
 - hermes_rsync_excludes()
 - hermes_prune_names()
@@ -109,8 +124,10 @@
 - query_tailnet()
 - prepare_openhands_workspace()
 - wait_for()
+- install_backup_scheduler_system()
 - install_backup_scheduler()
 - setup_backups()
+- run_backup()
 
 ## openhands/docker-compose.openhands.yml
 - openhands
@@ -221,8 +238,13 @@
 - _hybrid_ai_file_get()
 - _hybrid_ai_validate_path()
 - _hybrid_ai_resolve_path()
+- _hybrid_ai_resolve_enum()
 - _hybrid_ai_resolve_scalar()
 - hybrid_ai_env_load()
+
+## scripts/lib/read-probe.sh
+- probe_can_read()
+- find_unreadable()
 
 ## scripts/setup-agent-workspace.sh
 - log()
@@ -253,10 +275,33 @@
 - planned_action()
 - inv_add()
 
+## scripts/test-backup-containers.sh
+- ok()
+- bad()
+- assert()
+- run_helper()
+
+## scripts/test-backup-mode-timers.sh
+- ok()
+- bad()
+- assert()
+- run_doctor()
+- run_deploy()
+- run_collect()
+- run_backup()
+
+## scripts/test-backup-system-units.sh
+- ok()
+- bad()
+- has_line()
+- hasnt_regex()
+- run_verify()
+
 ## scripts/test-backup.sh
 - cleanup()
 - mkwal()
 - run_backup()
+- run_backup_env()
 - check()
 - assert()
 - log_has()
@@ -306,6 +351,11 @@
 - assert()
 - resolve()
 - resolve_rc()
+
+## scripts/test-read-probe.sh
+- ok()
+- bad()
+- check()
 
 ## scripts/test-sync-agent-repos.sh
 - pass()

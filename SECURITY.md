@@ -349,6 +349,29 @@ The gate is fail-closed. It depends on all five jobs with `if: always()`, prints
 | Working directories gitignored | `.backup-staging/`, `.restore-work/`, `.restore-test-*/`, `webui_data.pre-restore-*/`, `backup.log` |
 | Metadata-only logging | Backup events record sizes, counts, and durations — never document names or chat content |
 
+### System mode: the privilege split
+
+`HYBRID_AI_BACKUP_MODE=system` replaces the single per-user unit with two system
+units under a dedicated, unprivileged account, `hybrid-ai-backup`. The control
+is the split itself: no single process can both read your data and reach the
+network or the credentials.
+
+| Control | Mechanism |
+|---|---|
+| Dedicated account, no privilege | Both units run as `hybrid-ai-backup`, a no-login system account. It is **not** in the `docker` group, and it is not root |
+| Capture holds the only capability | `hybrid-ai-backup-capture.service` has `AmbientCapabilities=CAP_DAC_READ_SEARCH` and `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` — the one capability that makes container-owned data readable — and `NoNewPrivileges=yes` |
+| Capture has no network | `PrivateNetwork=yes` on the capture unit, so it cannot reach R2 even if it tried |
+| Capture has no credentials | The capture unit has no `LoadCredential=`. The R2 keys are not present in its process at all |
+| Upload has no read privilege | `hybrid-ai-backup-upload.service` sets `CapabilityBoundingSet=` (empty). It cannot read data it does not own, and does not need to: the capture already staged a copy it can read |
+| Credentials outside data trees | The upload unit reads them through `LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env` and `LoadCredential=repo-password:...`, so systemd copies them into a private tmpfs — never a copy inside a data tree |
+| Credentials root-only | `/etc/credstore/hybrid-ai-backup/` is root-owned; `r2.env` and `repo-password` are mode 0600. `install.sh` writes them there in system mode |
+| No account in the docker group | Neither unit joins `docker`. The one root-owned helper that talks to Docker (`backup/backup-containers.sh`) is run with the leading `+` on fixed Exec lines, so privilege is bounded to one fixed command |
+| Docker socket unreachable | Both units set `InaccessiblePaths=-/run/docker.sock` and `-/var/run/docker.sock` |
+| No container ever stopped | The helper only ever pauses and unpauses the fixed container set (incident B1: a retry loop once stopped `hermes-agent`). A killed capture is unpaused by `ExecStopPost=` |
+| Staging read-only to the upload | `ProtectSystem=strict` plus a single `ReadWritePaths=-/var/lib/hybrid-ai-backup`, so the upload can read the staged copy and remove it, and write nothing else |
+| Capture never loops | The capture unit has no `Restart=`; an incomplete capture (exit 3) is `SuccessExitStatus=` so the upload still runs, and the upload never retries it (`RestartPreventExitStatus=3`) |
+| Open-based readability probe | In system mode the preflight and `classify_db_file()` decide readability by an `open(2)` probe, not `access(2)`. Linux drops effective capabilities for `access(2)` when the real uid is not root, so `[[ -r ]]`/`find -readable` would misreport a `CAP_DAC_READ_SEARCH`-readable file as unreadable |
+
 ### Residual backup risk: deletion by a compromised host
 
 The Pi's token can write **and** delete. An attacker with access could run `restic forget --prune` to destroy backup history before encrypting live data — the standard second stage of a targeted ransomware run.

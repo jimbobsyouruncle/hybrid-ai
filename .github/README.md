@@ -138,7 +138,7 @@ The workflow holds `permissions: contents: read`, adds no write permission, and 
 
 | Guarantee | Mechanism |
 |---|---|
-| Backup credentials are untouched | They live in `~/.config/hybrid-ai-backup/`, outside the repo entirely |
+| Backup credentials are untouched | They live in `~/.config/hybrid-ai-backup/` (or `/etc/credstore/hybrid-ai-backup/` in system mode), outside the repo entirely |
 | `webui_data/` and `ollama_data/` are untracked | Listed in `.gitignore`, so `git reset` cannot see or touch them |
 | `.env` survives | Also gitignored. `install.sh` reads existing values and preserves them |
 | Login sessions survive | `WEBUI_SECRET_KEY` is reused, not regenerated, so cookies stay valid |

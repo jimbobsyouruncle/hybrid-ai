@@ -1005,7 +1005,17 @@ fi
 # ---------------------------------------------------------------------------
 section "Backups"
 
-BACKUP_CONF="$BACKUP_CONF_DIR"
+# Which units run the nightly backup? One setting decides, and the shared helper
+# resolves every derived name so doctor.sh cannot disagree with install.sh or
+# backup.sh. In system mode the two-unit privilege split installs SYSTEM units
+# (capture + upload) and stores credentials in the root-owned credstore; in user
+# mode the per-user unit is used, exactly as before.
+BACKUP_MODE="$HYBRID_AI_BACKUP_MODE"
+BACKUP_TIMER_UNIT="$HYBRID_AI_BACKUP_TIMER_UNIT"
+BACKUP_SERVICE_NAME="$HYBRID_AI_BACKUP_SERVICE_UNIT"
+TIMER_SYSTEMCTL=(systemctl "$HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE")
+JOURNAL_SCOPE="$HYBRID_AI_BACKUP_JOURNAL_SCOPE"
+BACKUP_CONF="$HYBRID_AI_BACKUP_CRED_DIR"
 if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   pass "Backup credentials present"
 
@@ -1019,17 +1029,18 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   done
 
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
-      NEXT="$(systemctl --user list-timers hybrid-ai-backup.timer --no-pager 2>/dev/null | awk 'NR==2 {print $1, $2}')"
+    if "${TIMER_SYSTEMCTL[@]}" is-active "$BACKUP_TIMER_UNIT" >/dev/null 2>&1; then
+      NEXT="$("${TIMER_SYSTEMCTL[@]}" list-timers "$BACKUP_TIMER_UNIT" --no-pager 2>/dev/null | awk 'NR==2 {print $1, $2}')"
       pass "Nightly backup timer active${NEXT:+ (next: ${NEXT})}"
     else
       fail "Backup timer is not active" \
-           "Enable it: systemctl --user enable --now hybrid-ai-backup.timer"
+           "Enable it: ${TIMER_SYSTEMCTL[*]} enable --now ${BACKUP_TIMER_UNIT}"
     fi
 
-    # Without linger, user timers do not run when you are logged out -- which
-    # means the nightly backup silently never happens.
-    if command -v loginctl >/dev/null 2>&1; then
+    # In user mode, without linger, user timers do not run when you are logged
+    # out -- which means the nightly backup silently never happens. System mode
+    # units run regardless of login, so this check applies to user mode only.
+    if [[ "$BACKUP_MODE" != "system" ]] && command -v loginctl >/dev/null 2>&1; then
       if loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
         pass "Linger enabled (backups run while logged out)"
       else
@@ -1050,7 +1061,7 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
           pass "Last successful backup ${AGE_H}h ago"
         elif (( AGE_H <= 168 )); then
           warn "Last successful backup was ${AGE_H}h ago" \
-               "Expected nightly. Check: journalctl --user -u hybrid-ai-backup.service -n 50"
+               "Expected nightly. Check: journalctl ${JOURNAL_SCOPE} -u ${BACKUP_SERVICE_NAME} -n 50"
         else
           fail "Last successful backup was ${AGE_H}h ago (over a week)" \
                "Backups are not running. Run ./backup/backup.sh manually to see the error."

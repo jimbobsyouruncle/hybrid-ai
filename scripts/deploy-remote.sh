@@ -113,10 +113,13 @@ echo "==> Persistent data intact:"
 du -sh "$HYBRID_AI_WEBUI_DATA_DIR" "$HYBRID_AI_OLLAMA_DATA_DIR" 2>/dev/null || true
 
 # Backups are a data-loss control; a deploy that silently disables them is
-# worth flagging even though it is not a failure.
-if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
+# worth flagging even though it is not a failure. The shared helper resolves
+# which units and which systemctl scope apply for the configured mode.
+BACKUP_TIMER_UNIT="$HYBRID_AI_BACKUP_TIMER_UNIT"
+BACKUP_SYSTEMCTL_SCOPE="$HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE"
+if systemctl "$BACKUP_SYSTEMCTL_SCOPE" is-active "$BACKUP_TIMER_UNIT" >/dev/null 2>&1; then
   echo "Backup timer active. Next run:"
-  systemctl --user list-timers hybrid-ai-backup.timer --no-pager 2>/dev/null | head -3 || true
+  systemctl "$BACKUP_SYSTEMCTL_SCOPE" list-timers "$BACKUP_TIMER_UNIT" --no-pager 2>/dev/null | head -3 || true
 else
   echo "::warning::Backup timer is not active on this host."
 fi
