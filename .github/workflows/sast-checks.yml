@@ -121,6 +121,26 @@ jobs:
           sudo chown 10001:10001 "$DATA"
           sudo chmod 0755 "$DATA"
 
+          # Seed the data volume with a DECOY agent the way a real host volume
+          # carries the old copy. The decoy is a valid Agent source root
+          # (run_agent.py + hermes_cli/main.py + cron/jobs.py) that leaves a
+          # marker file if anything imports it. The WebUI must pin the /opt
+          # agent, so the decoy must never be imported and the marker must
+          # never appear. The old copy is NOT deleted (rollback), which is the
+          # whole point: pinning must win without removing it.
+          mkdir -p "$DATA/hermes-agent/hermes_cli" "$DATA/hermes-agent/cron"
+          cat > "$DATA/hermes-agent/run_agent.py" <<'PY'
+          # Decoy Agent module. Imported => the WebUI ran the data-volume copy.
+          from pathlib import Path
+          Path("/root/.hermes/DECOY_AGENT_IMPORTED").write_text("decoy imported\n")
+          class AIAgent:  # pragma: no cover
+              pass
+          PY
+          : > "$DATA/hermes-agent/hermes_cli/main.py"
+          : > "$DATA/hermes-agent/hermes_cli/__init__.py"
+          : > "$DATA/hermes-agent/cron/jobs.py"
+          sudo chown -R 10001:10001 "$DATA"
+
           docker run -d --name hermes-nonroot-smoke \
             --user 10001:10001 \
             --cap-drop ALL \
@@ -176,6 +196,83 @@ jobs:
             || { echo "::error::the local kanban patch is missing from the installed code"; exit 1; }
           echo "Local kanban patch is present in /opt/hermes-agent."
 
+      - name: Assert PID 1 runs only the pinned /opt agent, never the data volume
+        # The decoy agent seeded above is a valid source root on the data volume
+        # (/root/.hermes/hermes-agent). The WebUI (PID 1) must load its code and
+        # Python from /opt/hermes-agent only. Three assertions:
+        #   a) every mapped venv/site-packages path is under /opt/hermes-agent
+        #      and none is under /root/.hermes;
+        #   b) the decoy's marker is absent (it was never imported);
+        #   c) one HTTP request that loads the Agent path succeeds.
+        run: |
+          set -euo pipefail
+
+          # a) PID 1's mapped Python paths. `docker exec` a fresh shell would have
+          #    the image ENV but not PID 1's own state, so read PID 1 directly:
+          #    list its /proc/1/maps and keep the venv/site-packages lines.
+          MAPS="$(docker exec hermes-nonroot-smoke sh -c 'cat /proc/1/maps' || true)"
+          VENV_LINES="$(echo "${MAPS}" | awk '{print $NF}' | grep -E '/venv/|/site-packages/' || true)"
+          echo "--- PID 1 mapped venv/site-packages paths ---"
+          echo "${VENV_LINES}"
+          if [ -z "${VENV_LINES}" ]; then
+            echo "::error::could not read any venv/site-packages path from PID 1's maps"
+            exit 1
+          fi
+          if echo "${VENV_LINES}" | grep -Eq '/root/\.hermes'; then
+            echo "::error::PID 1 maps Python from the data volume (/root/.hermes), not /opt/hermes-agent"
+            echo "${VENV_LINES}" | grep -E '/root/\.hermes' | head -20
+            exit 1
+          fi
+          if ! echo "${VENV_LINES}" | grep -Eq '/opt/hermes-agent'; then
+            echo "::error::PID 1 maps no Python path under /opt/hermes-agent"
+            exit 1
+          fi
+          echo "PID 1 maps Python only from /opt/hermes-agent."
+
+          # b) The decoy was never imported.
+          if docker exec hermes-nonroot-smoke \
+               test -e /root/.hermes/DECOY_AGENT_IMPORTED; then
+            echo "::error::the WebUI imported the data-volume decoy agent (marker present)"
+            exit 1
+          fi
+          echo "The data-volume decoy agent was never imported (no marker)."
+
+          # c) One HTTP request that loads the Agent path. This is the first
+          #    request to a fresh, unauthenticated (no password) WebUI, so it
+          #    exercises the same startup/agent-load path a browser hits.
+          HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                    http://127.0.0.1:8501/api/onboarding/status || true)"
+          echo "agent-load request status = ${HTTP}"
+          [ "$HTTP" = "200" ] || { echo "::error::the agent-path request did not answer 200"; \
+                                   docker logs --tail 60 hermes-nonroot-smoke || true; exit 1; }
+
+      - name: Assert hermes resolves in a login shell under /usr/local/bin
+        # The bare `hermes` CLI must resolve in every shell, including a login
+        # shell that rebuilds PATH from /etc/profile (where the old
+        # /root/.local/bin lives). A root-owned /usr/local/bin/hermes symlink
+        # guarantees that.
+        run: |
+          FOUND="$(docker exec hermes-nonroot-smoke bash -lc 'command -v hermes' || true)"
+          echo "bash -lc command -v hermes = ${FOUND}"
+          [ "$FOUND" = "/usr/local/bin/hermes" ] \
+            || { echo "::error::hermes did not resolve to /usr/local/bin/hermes in a login shell"; exit 1; }
+
+      - name: Assert the runtime wrote nothing under /app or /opt
+        # /app hosts the WebUI (PID 1) and /opt/hermes-agent hosts the agent
+        # code. Both are root-owned and must be immutable to the runtime uid. A
+        # hard failure on any A(dd)/C(hange)/D(elete) under either path proves
+        # the smoke checks above did not quietly need a writable code tree. This
+        # runs after the HTTP request that loads the Agent path, so any bytecode
+        # the server would have written has already happened.
+        run: |
+          DIFF="$(docker diff hermes-nonroot-smoke || true)"
+          if echo "${DIFF}" | grep -Eq '^[ACD] /app($|/)|^[ACD] /opt($|/)'; then
+            echo "::error::the runtime wrote under /app or /opt"
+            echo "${DIFF}" | grep -E '^[ACD] /app($|/)|^[ACD] /opt($|/)' | head -20
+            exit 1
+          fi
+          echo "No writes under /app or /opt."
+
       - name: Assert Hermes wrote nothing under the immutable install dir
         # `docker diff` is a change type plus a path. The code lives at
         # /opt/hermes-agent, outside every mount and root-owned, so the runtime
@@ -189,6 +286,24 @@ jobs:
             exit 1
           fi
           echo "No writes under /opt/hermes-agent."
+
+      - name: Assert the dependency-lease home is the data volume, not /opt
+        # Runtime dependency state (the venv generation lease, .leases) resolves
+        # under HERMES_HOME when set, else $HOME/.hermes. It must land on the
+        # writable data volume, never the read-only /opt install. The supported
+        # routing setting is HERMES_HOME, so prove it is the data volume.
+        run: |
+          HOME_VAL="$(docker exec hermes-nonroot-smoke printenv HERMES_HOME || true)"
+          echo "container HERMES_HOME = '${HOME_VAL}'"
+          case "${HOME_VAL}" in
+            /opt|/opt/*)
+              echo "::error::HERMES_HOME=${HOME_VAL} would move runtime dependency state into the read-only /opt tree"
+              exit 1
+              ;;
+          esac
+          [ "$HOME_VAL" = "/root/.hermes" ] \
+            || { echo "::error::HERMES_HOME is '${HOME_VAL}', expected the data volume /root/.hermes"; exit 1; }
+          echo "HERMES_HOME is the data volume; dependency state (incl. .leases) stays off /opt."
 
       - name: Show what Hermes writes at first start (paths only)
         # Always runs, so a pull request shows what Hermes writes and where

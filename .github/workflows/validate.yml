@@ -137,6 +137,32 @@ jobs:
           fi
           echo "Hermes gateway autostart is pinned to the default profile."
 
+      - name: Assert the WebUI is pinned to the /opt agent and fails closed
+        # The WebUI (PID 1) must load code and Python from /opt/hermes-agent, not
+        # from the data-volume copy a production volume still holds. These four
+        # strings are what make that true; a future edit that drops one would
+        # silently reintroduce the data-volume path. The smoke job proves the
+        # behaviour; this stops the removal from merging in the first place.
+        run: |
+          fail=0
+          for needle in \
+            'ENV HERMES_WEBUI_AGENT_DIR="${HERMES_INSTALL_DIR}"' \
+            'ENV HERMES_WEBUI_PYTHON="${HERMES_INSTALL_DIR}/.hermes/venv/bin/python"' \
+            'ENV HERMES_WEBUI_SERVER_CWD="/root/.hermes/webui"' \
+            'ENV HERMES_WEBUI_DISABLE_LOCAL_VENV=1' \
+            'ENV HERMES_HOME="/root/.hermes"' \
+            'ARG HERMES_WEBUI_COMMIT=1e2e4dde6520e5d96bb5b20dfb2f65aa890eeb5e'; do
+            if ! grep -Fq "$needle" hermes/Dockerfile; then
+              echo "::error::hermes/Dockerfile is missing: ${needle}"
+              fail=1
+            fi
+          done
+          if ! grep -Fq -- '--skip-agent-install' hermes/Dockerfile; then
+            echo "::error::the WebUI CMD does not pass --skip-agent-install (must fail closed instead of auto-installing)"
+            fail=1
+          fi
+          exit "$fail"
+
       - name: Assert no secrets are tracked
         # Last line of defence. If .env or a data folder ever got committed,
         # this stops the build and tells you to clean up git history.

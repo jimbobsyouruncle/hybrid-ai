@@ -19,36 +19,93 @@ as an orphan and `--remove-orphans` deletes it. `install.sh`, `doctor.sh` and
 
 ---
 
-## The Hermes code lives in the image, at a pinned commit
+## Both code trees are pinned in the image, outside the data volume
 
-The Hermes Agent code is **not** stored in `hermes_data/`. The image builds it into
-`/opt/hermes-agent` at a pinned commit
-(`3d0a61ac94e1181985177fdd975c4efeb478e9b7`, the version the Pi runs today), plus the one
-local patch in `patches/`. This is deliberate:
+Neither the Hermes Agent code nor the WebUI code is stored in `hermes_data/`. The image
+builds **two** pinned trees, both root-owned and outside every mount:
+
+| Tree | Path | Pin |
+|---|---|---|
+| Hermes Agent | `/opt/hermes-agent` | `HERMES_COMMIT=3d0a61ac94e1181985177fdd975c4efeb478e9b7`, plus the local patch in `patches/` |
+| Hermes WebUI | `/app` | `HERMES_WEBUI_COMMIT=1e2e4dde6520e5d96bb5b20dfb2f65aa890eeb5e` |
+
+This is deliberate:
 
 - `/root/.hermes` is the mount point for the `hermes_data` volume. Anything the image wrote
   there would be hidden the moment the volume is mounted, so the code must not live there.
   The image's `/root/.hermes` is empty: the build installs under `/opt` and deletes its
   throwaway home.
-- The build downloads the installer to a file and checks its sha256 **before** running it.
-  A mismatch fails the build. The installer is never piped from the network into a shell.
-- `/opt/hermes-agent` is root-owned and outside every mount, so it is **immutable to the
-  runtime uid** (uid `10001`). The launcher on `PATH` is the install's own
-  `/opt/hermes-agent/.hermes/bin/hermes`, also root-owned.
+- The build downloads the agent installer to a file and checks its sha256 **before** running
+  it. A mismatch fails the build. The installer is never piped from the network into a shell.
+- The WebUI is cloned, checked out at its pin, and asserted with `git rev-parse`; a mismatch
+  fails the build. `.git` is then removed, so neither tree carries a checkout fingerprint.
+- `/opt/hermes-agent` and `/app` are both root-owned and outside every mount, so they are
+  **immutable to the runtime uid** (uid `10001`). The launcher on `PATH` is the install's own
+  `/opt/hermes-agent/.hermes/bin/hermes`, also root-owned, plus a root-owned
+  `/usr/local/bin/hermes` symlink so `hermes` resolves in every shell, including a login shell
+  that rebuilds `PATH` from `/etc/profile`.
+- Both trees are byte-compiled at build time by the interpreter that runs them, so the
+  runtime uid never writes bytecode. This matters for the WebUI, whose Python can run with
+  `-I`, which ignores `PYTHONDONTWRITEBYTECODE`.
 
-### Upgrading Hermes
+### The WebUI is pinned to the `/opt` agent, never the data-volume copy
 
-An upgrade is a pull request that changes the pin and re-checks the patch:
+The WebUI is container PID 1: it hosts every chat and its tools. `bootstrap.py` picks the
+Agent directory by trying `HERMES_WEBUI_AGENT_DIR` first, then `$HERMES_HOME/hermes-agent`
+(the data volume), and only then `/opt/hermes-agent`. A production volume that still holds
+the old `/root/.hermes/hermes-agent` copy therefore wins unless the image pins the agent dir
+and its interpreter. The image sets:
 
-1. Set `HERMES_COMMIT` in `hermes/Dockerfile` to the new commit and
+- `HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent` — force the code to the pinned tree.
+- `HERMES_WEBUI_PYTHON=/opt/hermes-agent/.hermes/venv/bin/python` — a **stable root-owned
+  path** created at build time from `/opt/manifest.json` (`discover_launcher_python` looks
+  for `<agent_dir>/venv` or `.venv`, which `/opt/hermes-agent` does not have; its venv lives
+  under `installs/<key>/venv`). The build fails if the manifest has no venv or the venv has
+  no interpreter.
+- `HERMES_WEBUI_SERVER_CWD=/root/.hermes/webui` — the server cwd defaults to the agent dir,
+  which is now read-only to the runtime uid; this points it at a **runtime-writable** path
+  inside the data volume.
+
+The WebUI `CMD` also passes `bootstrap.py --skip-agent-install`, so a missing agent **fails
+closed** with "Hermes Agent was not found and auto-install was disabled." instead of
+downloading the UNPINNED installer from NousResearch main.
+
+The old data-volume copy **must stay on the Pi** (rollback) until the migration card. The
+pinning wins without deleting it.
+
+### Runtime dependency state (the `.leases` file) stays on the volume
+
+The WebUI is pinned to the `/opt` code, but the runtime **dependency state** must still live
+on the writable data volume. `pm/environments.py::install_state_dir(project)` resolves to
+`dependency_home_root()/installs/<install_key>`, where the root is
+`get_default_hermes_root()`: `$HERMES_HOME` when set, otherwise `$HOME/.hermes`. When the
+pinned venv is selected at boot (`pm/environments.py::activate_dependencies`), the process
+pins that generation by writing `<install_state_dir>/environments/<uuid>/.leases`
+(`hermes_cli/runtime_state.py::lease_directory`). The root is pinned to the volume with
+`HERMES_HOME=/root/.hermes`, so for the `/opt` install `installs/<install_key>` is
+`/root/.hermes/installs/ffad…` — the data volume.
+
+So the image sets `HERMES_HOME=/root/.hermes` (the `hermes_data` mount) explicitly, rather
+than leaving it unset or inheriting a value. Setting `HERMES_HOME=/opt/hermes-agent` would
+move `.leases` (and the whole generation tree) into the read-only `/opt` tree and break the
+runtime uid; pinning it to the volume keeps the lease writable. The supported setting for
+this routing is `HERMES_HOME`; the smoke job asserts it is the data volume, alongside the
+`docker diff` check that the runtime never writes under `/opt`.
+
+### Upgrading Hermes or the WebUI
+
+An upgrade is a pull request that changes the pins and re-checks the patch:
+
+1. **Agent:** set `HERMES_COMMIT` in `hermes/Dockerfile` to the new commit and
    `HERMES_INSTALL_SHA256` to the sha256 of
    `https://raw.githubusercontent.com/NousResearch/hermes-agent/<sha>/scripts/install.sh`.
-2. Confirm `patches/0001-kanban-prompt-body-chars.patch` still applies at that commit.
-   The build runs `git apply --check` and fails if it does not; rebase the patch if Hermes
-   moved the code.
-3. Let CI prove it: the `hermes-nonroot-smoke` job builds the image, runs it on an empty
-   data volume as uid `10001`, and checks the gateway is up, the patch is present, and
-   nothing under `/opt/hermes-agent` changed.
+   Confirm `patches/0001-kanban-prompt-body-chars.patch` still applies at that commit.
+2. **WebUI:** set `HERMES_WEBUI_COMMIT` to the new commit. The build asserts `git rev-parse`.
+   Also bump the matching string in the `validate.yml` assertion so the check tracks the pin.
+3. Let CI prove it: the `hermes-nonroot-smoke` job builds the image, runs it as uid `10001`
+   with a **decoy** agent on the data volume, and checks PID 1 maps only `/opt/hermes-agent`,
+   the decoy was never imported, a login shell resolves `hermes`, and nothing under `/app` or
+   `/opt` changed.
 
 `hermes update` run inside the container **no longer applies**: the image tracks a pinned
 commit and the install tree is sealed (no `.git`). Update the pin instead.
@@ -63,7 +120,8 @@ and are excluded from the backup.
 
 | Host path | Container path | Mode | Notes |
 |---|---|---|---|
-| *none (baked into the image)* | `/opt/hermes-agent` | **read-only to the runtime uid** | The pinned Hermes Agent code and its toolchain. Root-owned, outside every mount, so the runtime never writes here. |
+| *none (baked into the image)* | `/opt/hermes-agent` | **read-only to the runtime uid** | The pinned Hermes Agent code and its toolchain. Root-owned, outside every mount, so the runtime never writes here. The WebUI is pinned to it with `HERMES_WEBUI_AGENT_DIR`. |
+| *none (baked into the image)* | `/app` | **read-only to the runtime uid** | The pinned Hermes WebUI code (the container PID 1). Root-owned; byte-compiled at build. `.git` is removed, so it carries no checkout fingerprint. |
 | `./hermes_data` | `/root/.hermes` | read-write | Persistent memory, SQLite state, FTS5 indexes and acquired skills. This is a subdirectory of the **deployment directory** — see the gaps below. The image's own `/root/.hermes` is empty; the code is not stored here. |
 | `./hermes_data/workspace` | `/root/workspace` | read-write | Persistent WebUI workspace; the same host folder the container also sees at `/root/.hermes/workspace`. |
 | `${OPENHANDS_WORKSPACE}` | `/workspace` | **read-only** | The OpenHands clone. Read-only so Hermes can read code without editing it. |
@@ -261,6 +319,12 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | `HERMES_COMMIT` | `hermes/Dockerfile` (build arg) | The pinned Hermes Agent commit the image installs from. Bump only with a re-checked patch and a new installer sha256. |
 | `HERMES_INSTALL_SHA256` | `hermes/Dockerfile` (build arg) | sha256 of the pinned installer script. The build fails on mismatch. |
 | `HERMES_INSTALL_DIR` | `hermes/Dockerfile` (build arg) | Where the pinned code installs. Default `/opt/hermes-agent`, outside every mount. |
+| `HERMES_WEBUI_COMMIT` | `hermes/Dockerfile` (build arg) | The pinned Hermes WebUI commit the image clones into `/app`. The build asserts `git rev-parse`. |
+| `HERMES_WEBUI_AGENT_DIR` | image `ENV` | Forces the WebUI agent dir to `/opt/hermes-agent`, ahead of the data-volume copy. |
+| `HERMES_WEBUI_PYTHON` | image `ENV` | Forces the WebUI interpreter to the stable root-owned `/opt/hermes-agent/.hermes/venv/bin/python`. |
+| `HERMES_WEBUI_SERVER_CWD` | image `ENV` | The server's working directory; a runtime-writable path (`/root/.hermes/webui`) in the data volume, since the agent dir is read-only to the runtime uid. |
+| `HERMES_WEBUI_DISABLE_LOCAL_VENV` | image `ENV` | `1` makes bootstrap fail closed instead of creating `/app/.venv` at runtime (a write into the read-only WebUI tree) when the pinned interpreter cannot import both the WebUI deps and the Agent. |
+| `HERMES_HOME` | image `ENV` | Pins runtime dependency state (incl. the venv generation `.leases`) to the data volume `/root/.hermes`. Must never be `/opt/hermes-agent`, which is read-only to the runtime uid. |
 | `HYBRID_AI_UID` | `docker-compose.hermes.yml`, `hermes/Dockerfile`, `install.sh`, `doctor.sh` | Dedicated non-root uid the Hermes image builds and runs as. Unset or `0` means the legacy uid 0. Set by the account migration. |
 | `HYBRID_AI_GID` | `docker-compose.hermes.yml`, `hermes/Dockerfile` | Group id matching `HYBRID_AI_UID`. Unset or `0` means the legacy gid 0. |
 | `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |

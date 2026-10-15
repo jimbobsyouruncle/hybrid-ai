@@ -40,7 +40,10 @@ the Pi.
 | `build_pipe.py --check` | A forgotten rebuild — the pasted pipe not matching its reviewed sources |
 | `pip install httpx==0.28.1` | Installs the pinned dependency the behavioural tests import (`runpod_core.py` imports `httpx`, which the job does not otherwise install) |
 | `test_refactor.py` | Regressions in mesh enforcement, credential scrubbing, truncation detection |
-| `docker compose config`, both files | Malformed compose file or OpenHands overlay |
+| `docker compose config`, all three files | Malformed compose file, OpenHands overlay, or Hermes overlay |
+| **Caddy allowlist assertion** | A sensitive route losing its `trusted_only` IP allowlist |
+| **Hermes gateway pin assertion** | The `hermes -p default gateway run --replace` CMD being dropped from `hermes/Dockerfile` |
+| **WebUI pin assertion** | The WebUI agent dir, interpreter, server cwd, local-venv disable, WebUI commit pin, or `--skip-agent-install` being dropped from `hermes/Dockerfile` |
 | **Secret assertion** | Fails the build if `.env` or a data folder was ever committed |
 
 That last check is the one worth understanding. If `.env` somehow got committed, this stops the deploy and tells you. Note that by then the credentials are already in git history and **must be rotated** — deleting the file in a later commit does not remove it from history, and anyone with a clone still has a copy.
@@ -80,7 +83,7 @@ ancestor check keeps the target on the deployed line of history.
 | `semgrep` | Semgrep (`--config auto --error`) | SAST findings from the community rulesets. Blocking. |
 | `validate` | `Validate sources` | Calls the same reusable `validate.yml` the deploy uses (see Job 1 above). |
 | `codeql` | `Analyze (python)` and `Analyze (actions)` | CodeQL advanced setup for Python and GitHub Actions. |
-| `hermes-nonroot-smoke` | Hermes non-root smoke | Builds the Hermes image as uid/gid `10001` and runs it as `10001` with `--cap-drop ALL --security-opt no-new-privileges`, an empty `10001`-owned `/root/.hermes`, and no secrets. Checks `id -u`, HTTP 200 on 8501 within 180 s, and liveness at +60 s. Prints `docker diff` (paths only). |
+| `hermes-nonroot-smoke` | Hermes non-root smoke | Builds the Hermes image as uid/gid `10001` and runs it as `10001` with `--cap-drop ALL --security-opt no-new-privileges`, no secrets, and a `10001`-owned `/root/.hermes` seeded with a **decoy** agent (a valid Agent source root that writes a marker if imported). Checks `id -u`, HTTP 200 on 8501 within 180 s, liveness at +60 s, the gateway is up, and the local kanban patch is in `/opt/hermes-agent`. Then the pinning checks: PID 1 maps Python only from `/opt/hermes-agent` (never `/root/.hermes`), the decoy marker is absent, one `/api/onboarding/status` request (which imports `run_agent`) answers 200, `bash -lc 'command -v hermes'` resolves to `/usr/local/bin/hermes`, and `docker diff` shows no change under `/app` or `/opt`. Prints `docker diff` (paths only). |
 | `gate` | **`Security & SAST gate`** | The single required check. Always runs; fails unless every job above succeeded. |
 
 **CodeQL advanced setup.** CodeQL previously ran as GitHub "default setup", a dynamic workflow GitHub created and ran on each pull request and each push to `main`. This workflow replaces it with advanced setup: a checked-in `codeql` job, pinned to `github/codeql-action` `24c54180a607b1449ed407dd24f251e4e9147c8d` (`v4.38.3`), analysing `python` and `actions` with `build-mode: none`, publishing under the category `/language:<lang>`. Results also appear on the weekly schedule run under **Security → Code scanning**. The `codeql` job is the only job that widens permissions, adding `security-events: write` and `actions: read`; the workflow default is `contents: read`.

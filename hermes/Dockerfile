@@ -72,10 +72,46 @@ RUN set -eu; \
  && rm -rf "${HERMES_INSTALL_DIR}/.git" \
  && rm -rf /tmp/hermes-home /tmp/hermes-install.sh /tmp/hermes-patch /root/.hermes
 
-# Clone and build Hermes WebUI
+# --- Stable root-owned path to the pinned venv, from /opt/manifest.json -------
+# discover_launcher_python() looks for <agent_dir>/venv or <agent_dir>/.venv, but
+# /opt/hermes-agent has neither: its venv lives at
+# /opt/hermes-agent/installs/<install_key>/venv (recorded in /opt/manifest.json).
+# Create a fixed, root-owned symlink to it so HERMES_WEBUI_PYTHON is a stable path
+# that never changes when the install key or Python patch changes. The build FAILS
+# if the manifest has no venv or the venv has no interpreter.
+RUN set -eu; \
+    VENV="$(python3 -c 'import json,os,sys; m=json.load(open(sys.argv[1])); print(os.path.normpath(os.path.join(sys.argv[2], m["venv"])))' \
+              "$(dirname "${HERMES_INSTALL_DIR}")/manifest.json" "$(dirname "${HERMES_INSTALL_DIR}")")" \
+ && test -d "${VENV}" \
+ && test -x "${VENV}/bin/python" \
+ && ln -sfn "${VENV}" "${HERMES_INSTALL_DIR}/.hermes/venv" \
+ && test -x "${HERMES_INSTALL_DIR}/.hermes/venv/bin/python" \
+ && test "$(stat -Lc '%u' "${HERMES_INSTALL_DIR}/.hermes/venv")" = "0"
+
+# Root-owned launcher under /usr/local/bin. The image ENV already prepends the
+# install's own .hermes/bin, but a LOGIN shell rebuilds PATH from /etc/profile
+# (where the old /root/.local/bin lives), so `bash -lc 'command -v hermes'` would
+# miss it. /usr/local/bin is on every default PATH, so this one root-owned symlink
+# makes `hermes` resolve in every shell, including non-interactive login shells.
+RUN ln -sfn "${HERMES_INSTALL_DIR}/.hermes/bin/hermes" /usr/local/bin/hermes \
+ && test "$(readlink /usr/local/bin/hermes)" = "${HERMES_INSTALL_DIR}/.hermes/bin/hermes"
+
+# --- Pinned Hermes WebUI, immutable to the runtime uid -----------------------
+# The WebUI is PID 1: it hosts every chat and its tools, so its code is pinned
+# exactly like the agent. It is cloned, checked out at the pin, and asserted with
+# `git rev-parse`; a mismatch fails the build. /app stays ROOT-OWNED and is not
+# writable by the runtime uid, and its Python is byte-compiled here with the
+# interpreter that runs it, so the server never writes bytecode at runtime (the
+# WebUI's Python can run with -I, which ignores PYTHONDONTWRITEBYTECODE). The pin
+# is the commit the Pi runs today. Upgrade = a PR bumping this commit.
+ARG HERMES_WEBUI_COMMIT=1e2e4dde6520e5d96bb5b20dfb2f65aa890eeb5e
 WORKDIR /app
-RUN git clone https://github.com/nesquena/hermes-webui.git .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN set -eu; \
+    git clone --quiet https://github.com/nesquena/hermes-webui.git /app \
+ && git -C /app checkout --quiet --detach "${HERMES_WEBUI_COMMIT}" \
+ && test "$(git -C /app rev-parse HEAD)" = "${HERMES_WEBUI_COMMIT}" \
+ && rm -rf /app/.git \
+ && pip install --no-cache-dir -r /app/requirements.txt
 
 # Dedicated non-root service account. Created after the install and WORKDIR/pip
 # steps, which run as root at build time; the image then runs as this uid.
@@ -86,21 +122,78 @@ ARG HYBRID_AI_GID=10001
 RUN groupadd --gid "${HYBRID_AI_GID}" hermes && \
     useradd --uid "${HYBRID_AI_UID}" --gid "${HYBRID_AI_GID}" \
         --home-dir /root --no-create-home --shell /usr/sbin/nologin hermes && \
-    chown -R "${HYBRID_AI_UID}:${HYBRID_AI_GID}" /root /app
-# The Hermes code is root-owned and outside every mount, so it stays immutable
-# to the runtime uid. The chown above makes /root writable by that uid, so the
-# launcher MUST NOT live there: PATH resolves `hermes` to the install's own
-# root-owned ${HERMES_INSTALL_DIR}/.hermes/bin/hermes. /opt is never chowned.
+    chown -R "${HYBRID_AI_UID}:${HYBRID_AI_GID}" /root
+# Only /root (the data-volume mount point) becomes writable by the runtime uid.
+# /app (the WebUI) and /opt/hermes-agent (the agent) are LEFT ROOT-OWNED, so the
+# process that runs them cannot edit them. Byte-compile /app here, as root, with
+# the interpreter that will run it, so the server never writes .pyc at runtime.
+# The Hermes launcher therefore MUST NOT live under /root: PATH resolves `hermes`
+# to the install's own root-owned ${HERMES_INSTALL_DIR}/.hermes/bin/hermes, plus
+# the root-owned /usr/local/bin/hermes symlink. /opt is never chowned.
+RUN "${HERMES_INSTALL_DIR}/.hermes/venv/bin/python" -m compileall -q /app \
+ && test "$(stat -c '%u' /app)" = "0" \
+ && ! find /app -user "${HYBRID_AI_UID}" -print -quit | grep -q .
 
 # HOME stays /root. Saved state under hermes_data/ holds absolute /root/...
 # paths and the compose volume paths are unchanged, so this must not move.
 ENV HOME=/root
 # Put the root-owned launcher on PATH from the image environment so CMD needs no
-# shell init, and `hermes` resolves outside /root/.hermes.
+# shell init, and `hermes` resolves outside /root/.hermes. /usr/local/bin (the
+# root-owned symlink above) is already on the default PATH, so a login shell
+# resolves `hermes` too.
 ENV PATH="${HERMES_INSTALL_DIR}/.hermes/bin:${PATH}"
-# The image precompiles the tree and ships no .git, so the runtime uid never
+# The image precompiles both trees and ships no .git, so the runtime uid never
 # needs to write bytecode or a checkout fingerprint under the immutable install.
 ENV PYTHONDONTWRITEBYTECODE=1
+
+# --- Pin the WebUI to the /opt agent, never the data-volume copy -------------
+# The bootstrap picks the Agent dir and Python in this order:
+#   agent dir:  HERMES_WEBUI_AGENT_DIR -> $HERMES_HOME/hermes-agent (the data
+#               volume) -> ... -> /opt/hermes-agent (late fallback)
+#   python:     HERMES_WEBUI_PYTHON -> <agent_dir>/venv or .venv
+# A data volume that still holds the old /root/.hermes/hermes-agent copy (kept
+# for rollback until the migration) would therefore win, so BOTH are pinned here:
+#   HERMES_WEBUI_AGENT_DIR   forces the code to /opt/hermes-agent
+#   HERMES_WEBUI_PYTHON      forces the interpreter through the stable root-owned
+#                            /opt/hermes-agent/.hermes/venv symlink
+#   HERMES_WEBUI_SERVER_CWD  the server cwd defaults to the agent dir, which is
+#                            now read-only to the runtime uid; point it at a
+#                            runtime-writable path inside the data volume.
+ENV HERMES_WEBUI_AGENT_DIR="${HERMES_INSTALL_DIR}"
+ENV HERMES_WEBUI_PYTHON="${HERMES_INSTALL_DIR}/.hermes/venv/bin/python"
+ENV HERMES_WEBUI_SERVER_CWD="/root/.hermes/webui"
+# HERMES_HOME is pinned to the DATA VOLUME, never the install dir.
+#
+# Runtime dependency state -- pm/environments.py::install_state_dir(project) ->
+# dependency_home_root()/installs/<install_key> -- resolves under
+# get_default_hermes_root(), i.e. $HERMES_HOME when set, else $HOME/.hermes. The
+# dependency lease that pins the selected venv generation is written at runtime
+# as <install_state_dir>/environments/<uuid>/.leases by
+# hermes_cli/runtime_state.py::lease_directory (called from
+# pm/environments.py::activate_dependencies and pm/runtime.py
+# ::lease_current_runtime). It MUST land on the writable volume.
+#
+# This ENV is load-bearing, not a default. The launchers Hermes publishes honour
+# an explicit HERMES_HOME first and only fall back to a baked default:
+# hermes_cli/_launchers.py::_launcher_script does
+#   os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or <baked home>
+# The build's path rewrite (the /tmp/hermes-home -> ${HERMES_INSTALL_DIR} sed
+# above) can bake that default as /opt/hermes-agent, which would then resolve
+# installs_root under the READ-ONLY install tree -- exactly the
+# /opt/hermes-agent/installs/ffad.../environments/..../.leases write seen in the
+# live container. Setting HERMES_HOME here makes the runtime path win over any
+# baked default. The supported setting for this routing is HERMES_HOME; the smoke
+# job asserts it is the data volume, alongside the `docker diff` check that the
+# runtime never writes under /opt. install_state_dir('/opt/hermes-agent') is then
+# /root/.hermes/installs/ffad2f5543956651 -- the data volume.
+ENV HERMES_HOME="/root/.hermes"
+# Fail closed if the pinned interpreter cannot run both the WebUI and the Agent.
+# bootstrap.py::ensure_python_has_webui_deps would otherwise create /app/.venv at
+# RUNTIME, which is a write into the read-only /app tree (and would trip the smoke
+# job's `docker diff`). With this set it raises a clear error instead. The pinned
+# /opt venv ships the Agent and ruamel.yaml, which the WebUI's api/yaml_compat.py
+# accepts in place of PyYAML, so this only ever fires on a broken image.
+ENV HERMES_WEBUI_DISABLE_LOCAL_VENV=1
 
 EXPOSE 8501 8642
 
@@ -110,4 +203,18 @@ USER ${HYBRID_AI_UID}:${HYBRID_AI_GID}
 # in the background as the default profile -- a sticky named active profile
 # would otherwise be refused a gateway -- then bootstrap.py execs as PID 1. The
 # port is POSITIONAL: bootstrap.py has no --port flag.
-CMD ["bash", "-c", "hermes -p default gateway run --replace & exec python3 bootstrap.py --host 0.0.0.0 --foreground --no-browser 8501"]
+#
+# --skip-agent-install makes a missing Agent FAIL CLOSED: bootstrap raises
+# "Hermes Agent was not found and auto-install was disabled." instead of running
+# the UNPINNED installer from NousResearch main. The image always ships the
+# pinned Agent, so the flag only ever fires on a broken image.
+#
+# The WebUI interpreter is passed explicitly (the pinned /opt venv symlink) rather
+# than resolved by `python3` from PATH, so a login shell's PATH cannot change it.
+#
+# The server cwd is created here, at start, because bootstrap.py `os.chdir`s to it
+# but never creates it, and the image cannot pre-create it: HERMES_WEBUI_SERVER_CWD
+# lives under /root/.hermes, the data-volume mount point, so anything the image
+# wrote there would be hidden by the volume. `;` (not `&&`) keeps the mkdir ahead
+# of the backgrounded gateway and the foregrounded bootstrap.
+CMD ["bash", "-c", "mkdir -p \"${HERMES_WEBUI_SERVER_CWD:-/root/.hermes/webui}\"; hermes -p default gateway run --replace & exec \"${HERMES_WEBUI_PYTHON}\" bootstrap.py --host 0.0.0.0 --foreground --no-browser --skip-agent-install 8501"]
