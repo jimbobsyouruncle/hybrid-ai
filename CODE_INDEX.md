@@ -263,6 +263,8 @@
 - log_lacks()
 - sqlite_log_has()
 - sqlite_log_lacks()
+- docker_log_has()
+- docker_log_lacks()
 
 ## scripts/test-check-agent-context.sh
 - greet()

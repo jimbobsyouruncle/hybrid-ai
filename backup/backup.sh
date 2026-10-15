@@ -48,6 +48,25 @@
 #   exits EXIT_INCOMPLETE (3). A run that aborts outright still logs
 #   backup_failed and exits 1. Do not confuse the two.
 #
+# EXIT CODES:
+#   0  everything durable was captured and uploaded.
+#   1  the run ABORTED: missing/unreadable credentials, a restic failure, an
+#      uninitialised repository, a --check integrity failure, or a failure to
+#      cd into the repo. This is the only status the backup service retries.
+#   2  a usage error (an unknown argument).
+#   3  the run finished but MISSED durable state (INCOMPLETE): a rejected path,
+#      an unreadable data tree, a partial rsync, an uncapturable database. It
+#      is never retried. A spurious or partial capture must never exit 0, so
+#      every such case funnels through the EXIT_INCOMPLETE path below.
+#
+# DATA PERMISSIONS:
+#   HYBRID_AI_UID (when set) makes the stack write hermes_data as that uid. If
+#   this backup runs as a different account it may not be able to read that
+#   tree at all. The preflight in stage_backup detects that BEFORE any container
+#   is touched: it logs backup_data_unreadable with both uids, marks the run
+#   INCOMPLETE, and stops nothing. Run the backup as the account that owns the
+#   data, or grant this account read access to it.
+#
 # CONTAINER CONTROL:
 #   Containers are paused/stopped by CONTAINER NAME with plain docker
 #   commands, never via 'docker compose'. hermes-agent lives in an overlay
@@ -55,6 +74,12 @@
 #   fails silently -- which once meant the "cold copy" ran against live DBs.
 #   Anything this script pauses or stops is resumed by the EXIT trap, even if
 #   the script fails part-way.
+#
+#   The cold-copy fallback stops ONLY the containers a failed database needs.
+#   hermes-agent is stopped ONLY when BACKUP_ALLOW_AGENT_STOP=1 is set, because
+#   stopping it kills in-flight agent sessions; without that flag the cold copy
+#   declines, the database stays out of the snapshot, and the run is INCOMPLETE
+#   (exit 3) -- never a retry loop that stops the stack every 15 minutes.
 #
 # WHAT GETS BACKED UP (staging paths are relative to the repo directory):
 #   - databases/   Consistent SQLite snapshots, discovered at run time. Covers
@@ -439,6 +464,36 @@ fi
 # reads them. Neither introduces a new $HOME- or repo-relative path.
 # ---------------------------------------------------------------------------
 stage_backup() {
+# --- Read-access preflight. Runs BEFORE any container is touched. -----------
+# The backup runs as whoever invoked it (a systemd --user unit runs as the
+# human user), while with HYBRID_AI_UID set the stack writes hermes_data as the
+# stack uid. If this process cannot read a data tree, nothing under it can be
+# captured -- and a cold copy that stopped the agent for nothing killed
+# in-flight sessions (incident B1, 2026-10-15). So detect it here, be honest
+# about it, and stop no container. A discovered name is NEVER printed: only the
+# fixed tree label and numeric uids reach the log.
+DATA_UNREADABLE=0
+for _tree_var in HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR; do
+  _tree="${!_tree_var}"
+  [[ -d "$_tree" ]] || continue
+  # -xdev stays on one filesystem; -quit stops at the first unreadable entry.
+  # stderr is suppressed so no hostile path can leak through an error message.
+  if [[ -n "$(find "$_tree" -xdev ! -readable -print -quit 2>/dev/null)" ]]; then
+    case "$_tree_var" in
+      HYBRID_AI_HERMES_DATA_DIR) _tree_label="hermes_data" ;;
+      HYBRID_AI_WEBUI_DATA_DIR)  _tree_label="webui_data" ;;
+      *)                         _tree_label="unknown" ;;
+    esac
+    _owner="$(stat -c '%u:%g' "$_tree" 2>/dev/null || echo unknown)"
+    event "backup_data_unreadable" "tree=${_tree_label}" \
+          "owner_uid_gid=${_owner}" "run_uid=$(id -u)"
+    mark_incomplete "backup_data_unreadable:${_tree_label}"
+    warn "The backup runs as uid $(id -u) but ${_tree_label} is owned by ${_owner} and is not readable by this process, so nothing under it can be captured. This run is INCOMPLETE and will not be retried. Run the backup as the account that owns the data, or grant this account read access to it."
+    DATA_UNREADABLE=1
+  fi
+done
+unset _tree_var _tree _tree_label _owner
+
 [[ "$MODE" == "dryrun" ]] || log "Capturing application state..."
 rm -rf "$STAGING_DIR"
 mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" \
@@ -727,42 +782,130 @@ unpause_webui
 
 # --- Cold-copy fallback ----------------------------------------------------
 # Uses the SAME run-time discovered list, never a hardcoded one. A database that
-# could not be captured online is copied cold with the stack STOPPED and MUST
-# pass quick_check. If it still fails, the run dies: a backup that reports
-# success while a real database is missing is exactly what this script must
-# never allow. A genuine non-SQLite file is skipped, not fatal; a REJECTED path
-# is skipped too (it was counted and already made the run incomplete).
+# could not be captured online is retried with its client container STOPPED and
+# MUST pass quick_check. The cold copy now stops ONLY the containers the FAILED
+# databases need, and NEVER calls die(): a database it still cannot capture is
+# reported (cold_copy_failed) and left out of the snapshot, which makes the run
+# INCOMPLETE (exit 3) rather than aborting it (exit 1) into a retry loop. That
+# is exactly what backup/README.md documents. A genuine non-SQLite file is
+# skipped, not fatal; a REJECTED path is skipped too (it was counted and already
+# made the run incomplete).
 if (( DB_FAILED > 0 )); then
   warn "${DB_FAILED} database(s) could not be captured online."
-  if command -v docker >/dev/null 2>&1; then
-    warn "Falling back to a cold copy. Services will be briefly unavailable."
-    event "cold_copy_fallback" "failed_dbs=${DB_FAILED}"
-    CONSISTENCY="cold"
-    for c in "${APP_CONTAINERS[@]}"; do
+  if (( DATA_UNREADABLE )); then
+    # The preflight already proved this process cannot read the data. Stopping
+    # the stack here would only kill in-flight agent sessions for nothing.
+    event "cold_copy_skipped" "reason=data_unreadable" "failed_dbs=${DB_FAILED}"
+    warn "Skipping the cold copy: a data tree is not readable by this process. No container will be stopped."
+    mark_incomplete "cold_copy_skipped:data_unreadable"
+  elif ! command -v docker >/dev/null 2>&1; then
+    # No docker: nothing can be stopped and no cold copy is possible. That is a
+    # missing snapshot, not an abort -- mark it INCOMPLETE and keep the run.
+    event "cold_copy_skipped" "reason=docker_unavailable" "failed_dbs=${DB_FAILED}"
+    warn "Cannot produce consistent database copies and cannot fall back: docker is unavailable."
+    mark_incomplete "cold_copy_skipped:docker_unavailable"
+  else
+    # Which containers do the FAILED databases need? Match their absolute paths
+    # against the fixed data-dir prefixes (ours, not container-provided).
+    wfail=0; afail=0; agent_declined=0; agent_allowed=0
+    for db in "${FAILED_DBS[@]}"; do
+      [[ "$db" == "${HYBRID_AI_WEBUI_DATA_DIR}/"* ]] && wfail=1
+      if [[ "$db" == "${HYBRID_AI_HERMES_DATA_DIR}/"* ]]; then
+        afail=1
+        if [[ "${BACKUP_ALLOW_AGENT_STOP:-0}" == "1" ]]; then
+          agent_allowed=1
+        else
+          agent_declined=1
+        fi
+      fi
+    done
+
+    # webui_frozen/agent_frozen = the container owning the failed databases is
+    # frozen (stopped/paused) at a single point in time, so they may be copied
+    # cold. When there is nothing to freeze for a class it counts as frozen; a
+    # database whose container could NOT be frozen is left out of the snapshot
+    # instead of being copied while it is still being written.
+    webui_frozen=0; agent_frozen=0; stop_failed=0
+    (( wfail )) || webui_frozen=1
+    (( afail )) || agent_frozen=1
+
+    cold_targets=()
+    (( wfail )) && cold_targets+=(open-webui)
+    (( afail && agent_allowed )) && cold_targets+=(hermes-agent)
+    for c in "${cold_targets[@]}"; do
       is_running "$c" || continue
       if docker stop "$c" >/dev/null 2>&1; then
         STOPPED_CONTAINERS+=("$c")
+        [[ "$c" == "open-webui" ]] && webui_frozen=1
+        [[ "$c" == "hermes-agent" ]] && agent_frozen=1
       else
-        die "Could not stop ${c}; refusing to copy a database that is still being written."
+        # Do NOT die: unable to stop is an INCOMPLETE run, not an abort, and
+        # nothing may be copied while the database is still being written.
+        stop_failed=1
+        mark_incomplete "cold_copy_stop_failed:${c}"
+        warn "Could not stop ${c}; its databases will not be cold-copied."
       fi
     done
-    sleep 3
-    rm -rf "${STAGING_DIR}/databases"
-    mkdir -p "${STAGING_DIR}/databases"
-    DB_COUNT=0
-    for db in "${DISCOVERED_DBS[@]}"; do
-      [[ -f "$db" && ! -L "$db" ]] || continue
-      crc=0; cold_copy_db "$db" || crc=$?
-      case "$crc" in
-        0) DB_COUNT=$(( DB_COUNT + 1 )) ;;
-        2) warn "Skipping cold copy of non-SQLite ${SNAPSHOT_REL}." ;;
-        3) : ;;   # rejected: already counted, already incomplete
-        *) die "Cold-copy fallback failed for ${SNAPSHOT_REL:-a database}. Refusing to report a successful backup." ;;
-      esac
-    done
-    restart_stopped
-  else
-    die "Cannot produce consistent database copies and cannot fall back."
+    # A paused stack is already frozen at a single point in time.
+    [[ "$CONSISTENCY" == "paused" ]] && webui_frozen=1
+
+    if (( stop_failed )); then
+      # Restart anything already stopped; copy nothing while a writer is live.
+      restart_stopped
+    else
+      cold_handled=0
+      if (( agent_declined )); then
+        event "cold_copy_agent_stop_declined" "failed_dbs=${DB_FAILED}"
+        warn "hermes-agent is left running: stopping it kills in-flight agent sessions. Set BACKUP_ALLOW_AGENT_STOP=1 to let the cold copy stop it."
+        mark_incomplete "cold_copy_agent_stop_declined"
+        cold_handled=1
+      fi
+      if (( wfail && ! webui_frozen )); then
+        warn "open-webui could not be frozen, so its failed databases stay out of this snapshot; the run is INCOMPLETE."
+        mark_incomplete "cold_copy_stop_failed:open-webui"
+        cold_handled=1
+      fi
+      if (( (wfail && webui_frozen) || (afail && agent_frozen) )); then
+        warn "Falling back to a cold copy. Only the containers the failed databases need are stopped."
+        event "cold_copy_fallback" "failed_dbs=${DB_FAILED}"
+        CONSISTENCY="cold"
+        sleep 3
+        for db in "${FAILED_DBS[@]}"; do
+          [[ -f "$db" && ! -L "$db" ]] || continue
+          # Skip a database whose container is not frozen: it is left out (which
+          # makes the run incomplete) rather than copied while being written.
+          if [[ "$db" == "${HYBRID_AI_HERMES_DATA_DIR}/"* ]] && (( ! agent_frozen )); then
+            continue
+          fi
+          if [[ "$db" == "${HYBRID_AI_WEBUI_DATA_DIR}/"* ]] && (( ! webui_frozen )); then
+            continue
+          fi
+          crc=0; cold_copy_db "$db" || crc=$?
+          case "$crc" in
+            0) DB_COUNT=$(( DB_COUNT + 1 )) ;;
+            2) warn "Skipping cold copy of non-SQLite ${SNAPSHOT_REL}." ;;
+            3) : ;;   # rejected: already counted, already incomplete
+            *) # Cannot capture even cold: report it, keep the other databases,
+               # drop any partial staging, and make the run INCOMPLETE -- never
+               # die into a retry loop.
+               rm -f "${STAGING_DIR}/databases/${SNAPSHOT_REL}" 2>/dev/null || true
+               event "cold_copy_failed" "severity=high"
+               warn "Cold copy could not capture ${SNAPSHOT_REL}; it stays out of the snapshot and this run is INCOMPLETE."
+               mark_incomplete "cold_copy_failed" ;;
+          esac
+        done
+        restart_stopped
+        cold_handled=1
+      fi
+      if (( ! cold_handled )); then
+        # No container could be stopped for the failed databases (e.g. it was not
+        # running), so the cold copy is skipped entirely. The databases stay out
+        # of the snapshot, which is what makes the run INCOMPLETE -- never 0.
+        event "cold_copy_skipped" "reason=no_container_stopped" "failed_dbs=${DB_FAILED}"
+        warn "No container may be stopped for the failed databases, so they stay out of this snapshot; the run is INCOMPLETE."
+        mark_incomplete "cold_copy_skipped:no_container_stopped"
+      fi
+    fi
   fi
 fi
 

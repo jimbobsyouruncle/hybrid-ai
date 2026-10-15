@@ -86,6 +86,35 @@ Some runs cannot capture everything. A discovered path fails the allow-list, an 
 
 `backup_failed` (exit 1) stays reserved for a run that aborted. An incomplete run is a distinct, non-retryable outcome. `doctor.sh` counts both `backup_failed` and `backup_incomplete` **since the last `backup_success`**, so a clean run resets the counters.
 
+The backup unit also **bounds its own retries**. `hybrid-ai-backup.service` sets `StartLimitIntervalSec=1h` and `StartLimitBurst=2`, so even a hard failure (exit 1) can be retried at most twice in an hour before systemd gives up. This is what stops a run that fails the same way every time from trying again every 15 minutes.
+
+### When the backup cannot read the data
+
+With `HYBRID_AI_UID` set, the stack writes `hermes_data` as that uid — the container's own user, not yours. The nightly backup runs as *you*, from a systemd **user** unit. If your account cannot read that tree, nothing under it can be captured, and no retry will ever change that.
+
+Before it touches a single container, `backup.sh` checks whether it can read `hermes_data` and `webui_data`. If it cannot, it:
+
+- logs `backup_data_unreadable` with the tree name and **both** uids (the owner, and the uid the backup runs as) — and prints the same pair in plain English, with the fix;
+- marks the run **INCOMPLETE** and exits **3**, so systemd never retries it;
+- **stops no container**. There is nothing to gain from an outage here, so there is no cold copy and no stopped `hermes-agent`.
+
+The fix is to run the backup as the account that owns the data, or to grant this account read access to the tree.
+
+### `BACKUP_ALLOW_AGENT_STOP`
+
+The cold-copy fallback stops the container that owns a database that could not be captured online, copies the database cold, and restarts the container. For Open WebUI that is a brief, harmless outage. For `hermes-agent` it is **not** harmless: stopping the agent kills any agent session that is running at that moment.
+
+So the backup refuses to stop `hermes-agent` unless you explicitly opt in:
+
+```bash
+BACKUP_ALLOW_AGENT_STOP=1 ./backup/backup.sh   # or set it in the unit's Environment=
+```
+
+- **What it does:** permits the cold-copy fallback to stop `hermes-agent` (and only that container) so a `hermes_data` database can be copied cold.
+- **Why it is off by default:** stopping the agent destroys in-flight work for a database that a retry could not capture anyway.
+- **When to set it:** only when you accept that a backup run may interrupt an active agent session — for example, a one-off manual run to recover a specific database.
+- **When it is not set:** the cold copy *declines* to stop the agent, logs `cold_copy_agent_stop_declined`, leaves that database out of the snapshot, and marks the run INCOMPLETE (exit 3). It never stops the container and never fails the run.
+
 `restore.sh --test` closes the loop by running `PRAGMA integrity_check` against the recovered databases, which is SQLite auditing its own files. That is the step that proves the whole chain works.
 
 ---
@@ -295,8 +324,11 @@ Two providers, two failure modes, one password to remember.
 | `No credentials at ~/.config/...` | Backups never configured | Run `./install.sh` |
 | `has permissions 644; expected 600` | Permissions drifted | `chmod 600 ~/.config/hybrid-ai-backup/*` |
 | `restic init failed` | Wrong account ID, bucket, or token | Verify the endpoint URL and that the token has Object Read & Write on that bucket |
-| `Could not capture ... via SQLite` | The database could not be captured online (e.g. `sqlite3` missing, or a WAL database in a directory the user cannot write) | `sudo apt-get install -y sqlite3`. The script falls back to a verified cold copy, then fails the run if that also fails |
-| `backup_incomplete` in the log, exit code 3 | The run uploaded but missed durable state (a rejected path, an unreadable entry, a partial rsync, an unverifiable database) | Check the events around it (`db_path_rejected`, `hermes_data_unreadable`, `rsync_partial`). This is not retried automatically, by design |
+| `Could not capture ... via SQLite` | The database could not be captured online (e.g. `sqlite3` missing, or a WAL database in a directory the user cannot write) | `sudo apt-get install -y sqlite3`. The script falls back to a verified cold copy; if that also cannot capture it, the run is marked INCOMPLETE (exit 3), not failed |
+| `backup_incomplete` in the log, exit code 3 | The run uploaded but missed durable state (a rejected path, an unreadable entry, a partial rsync, an unverifiable database) | Check the events around it (`db_path_rejected`, `hermes_data_unreadable`, `rsync_partial`, `backup_data_unreadable`, `cold_copy_failed`). This is not retried automatically, by design |
+| `backup_data_unreadable` | The backup runs as an account that cannot read `hermes_data` or `webui_data` (usually because `HYBRID_AI_UID` makes the container own the tree). The log prints both uids | Run the backup as the account that owns the data, or grant this account read access to it. Until then the run is INCOMPLETE (exit 3) and stops no container |
+| `cold_copy_agent_stop_declined` | A `hermes_data` database could not be captured online and the cold copy refused to stop `hermes-agent`, because stopping it kills in-flight agent sessions | Expected unless you opt in. The database stays out of the snapshot and the run is INCOMPLETE. To allow it, set `BACKUP_ALLOW_AGENT_STOP=1` |
+| `cold_copy_failed` | A database could not be captured even with its container stopped (so it failed `quick_check` cold too) | It is left out of the snapshot and the run is marked INCOMPLETE (exit 3). A retry will not fix it: investigate why that database cannot be read, then run again |
 | Backup never runs overnight | Linger not enabled | `sudo loginctl enable-linger $USER` |
 | `repository is already locked` | A previous run was killed | `restic unlock` after confirming nothing is running |
 | Integrity check fails | Repository corruption | Do not prune. Try `restic repair index`, and treat existing snapshots as suspect |
