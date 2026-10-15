@@ -322,7 +322,7 @@ APP_BEFORE="$(find "$APP2" -mindepth 1 | sort)"
 : > "$LOG"
 rm -rf "$CAPTURE"
 RUN_RC=0
-env HOME="$HOME2" \
+env -u BACKUP_LOG HOME="$HOME2" \
     HYBRID_AI_APP_DIR="$APP2" \
     HYBRID_AI_DATA_DIR="$DATA2" \
     HYBRID_AI_LOG_DIR="$LOG2" \
@@ -344,7 +344,7 @@ assert "case g: nothing written under APP_DIR" test "$APP_BEFORE" = "$APP_AFTER"
 # restore --test reads a DEFAULT-layout snapshot (CAPTURE) and writes only
 # under WORK_DIR. The restic stub lays the snapshot down at --target.
 RESTORE_RC=0
-env HOME="$HOME2" \
+env -u BACKUP_LOG HOME="$HOME2" \
     HYBRID_AI_APP_DIR="$APP2" \
     HYBRID_AI_DATA_DIR="$DATA2" \
     HYBRID_AI_LOG_DIR="$LOG2" \
