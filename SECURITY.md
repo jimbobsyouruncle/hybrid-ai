@@ -380,6 +380,42 @@ restic's `backup` operation is inherently additive and never rewrites existing o
 
 Not enabled by default because it requires manual retention management. Documented in [`backup/README.md`](backup/README.md) for anyone whose threat model warrants it.
 
+---
+
+## Headless deploy security (not active until migration)
+
+The in-repo pieces of a headless deploy live under `deploy/` and
+`scripts/deploy-*.sh`. They are **inert until an owner migration**: card F installs
+them on the host and adds the `authorized_keys` line, and a later card switches
+`.github/workflows/deploy.yml` over to them. Today's deploy path is unchanged.
+See [`deploy/README.md`](deploy/README.md).
+
+A dedicated account, `hybrid-ai-deploy`, gets a forced-command SSH entrypoint
+that can do exactly one thing: start the system unit
+`hybrid-ai-deploy@<sha>.service` for a 40-character commit. The full control set:
+
+| Control | Mechanism |
+|---|---|
+| Forced command, one accepted verb | `scripts/deploy-forced-command.sh` accepts EXACTLY `deploy <40-lowercase-hex>`. Any other command, extra argument, shell metacharacter or empty command is refused with exit 2 and nothing is run |
+| One polkit action, one verb, one unit shape | `deploy/50-hybrid-ai-deploy.rules` returns `polkit.Result.YES` only for `subject.user == "hybrid-ai-deploy"`, `action.id == "org.freedesktop.systemd1.manage-units"`, `verb == "start"`, and a unit matching `^hybrid-ai-deploy@[0-9a-f]{40}\.service$`. Everything else is the default deny: no stop, restart, enable/disable, daemon-reload, or other unit |
+| No login shell beyond the forced command | sshd runs the forced command for every connection. `restrict,command=...` disables PTY, X11, agent and port forwarding |
+| No sudo | The account is in no `sudoers` rule and needs none |
+| Not in the `docker` group | The account cannot reach the Docker socket |
+| Not in the `systemd-journal` group | The account cannot read journald. The unit writes each run to `$HYBRID_AI_LOG_DIR/deploy/<sha>.log`, mode `0640`, group `hybrid-ai-deploy`, so the account reads its own run log without journal access |
+| Reads the system env file (paths only) | The forced command resolves host paths by parsing `/etc/hybrid-ai/hybrid-ai.env` (never sourcing it), the same file the unit names. Card F makes it readable by the account (e.g. `0640`, group `hybrid-ai-deploy`). It holds paths and names only, no secret values |
+| Public fetch, no credentials | `scripts/deploy-instance.sh` fetches main only from the public https remote, with git hooks disabled and credential helpers cleared, and refuses a credential-bearing origin (userinfo in the URL) |
+| Ancestor check is mandatory | The commit must be `git merge-base --is-ancestor <sha> origin/main` or the deploy is refused (exit 7) |
+| HEAD assert is mandatory | After `git reset --hard <sha>`, `HEAD` must equal `<sha>` or the deploy is refused (exit 8) |
+| One deploy at a time | An exclusive `flock` refuses a second concurrent run (exit 3) |
+| No automatic retry | `hybrid-ai-deploy@.service` has no `Restart=` policy at all (incident B1: a retry loop once stopped `hermes-agent` every 15 minutes). A failed deploy stays failed and is diagnosed from its log |
+| Root only for the mutation | The unit runs as root because it resets the program tree and reprovisions the host. The commit is re-validated inside the script, so a malformed `%i` cannot reach the tree |
+
+The deploy account holds no privilege of its own. Its only power is the single
+polkit-granted `start` of a matching unit, and that unit's script enforces the
+ancestor check, the HEAD assert and the public, credential-free fetch.
+
+---
+
 ## Availability and observability review
 
 A second review covered availability, error handling, and outcome logging. Eight issues were fixed. Each was checked against the security controls above so that no reliability fix weakened the privacy posture.

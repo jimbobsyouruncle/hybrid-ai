@@ -1,0 +1,35 @@
+// ---------------------------------------------------------------------------
+// FILE: deploy/50-hybrid-ai-deploy.rules
+// PURPOSE (plain English):
+//   A polkit JavaScript rule for the headless deploy. It is the authorisation
+//   half of the least-privilege design: the forced-command SSH entrypoint runs
+//   as the unprivileged `hybrid-ai-deploy` account and calls `systemctl start`
+//   on the SYSTEM manager. Without a rule, polkit would deny that call. This
+//   rule grants exactly that one thing and nothing else.
+//
+//   It returns polkit.Result.YES ONLY when ALL of these hold:
+//     * subject.user == "hybrid-ai-deploy"
+//     * action.id  == "org.freedesktop.systemd1.manage-units"
+//     * verb       == "start"
+//     * the unit matches ^hybrid-ai-deploy@[0-9a-f]{40}\.service$
+//   In every other case it returns nothing, which is the default deny.
+//
+//   It grants `start` of a matching unit and nothing more: no stop, no restart,
+//   no enable/disable, no daemon-reload, no other action, no other unit.
+//
+//   NOT ACTIVE UNTIL MIGRATION:
+//     Nothing here is active until the owner's migration. Card F installs this
+//     file under /etc/polkit-1/rules.d/ (or the distro's polkit rules
+//     directory) and reloads polkit. Until then the file is inert.
+// ---------------------------------------------------------------------------
+polkit.addRule(function(action, subject) {
+    if (subject.user == "hybrid-ai-deploy" &&
+        action.id == "org.freedesktop.systemd1.manage-units") {
+        var verb = action.lookup("verb");
+        var unit = action.lookup("unit");
+        if (verb == "start" &&
+            /^hybrid-ai-deploy@[0-9a-f]{40}\.service$/.test(unit)) {
+            return polkit.Result.YES;
+        }
+    }
+});

@@ -119,6 +119,22 @@ jobs:
         # before running install.sh, and maps doctor.sh's exit code correctly.
         run: bash scripts/test-deploy-remote.sh
 
+      - name: Headless deploy forced-command tests
+        # Offline. Proves the forced-command entrypoint accepts only
+        # `deploy <40-lowercase-hex>`, refuses every other form with exit 2 and
+        # nothing run, uses the SYSTEM manager, gives a non-zero exit on unit
+        # failure, prints the run log, and that the polkit rule grants only
+        # that one user, action, verb and unit shape. systemctl is stubbed.
+        run: bash scripts/test-deploy-forced-command.sh
+
+      - name: Headless deploy instance tests
+        # Offline. Proves scripts/deploy-instance.sh re-validates the sha, takes
+        # the lock, refuses a credential-bearing origin, fetches the public
+        # https remote with hooks disabled, refuses a non-ancestor sha and a
+        # HEAD mismatch, writes the run log mode 0640, and that the unit has no
+        # Restart= line. git and deploy-remote.sh are stubbed.
+        run: bash scripts/test-deploy-instance.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. The bind sources are

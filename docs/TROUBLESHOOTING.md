@@ -147,6 +147,41 @@ Warnings (`exit 1`) never fail the deploy. If you want to silence one, fix the u
 
 ---
 
+## Headless deploy: refusal exit codes
+
+The headless deploy path (`deploy/`, `scripts/deploy-*.sh`, the
+**not active until migration** system unit) reports every refusal with its own
+exit code. Read the code to know which control fired.
+
+The forced-command SSH entrypoint, `scripts/deploy-forced-command.sh`:
+
+| Exit | Meaning | Fix |
+|---|---|---|
+| `0` | The unit started and finished successfully | — |
+| `2` | The command was refused: it was not exactly `deploy <40-lowercase-hex>` (extra arguments, another verb, shell metacharacters, or an empty command). Nothing was run | Send exactly `ssh <host> deploy <40-lowercase-hex>` |
+| `3` | The unit was started but did not finish successfully | Read the run log (below); the deploy failed inside `deploy-remote.sh` or the unit |
+
+The unit's script, `scripts/deploy-instance.sh` (run as root by
+`hybrid-ai-deploy@<sha>.service`):
+
+| Exit | Meaning | Fix |
+|---|---|---|
+| `0` | Handed off to `deploy-remote.sh` (its exit code then propagates through `exec`) | — |
+| `2` | Missing argument, or not a 40-lowercase-hex commit | Pass the full 40-character lowercase hex commit |
+| `3` | Another deploy holds the lock | Wait for the running deploy to finish, then retry |
+| `4` | The origin remote carries a credential (userinfo in its URL) | Remove the credential from the origin URL; the deploy fetches only from the public https remote |
+| `5` | The public remote is unsafe (not https, or carries userinfo) | Point `HYBRID_AI_DEPLOY_PUBLIC_REMOTE` at the public https remote, by name only |
+| `6` | Fetching main from the public remote failed | Check network and the remote URL, then retry |
+| `7` | The commit is not an ancestor of `origin/main` | Deploy a commit that is on `main` |
+| `8` | `HEAD` is not the commit after `git reset --hard` | Investigate the checkout; the reset did not land on the validated revision |
+
+Every run's output is written to `$HYBRID_AI_LOG_DIR/deploy/<sha>.log` (mode
+`0640`, group `hybrid-ai-deploy`). The deploy account reads its own run log there
+without any systemd-journal access. Full detail is in
+[`deploy/README.md`](../deploy/README.md).
+
+---
+
 ## Relocated paths (split layout)
 
 Every host path resolves through `scripts/lib/hybrid-ai-env.sh`. If you set
