@@ -858,7 +858,7 @@ systemctl list-timers 'hybrid-ai-*'                       # next capture
 journalctl --system -u hybrid-ai-backup-capture.service -n 50
 journalctl --system -u hybrid-ai-backup-upload.service  -n 50
 systemctl start hybrid-ai-backup-capture.service          # run one now
-cat /var/lib/hybrid-ai-backup/STATUS                      # complete|incomplete
+cat /var/lib/hybrid-ai-backup/.backup-staging/STATUS                      # complete|incomplete
 ```
 
 The capture unit stops a run by exit code:

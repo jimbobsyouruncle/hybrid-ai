@@ -384,7 +384,7 @@ systemctl start hybrid-ai-backup-capture.service     # run one now
 journalctl --system -u hybrid-ai-backup-capture.service -n 50
 journalctl --system -u hybrid-ai-backup-upload.service  -n 50
 systemctl show -p Result hybrid-ai-backup-capture.service
-cat /var/lib/hybrid-ai-backup/STATUS                 # complete | incomplete
+cat /var/lib/hybrid-ai-backup/.backup-staging/STATUS                 # complete | incomplete
 ```
 
 A capture that finishes with `STATUS` `complete` starts the upload immediately
