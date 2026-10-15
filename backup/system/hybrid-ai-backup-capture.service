@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-capture.service
+# PURPOSE (plain English):
+#   The CAPTURE half of a system-mode backup. It runs as the dedicated
+#   `hybrid-ai-backup` account and captures all durable state into the staging
+#   directory. It holds:
+#     * read access to the data, via ONE narrow capability (CAP_DAC_READ_SEARCH)
+#       -- so it can read container-owned data without being root and without
+#       joining the docker group;
+#     * NO network (PrivateNetwork=yes) and NO credentials (it is never given
+#       the R2 keys).
+#
+#   It runs `backup.sh --stage-only`, which loads no credentials, keeps the
+#   staging directory, writes STAGING_DIR/STATUS, and exits 0 (complete) or 3
+#   (incomplete). On success systemd starts the upload unit.
+#
+# THE PRIVILEGE SPLIT:
+#   The docker socket is made unreachable here (InaccessiblePaths=), so this
+#   account cannot drive the docker API. The two `+` steps below run
+#   backup/backup-containers.sh as ROOT to pause the containers and gather host
+#   info; the capture process itself runs with no docker access at all
+#   (BACKUP_CONTAINER_CONTROL=external). No unit stops or starts a container.
+#
+# INSTALL:
+#   Installed by ./install.sh into /etc/systemd/system when HYBRID_AI_BACKUP_MODE
+#   =system and install.sh runs as root (see backup/README.md, "System mode").
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai backup capture (read-only data, no network, no credentials)
+Documentation=file:///opt/hybrid-ai/backup/README.md
+After=network-online.target
+Wants=network-online.target
+# A completed capture (exit 0 or the SuccessExitStatus 3) hands off to the
+# upload unit. OnSuccess is a [Unit] directive, not a [Service] one.
+OnSuccess=hybrid-ai-backup-upload.service
+
+[Service]
+Type=oneshot
+User=hybrid-ai-backup
+Group=hybrid-ai-backup
+
+# ONE narrow capability: read any file, regardless of ownership. This is what
+# replaces both root and docker-group membership for reading the data.
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+
+# Least privilege: no setuid escalation, no network at all.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+
+# The docker socket is a root-equivalent control channel; this account must
+# never be able to reach it. The leading '-' makes systemd tolerate a socket
+# path that does not exist on this host.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
+
+# Filesystem hardening. ProtectSystem=strict makes the whole tree read-only;
+# StateDirectory/RuntimeDirectory/LogsDirectory below carve out the only three
+# writable places this unit needs.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# StateDirectory= is where staging lives (/var/lib/hybrid-ai-backup); systemd
+# creates it and exports STATE_DIRECTORY. RuntimeDirectory= is the run
+# directory (/run/hybrid-ai-backup) shared with the root helper. LogsDirectory=
+# is where backup.log lives (/var/log/hybrid-ai-backup).
+StateDirectory=hybrid-ai-backup
+RuntimeDirectory=hybrid-ai-backup
+LogsDirectory=hybrid-ai-backup
+
+# The env file and the mode switches. HYBRID_AI_ENV_FILE points at the system
+# env file; HYBRID_AI_BACKUP_MODE=system selects the split units;
+# BACKUP_CONTAINER_CONTROL=external forbids backup.sh from running any docker
+# command. The path settings (HYBRID_AI_DATA_DIR etc.) come from that env file.
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_BACKUP_MODE=system
+Environment=BACKUP_CONTAINER_CONTROL=external
+
+# The two privileged steps run as root (leading '+'), before the capture. They
+# pause the containers and gather host info. They never stop a container.
+ExecStartPre=+/opt/hybrid-ai/backup/backup-containers.sh host-info
+ExecStartPre=+/opt/hybrid-ai/backup/backup-containers.sh pause
+
+# The capture itself: no credentials, no network.
+ExecStart=/opt/hybrid-ai/backup/backup.sh --stage-only
+
+# Always resume the containers, even if the capture failed or was killed. This
+# is the fix for "a killed capture must not leave the stack frozen". unpause is
+# idempotent and succeeds when nothing is paused.
+ExecStopPost=+/opt/hybrid-ai/backup/backup-containers.sh unpause
+
+# Exit 3 (INCOMPLETE) is a valid capture outcome: the upload unit still runs and
+# tags the snapshot complete:false. Only exit 0 (and 3) are success.
+SuccessExitStatus=3
+
+# NO Restart=: a capture is triggered by its timer. A restart loop here would
+# pause and resume containers every 15 minutes (incident B1).
+TimeoutStartSec=4h
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20

@@ -104,6 +104,29 @@
 #   ./backup.sh --init             create the repository (first-time setup)
 #   ./backup.sh --dry-run          show what would be backed up, upload nothing
 #   ./backup.sh --non-interactive  never prompt (used by the systemd timer)
+#   ./backup.sh --stage-only       capture only: no credentials, keep staging,
+#                                  write STAGING_DIR/STATUS, exit 0 or 3
+#   ./backup.sh --upload-only      upload only: never reads a data tree, refuses
+#                                  without STAGING_DIR/STATUS, exit 0 or 3
+#
+# STAGE AND UPLOAD AS SEPARATE UNITS:
+#   The split lets the capture run with read-only data access, no network and no
+#   credentials, while the upload run holds the R2 credentials and network but
+#   no read privilege. The two share only STAGING_DIR and its STATUS file.
+#
+# CONTAINER CONTROL:
+#   BACKUP_CONTAINER_CONTROL=external means this script runs NO docker command
+#   at all. A root helper (backup/backup-containers.sh) pauses the containers
+#   and records which were paused in /run/hybrid-ai-backup/paused; this script
+#   reads that file for CONSISTENCY and copies host metadata from
+#   /run/hybrid-ai-backup/host-info/. The cold-copy fallback is declined (the
+#   run is INCOMPLETE, exactly as for an unreadable tree). The default, auto,
+#   keeps today's behaviour.
+#
+# CREDENTIALS:
+#   When $CREDENTIALS_DIRECTORY is set (systemd LoadCredential), r2.env and
+#   repo-password are read from it with the same parser and the same required
+#   keys. Otherwise they are read from BACKUP_CONF_DIR as today.
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -115,28 +138,16 @@ source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
 cd "$HYBRID_AI_APP_DIR" || exit 1
 
 # Credentials live OUTSIDE the git repository so that no git operation and no
-# careless 'tar czf' of the project folder can ever sweep them up.
-R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
-RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
+# careless 'tar czf' of the project folder can ever sweep them up. In system
+# mode systemd sets $CREDENTIALS_DIRECTORY (LoadCredential); read them from
+# there, or from BACKUP_CONF_DIR as today.
+CREDENTIALS_SOURCE_DIR="${CREDENTIALS_DIRECTORY:-$BACKUP_CONF_DIR}"
+R2_ENV_FILE="${CREDENTIALS_SOURCE_DIR}/r2.env"
+RESTIC_PW_FILE="${CREDENTIALS_SOURCE_DIR}/repo-password"
 export RESTIC_CACHE_DIR
 
 # Where consistent snapshots are staged before upload. Wiped afterwards.
 STAGING_DIR="$HYBRID_AI_BACKUP_STAGING_DIR"
-
-# --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
-# Backup credentials are the keys to EVERY backup. Kept inside the deploy
-# tree, a data tree, or the staging work tree, they would be swept into a git
-# operation, a diagnostics bundle, or a backup of the tree itself. A --dry-run
-# writes nothing, but the read of a misplaced credential is what we refuse.
-path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
-for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
-  if path_within "${BACKUP_CONF_DIR%/}" "${_tree%/}"; then
-    printf '[ X ] BACKUP_CONF_DIR is inside %s.\n' "$_tree" >&2
-    printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
-    exit 1
-  fi
-done
-unset _tree
 
 KEEP_DAILY="${KEEP_DAILY:-7}"
 KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
@@ -156,18 +167,79 @@ APP_CONTAINERS=(open-webui hermes-agent)
 PAUSED_CONTAINERS=()
 STOPPED_CONTAINERS=()
 
+# Fixed paths the root helper (backup/backup-containers.sh) uses in external
+# container-control mode. The default is the fixed /run/hybrid-ai-backup. The
+# HYBRID_AI_BACKUP_RUN_DIR override exists ONLY so the offline test suite can
+# point at a scratch directory without root; it changes no privilege and the
+# helper always writes to the fixed default. Names are fixed; no path or
+# container name ever comes from an argument.
+BACKUP_RUN_DIR="${HYBRID_AI_BACKUP_RUN_DIR:-/run/hybrid-ai-backup}"
+PAUSED_FILE="${BACKUP_RUN_DIR}/paused"
+HOST_INFO_DIR="${BACKUP_RUN_DIR}/host-info"
+
+# BACKUP_CONTAINER_CONTROL=external: this process runs NO docker command at
+# all. It reads what the root helper paused and copies the helper's host-info.
+# Any other value keeps today's behaviour (this script controls containers).
+EXTERNAL_CONTAINER_CONTROL=0
+if [[ "${BACKUP_CONTAINER_CONTROL:-auto}" == "external" ]]; then
+  EXTERNAL_CONTAINER_CONTROL=1
+fi
+
+# HYBRID_AI_BACKUP_MODE=system selects the split capture/upload system units.
+# It is informational here (the units pass --stage-only / --upload-only); the
+# default, user, is unchanged.
+BACKUP_MODE="${HYBRID_AI_BACKUP_MODE:-user}"
+
 MODE="backup"
+STAGE_ONLY=0
+UPLOAD_ONLY=0
 NON_INTERACTIVE=0
 for arg in "$@"; do
   case "$arg" in
     --check)           MODE="check" ;;
     --init)            MODE="init" ;;
     --dry-run)         MODE="dryrun" ;;
+    --stage-only)      STAGE_ONLY=1 ;;
+    --upload-only)     UPLOAD_ONLY=1 ;;
     --non-interactive) NON_INTERACTIVE=1 ;;
-    -h|--help) sed -n '2,81p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,129p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+
+# --stage-only and --upload-only are mutually exclusive, and neither combines
+# with --init/--check/--dry-run (those are whole-run modes with their own
+# credential and repository handling).
+if (( STAGE_ONLY && UPLOAD_ONLY )); then
+  echo "Cannot combine --stage-only and --upload-only." >&2
+  exit 2
+fi
+if (( STAGE_ONLY || UPLOAD_ONLY )) && [[ "$MODE" != "backup" ]]; then
+  echo "--stage-only and --upload-only cannot be combined with --init, --check or --dry-run." >&2
+  exit 2
+fi
+
+# --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
+# Backup credentials are the keys to EVERY backup. Kept inside the deploy
+# tree, a data tree, or the staging work tree, they would be swept into a git
+# operation, a diagnostics bundle, or a backup of the tree itself. A --dry-run
+# writes nothing, but the read of a misplaced credential is what we refuse.
+# This applies to whichever directory the credentials come from, including the
+# systemd credential directory in system mode.
+#
+# --stage-only reads NO credentials, so there is nothing to protect and the
+# check is skipped (it would otherwise inspect a directory this run never uses).
+if (( ! STAGE_ONLY )); then
+  path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
+  for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
+    if path_within "${CREDENTIALS_SOURCE_DIR%/}" "${_tree%/}"; then
+      printf '[ X ] The backup credential directory is inside %s.\n' "$_tree" >&2
+      printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
+      exit 1
+    fi
+  done
+  unset _tree
+fi
 
 # --- Output helpers --------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -198,6 +270,54 @@ die() {
 # (an aborted run): both backup units list it in RestartPreventExitStatus so
 # systemd does not retry it every 15 minutes -- a retry would fail identically.
 EXIT_INCOMPLETE=3
+
+# --- STATUS file (stage-only / upload-only handshake) -----------------------
+# The capture unit writes STAGING_DIR/STATUS; the upload unit reads it. It
+# carries a fixed verdict and FIXED reason codes only -- never a discovered
+# name, path or credential. The two lines are exactly:
+#   status=complete|incomplete
+#   reasons=<comma-separated fixed codes, or "-">
+STATUS_FILE_NAME="STATUS"
+
+# Map each incomplete reason to a FIXED code. A reason string is
+# "family:detail"; the family is a constant we control, but the detail can be a
+# tree label, an rsync label or a container name. Only the family is kept, so
+# no discovered or attacker-controlled text can reach the STATUS file.
+status_reason_code() {
+  case "${1%%:*}" in
+    backup_data_unreadable)       printf 'data_unreadable' ;;
+    hermes_data_unreadable)       printf 'hermes_data_unreadable' ;;
+    db_path_rejected)             printf 'db_path_rejected' ;;
+    rsync_partial)                printf 'rsync_partial' ;;
+    cold_copy_skipped)            printf 'cold_copy_skipped' ;;
+    cold_copy_agent_stop_declined) printf 'agent_stop_declined' ;;
+    cold_copy_stop_failed)        printf 'cold_copy_stop_failed' ;;
+    cold_copy_failed)             printf 'cold_copy_failed' ;;
+    external_control_unreadable)  printf 'external_control_unreadable' ;;
+    *)                            printf 'other' ;;
+  esac
+}
+
+write_status() {
+  [[ -n "${STAGING_DIR:-}" && -d "$STAGING_DIR" ]] || return 0
+  local verdict="complete" codes="-" code
+  if (( INCOMPLETE_COUNT > 0 )); then
+    verdict="incomplete"
+    local -A _seen=()
+    codes=""
+    for _r in "${INCOMPLETE_REASONS[@]}"; do
+      code="$(status_reason_code "$_r")"
+      [[ -n "${_seen[$code]:-}" ]] && continue
+      _seen[$code]=1
+      codes+="${codes:+,}${code}"
+    done
+    unset _seen
+  fi
+  {
+    printf 'status=%s\n' "$verdict"
+    printf 'reasons=%s\n' "$codes"
+  } > "${STAGING_DIR}/${STATUS_FILE_NAME}" 2>/dev/null || true
+}
 
 # --- Incomplete-run tracking ------------------------------------------------
 # A run that could not capture everything it should have is INCOMPLETE, not
@@ -244,6 +364,13 @@ valid_rel_path() {
 is_running() { [[ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" == "running" ]]; }
 
 unpause_webui() {
+  # External control: the root helper's ExecStopPost=+backup-containers.sh
+  # unpause resumes the containers. This process runs no docker command, so it
+  # only clears its own bookkeeping.
+  if (( EXTERNAL_CONTAINER_CONTROL )); then
+    PAUSED_CONTAINERS=()
+    return 0
+  fi
   local c
   for c in "${PAUSED_CONTAINERS[@]}"; do
     docker unpause "$c" >/dev/null 2>&1 || warn "Could not unpause ${c}. Run: docker unpause ${c}"
@@ -252,6 +379,11 @@ unpause_webui() {
 }
 
 restart_stopped() {
+  # External control never stops or starts a container.
+  if (( EXTERNAL_CONTAINER_CONTROL )); then
+    STOPPED_CONTAINERS=()
+    return 0
+  fi
   if (( ${#STOPPED_CONTAINERS[@]} > 0 )); then
     docker start "${STOPPED_CONTAINERS[@]}" >/dev/null 2>&1 \
       || warn "Could not restart ${STOPPED_CONTAINERS[*]}. Run: docker start ${STOPPED_CONTAINERS[*]}"
@@ -263,8 +395,27 @@ restart_stopped() {
 # be considered POINT-IN-TIME: every durable-state container was running AND is
 # now paused. If any container was not running, the stack could not be fully
 # frozen, so this reports failure and the caller falls back to the online backup.
+#
+# In external mode this process runs NO docker command: it reads which
+# containers the root helper paused from PAUSED_FILE. CONSISTENCY is "paused"
+# only when every app container is listed there; otherwise "online".
 pause_webui() {
   [[ "${BACKUP_NO_PAUSE:-0}" == "1" ]] && return 1
+  if (( EXTERNAL_CONTAINER_CONTROL )); then
+    PAUSED_CONTAINERS=()
+    local c
+    if [[ -r "$PAUSED_FILE" ]]; then
+      local line
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        for c in "${APP_CONTAINERS[@]}"; do
+          [[ "$line" == "$c" ]] && PAUSED_CONTAINERS+=("$c")
+        done
+      done < "$PAUSED_FILE"
+    fi
+    # Point-in-time only when EVERY app container was paused by the helper.
+    (( ${#PAUSED_CONTAINERS[@]} == ${#APP_CONTAINERS[@]} ))
+    return
+  fi
   command -v docker >/dev/null 2>&1 || return 1
   local c all_running=1
   for c in "${APP_CONTAINERS[@]}"; do
@@ -291,6 +442,30 @@ pause_webui() {
 # The exact bytes every SQLite database file starts with.
 SQLITE_MAGIC='SQLite format 3'
 
+# --- Readability probe ------------------------------------------------------
+# WHY NOT -readable / [[ -r ]]:
+#   In system mode the capture unit carries CAP_DAC_READ_SEARCH as an ambient
+#   capability. Linux drops effective capabilities for access(2) when the real
+#   uid is not root, so access(2)-based tests -- find's -readable and bash's
+#   [[ -r ]] -- would report a file this process CAN read as unreadable. The
+#   fix is to test readability by OPENING the file instead: an open(2) honours
+#   the effective capability set, so it reports what a read will actually do.
+#   User mode keeps the current, cheaper access(2)-based checks.
+#
+# The two probes live in backup/lib/read-probe.sh so a fixture test can source
+# them directly. READ_PROBE_MODE is "open" in system mode (which sets external
+# container control) and "access" otherwise.
+_HYBRID_AI_BACKUP_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=backup/lib/read-probe.sh
+source "${_HYBRID_AI_BACKUP_DIR}/lib/read-probe.sh"
+READ_PROBE_MODE="access"
+if (( EXTERNAL_CONTAINER_CONTROL )) || [[ "$BACKUP_MODE" == "system" ]]; then
+  READ_PROBE_MODE="open"
+fi
+
+probe_file() { probe_readable "$READ_PROBE_MODE" "$1"; }
+probe_dir()  { probe_dir_readable "$READ_PROBE_MODE" "$1"; }
+
 # Classify a file by its 16-byte header (not its name). Fills DB_IS_SQLITE.
 # Reads at most 17 bytes so a file whose header is exactly this string plus
 # more content still compares as SQLite (the cut drops the 17th byte).
@@ -298,7 +473,7 @@ DB_IS_SQLITE=0
 classify_db_file() {
   DB_IS_SQLITE=0
   [[ -f "$1" && ! -L "$1" ]] || return 1
-  [[ -r "$1" ]] || return 1
+  probe_file "$1" || return 1
   local head16
   head16="$(head -c 16 "$1" 2>/dev/null)" || return 1
   [[ "$head16" == "$SQLITE_MAGIC" ]] && DB_IS_SQLITE=1
@@ -374,8 +549,14 @@ cleanup() {
   local rc=$?
   unpause_webui
   restart_stopped
-  if [[ -d "$STAGING_DIR" ]]; then
-    rm -rf "$STAGING_DIR" 2>/dev/null || true
+  # stage-only keeps STAGING_DIR for the upload unit to pick up; upload-only
+  # removes it only after a SUCCESSFUL upload (inside upload_backup) so a failed
+  # upload can be retried against the same staged data. Every other mode wipes
+  # the staging directory as before.
+  if (( ! STAGE_ONLY && ! UPLOAD_ONLY )); then
+    if [[ -d "$STAGING_DIR" ]]; then
+      rm -rf "$STAGING_DIR" 2>/dev/null || true
+    fi
   fi
   return $rc
 }
@@ -386,7 +567,14 @@ touch "$BACKUP_LOG" 2>/dev/null && chmod 600 "$BACKUP_LOG" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # STEP 1. Load credentials
+#
+# --stage-only loads NO credentials at all: the capture unit has no network and
+# no credential directory. The credential block below is skipped entirely, and
+# the file checks are never reached.
 # ---------------------------------------------------------------------------
+if (( STAGE_ONLY )); then
+  log "Stage-only run: no credentials are loaded (capture has no network)."
+else
 [[ -f "$R2_ENV_FILE" ]] || die "No credentials at ${R2_ENV_FILE}. Run ./install.sh to configure backups."
 [[ -f "$RESTIC_PW_FILE" ]] || die "No repository password at ${RESTIC_PW_FILE}."
 
@@ -415,6 +603,52 @@ export RESTIC_PASSWORD_FILE="$RESTIC_PW_FILE"
 command -v restic >/dev/null 2>&1 || die "restic is not installed. Run: sudo apt-get install -y restic"
 
 BACKUP_HOST="${RESTIC_HOST:-$(hostname -s)}"
+fi   # end: credentials (skipped for --stage-only)
+
+# --stage-only loads no credentials, so RESTIC_HOST is unavailable; a host name
+# is still needed for the manifest and host state. The same value is used.
+if (( STAGE_ONLY )); then
+  BACKUP_HOST="${RESTIC_HOST:-$(hostname -s)}"
+fi
+
+# ---------------------------------------------------------------------------
+# --upload-only preconditions.
+#
+# The upload unit reads ONLY the staging directory; it never reads a data tree.
+# Refuse when STAGING_DIR or its STATUS file is missing: there is nothing to
+# upload, and a missing STATUS means the capture did not finish.
+#
+# Parse STATUS line by line into exactly two values, with the same discipline as
+# the credential parser (data, never code). An unrecognised line or verdict is
+# refused. COMPLETE_TAG is then taken from STATUS, not from this process's own
+# incomplete counter (which stays 0 on the upload side).
+# ---------------------------------------------------------------------------
+COMPLETE_TAG="complete:true"
+if (( UPLOAD_ONLY )); then
+  # A refusal here is a deliberate exit 3, not a failure: clear the ERR trap so
+  # it is not relabelled backup_failed.
+  refuse_upload() { printf '%s\n' "$1" >&2; trap - ERR; exit 3; }
+  [[ -d "$STAGING_DIR" ]] || refuse_upload "No staging directory at ${STAGING_DIR}; nothing to upload. Run --stage-only first."
+  STATUS_PATH="${STAGING_DIR}/${STATUS_FILE_NAME}"
+  [[ -f "$STATUS_PATH" ]] || refuse_upload "No STATUS file at ${STATUS_PATH}; the capture did not complete. Run --stage-only first."
+  STATUS_VERDICT=""
+  while IFS= read -r _sline || [[ -n "$_sline" ]]; do
+    [[ "$_sline" =~ ^status=(complete|incomplete)$ ]] && STATUS_VERDICT="${BASH_REMATCH[1]}"
+  done < "$STATUS_PATH"
+  unset _sline
+  case "$STATUS_VERDICT" in
+    complete)   COMPLETE_TAG="complete:true";  INCOMPLETE_COUNT=0 ;;
+    incomplete) COMPLETE_TAG="complete:false"; INCOMPLETE_COUNT=1
+                INCOMPLETE_REASONS=("status_incomplete") ;;
+    *) refuse_upload "STATUS file at ${STATUS_PATH} is missing a valid status line." ;;
+  esac
+  # The upload side reads only the staging directory; these are the values the
+  # manifest/report used, defaulted so `set -u` never trips.
+  CONSISTENCY="${CONSISTENCY:-external}"
+  DB_COUNT="${DB_COUNT:-0}"
+  STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1 || true)"
+  STAGED_MB="${STAGED_MB:-?}"
+fi
 
 # ---------------------------------------------------------------------------
 # STEP 2. --init : create the repository
@@ -476,9 +710,25 @@ DATA_UNREADABLE=0
 for _tree_var in HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR; do
   _tree="${!_tree_var}"
   [[ -d "$_tree" ]] || continue
+  # User mode keeps find's -readable (access(2)); system mode probes by opening
+  # (see probe_dir_readable) because access(2) ignores CAP_DAC_READ_SEARCH.
   # -xdev stays on one filesystem; -quit stops at the first unreadable entry.
   # stderr is suppressed so no hostile path can leak through an error message.
-  if [[ -n "$(find "$_tree" -xdev ! -readable -print -quit 2>/dev/null)" ]]; then
+  if [[ "$READ_PROBE_MODE" == "open" ]]; then
+    _tree_bad=0
+    probe_dir "$_tree" || _tree_bad=1
+    # The tree may be readable while an entry under it is not; -readable here is
+    # only a fast hint and is corroborated by the open-based discovery below.
+    if (( ! _tree_bad )) && [[ -n "$(find "$_tree" -xdev ! -readable -print -quit 2>/dev/null)" ]]; then
+      # Do not decide on access(2) alone in system mode: confirm with an open.
+      _probe_entry="$(find "$_tree" -xdev ! -readable -print -quit 2>/dev/null || true)"
+      probe_file "$_probe_entry" || _tree_bad=1
+    fi
+  else
+    _tree_bad=0
+    [[ -n "$(find "$_tree" -xdev ! -readable -print -quit 2>/dev/null)" ]] && _tree_bad=1
+  fi
+  if (( _tree_bad )); then
     case "$_tree_var" in
       HYBRID_AI_HERMES_DATA_DIR) _tree_label="hermes_data" ;;
       HYBRID_AI_WEBUI_DATA_DIR)  _tree_label="webui_data" ;;
@@ -492,7 +742,7 @@ for _tree_var in HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR; do
     DATA_UNREADABLE=1
   fi
 done
-unset _tree_var _tree _tree_label _owner
+unset _tree_var _tree _tree_label _owner _tree_bad _probe_entry
 
 [[ "$MODE" == "dryrun" ]] || log "Capturing application state..."
 rm -rf "$STAGING_DIR"
@@ -792,7 +1042,16 @@ unpause_webui
 # made the run incomplete).
 if (( DB_FAILED > 0 )); then
   warn "${DB_FAILED} database(s) could not be captured online."
-  if (( DATA_UNREADABLE )); then
+  if (( EXTERNAL_CONTAINER_CONTROL )); then
+    # External container control: this process must run NO docker command at
+    # all (no inspect, exec, compose, version, stop). It therefore cannot stop a
+    # container for a cold copy, so the fallback is declined and the databases
+    # stay out of the snapshot. The run is INCOMPLETE (exit 3), exactly as for
+    # an unreadable tree -- and, like the default, it stops no container.
+    event "cold_copy_skipped" "reason=external_control" "failed_dbs=${DB_FAILED}"
+    warn "External container control: the cold-copy fallback is declined because this process runs no docker command. The failed databases stay out of this snapshot and the run is INCOMPLETE."
+    mark_incomplete "cold_copy_skipped:external_control"
+  elif (( DATA_UNREADABLE )); then
     # The preflight already proved this process cannot read the data. Stopping
     # the stack here would only kill in-flight agent sessions for nothing.
     event "cold_copy_skipped" "reason=data_unreadable" "failed_dbs=${DB_FAILED}"
@@ -924,6 +1183,21 @@ fi
 HOST_DIR="${STAGING_DIR}/host"
 
 OLLAMA_MODEL_COUNT=0
+if (( EXTERNAL_CONTAINER_CONTROL )); then
+  # No docker command runs in this process. The root helper captured host
+  # metadata that needs docker/systemctl (container images, ollama models and
+  # their Modelfiles, platform details) into HOST_INFO_DIR; copy it in.
+  if [[ -d "$HOST_INFO_DIR" ]]; then
+    cp -a "${HOST_INFO_DIR}/." "${HOST_DIR}/" 2>/dev/null || true
+  else
+    event "external_host_info_missing"
+    warn "External container control: no host info at ${HOST_INFO_DIR}; host metadata will be incomplete."
+    mark_incomplete "external_control_unreadable:host_info"
+  fi
+  if [[ -f "${HOST_DIR}/ollama-models.txt" ]]; then
+    OLLAMA_MODEL_COUNT="$(wc -l < "${HOST_DIR}/ollama-models.txt" 2>/dev/null | tr -d ' ')"
+  fi
+else
 if is_running ollama; then
   docker exec ollama ollama list 2>/dev/null \
     | awk 'NR>1 {print $1}' > "${HOST_DIR}/ollama-models.txt" || true
@@ -940,6 +1214,7 @@ fi
 if [[ -f "${HYBRID_AI_ENV_FILE}" ]]; then
   "${COMPOSE[@]}" config --images > "${HOST_DIR}/container-images.txt" 2>/dev/null || true
 fi
+fi   # end: docker-based host metadata (skipped under external control)
 
 for f in docker-compose.yml docker-compose.override.yml; do
   if [[ -f "${HYBRID_AI_APP_DIR}/${f}" ]]; then
@@ -972,9 +1247,20 @@ fi
   printf 'kernel=%s\n'         "$(uname -r 2>/dev/null)"
   printf 'arch=%s\n'           "$(uname -m 2>/dev/null)"
   printf 'total_ram_mb=%s\n'   "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)"
-  printf 'docker=%s\n'         "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo n/a)"
+  if (( EXTERNAL_CONTAINER_CONTROL )); then
+    # No docker command may run in this process; the helper's platform.txt (if
+    # present) already carries the docker version.
+    printf 'docker=%s\n'       "$(sed -n 's/^docker=//p' "${HOST_INFO_DIR}/platform.txt" 2>/dev/null | head -n1 || echo n/a)"
+  else
+    printf 'docker=%s\n'       "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo n/a)"
+  fi
   printf 'tailscale_host=%s\n' "$(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // "unknown"' 2>/dev/null || echo unknown)"
-  printf 'backup_timer=%s\n'   "$(systemctl --user is-enabled hybrid-ai-backup.timer 2>/dev/null || echo unknown)"
+  # In system mode the schedule is the system timer; in user mode the user timer.
+  if [[ "$BACKUP_MODE" == "system" ]]; then
+    printf 'backup_timer=%s\n' "$(systemctl is-enabled hybrid-ai-backup-capture.timer 2>/dev/null || echo unknown)"
+  else
+    printf 'backup_timer=%s\n' "$(systemctl --user is-enabled hybrid-ai-backup.timer 2>/dev/null || echo unknown)"
+  fi
 } > "${HOST_DIR}/platform.txt" 2>/dev/null || true
 
 chmod -R go-rwx "$HOST_DIR" 2>/dev/null || true
@@ -982,6 +1268,14 @@ chmod -R go-rwx "$HOST_DIR" 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # STEP 5. Write a manifest
 # ---------------------------------------------------------------------------
+# In --stage-only there are no credentials and no network, so restic is not
+# available and its version is reported as "n/a". Every other mode asks restic.
+if (( STAGE_ONLY )); then
+  RESTIC_VERSION="n/a"
+else
+  RESTIC_VERSION="$(restic version 2>/dev/null | head -n1)"
+fi
+
 cat > "${STAGING_DIR}/MANIFEST.txt" <<MANIFEST
 hybrid-ai backup manifest
 =========================
@@ -991,7 +1285,7 @@ consistency_method : ${CONSISTENCY}
 run_status         : $( (( INCOMPLETE_COUNT > 0 )) && echo "incomplete" || echo "complete" )
 databases_captured : ${DB_COUNT}
 ollama_models      : ${OLLAMA_MODEL_COUNT:-0} (names only; weights not backed up)
-restic_version     : $(restic version 2>/dev/null | head -n1)
+restic_version     : ${RESTIC_VERSION}
 layout             : repo-relative (v2)
 
 Contents
@@ -1020,6 +1314,10 @@ fi
 # must not abort an otherwise-finished run via the ERR trap, so absorb it.
 STAGED_MB="$(du -sm "$STAGING_DIR" 2>/dev/null | cut -f1 || true)"
 STAGED_MB="${STAGED_MB:-?}"
+
+# Write the STATUS file LAST, once the verdict is final. It carries fixed codes
+# only (never a discovered name), and it is the handshake the upload unit reads.
+write_status
 }   # end stage_backup()
 
 if [[ "$MODE" == "dryrun" ]]; then
@@ -1061,10 +1359,14 @@ if ! restic snapshots >/dev/null 2>&1; then
   fi
 fi
 
-if (( INCOMPLETE_COUNT > 0 )); then
-  COMPLETE_TAG="complete:false"
-else
-  COMPLETE_TAG="complete:true"
+# In upload-only mode COMPLETE_TAG was taken from the STATUS file above; keep
+# it. In a whole run it is derived from this process's own incomplete counter.
+if (( ! UPLOAD_ONLY )); then
+  if (( INCOMPLETE_COUNT > 0 )); then
+    COMPLETE_TAG="complete:false"
+  else
+    COMPLETE_TAG="complete:true"
+  fi
 fi
 
 log "Uploading to R2 (${STAGED_MB} MB staged, deduplicated against previous runs)..."
@@ -1123,9 +1425,41 @@ printf '    Restore with : ./backup/restore.sh\n'
 printf '    Verify with  : ./backup/backup.sh --check\n\n'
 }   # end upload_backup()
 
-# --- Run: stage, then upload. A run that missed durable state still uploads,
-# but reports INCOMPLETE and exits with EXIT_INCOMPLETE. The ERR trap is
-# cleared first: a deliberate non-zero exit must not be re-labelled a failure.
+# --- Run ---------------------------------------------------------------------
+#
+# Three shapes, selected by the flags:
+#   --stage-only   capture only; no credentials; keep staging + STATUS; exit 0/3
+#   --upload-only  upload only; never reads a data tree; exit 0/3
+#   (no flag)      stage then upload, exactly as today
+#
+# The ERR trap is cleared before a deliberate non-zero exit so it is not
+# re-labelled a failure.
+if (( STAGE_ONLY )); then
+  stage_backup
+  if (( INCOMPLETE_COUNT > 0 )); then
+    ok "Capture finished INCOMPLETE; STATUS written for the upload unit."
+    trap - ERR
+    exit "$EXIT_INCOMPLETE"
+  fi
+  ok "Capture complete; STATUS written for the upload unit."
+  exit 0
+fi
+
+if (( UPLOAD_ONLY )); then
+  upload_backup
+  # A successful upload consumes the staged data: remove STAGING_DIR so a later
+  # run cannot re-upload stale plaintext. (A failed upload exits non-zero from
+  # upload_backup and keeps the staging directory for a retry.)
+  if [[ -d "$STAGING_DIR" ]]; then
+    rm -rf "$STAGING_DIR" 2>/dev/null || true
+  fi
+  if (( INCOMPLETE_COUNT > 0 )); then
+    trap - ERR
+    exit "$EXIT_INCOMPLETE"
+  fi
+  exit 0
+fi
+
 stage_backup
 upload_backup
 if (( INCOMPLETE_COUNT > 0 )); then

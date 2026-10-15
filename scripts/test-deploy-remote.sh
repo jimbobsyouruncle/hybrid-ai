@@ -53,7 +53,9 @@ EOF
 
   cat > "$BINDIR/systemctl" <<'EOF'
 #!/usr/bin/env bash
-# Report the backup timer active so the deploy emits no stray warning.
+# Log argv so a case can assert WHICH timer and scope was checked, then report
+# the backup timer active so the deploy emits no stray warning.
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
 exit 0
 EOF
 
@@ -197,6 +199,32 @@ else
   else
     fail "missing doctor.sh failed but printed no ::error:: line"
   fi
+fi
+
+# Case 8: the backup-timer check uses the USER timer in user mode (default).
+rm -f "$MARKER"; write_install_stub; write_doctor_stub
+SYSTEMCTL_LOG="$WORKDIR/c8.systemctl"; : > "$SYSTEMCTL_LOG"
+if SYSTEMCTL_LOG="$SYSTEMCTL_LOG" run_deploy "$WORKDIR/c8.out" "$SHA"; then
+  if grep -q -- '--user is-active hybrid-ai-backup.timer' "$SYSTEMCTL_LOG"; then
+    pass "user mode checks the user backup timer"
+  else
+    fail "user mode did not check the user backup timer"
+  fi
+else
+  fail "user-mode deploy failed unexpectedly"
+fi
+
+# Case 9: the backup-timer check uses the SYSTEM capture timer in system mode.
+rm -f "$MARKER"; write_install_stub; write_doctor_stub
+SYSTEMCTL_LOG="$WORKDIR/c9.systemctl"; : > "$SYSTEMCTL_LOG"
+if HYBRID_AI_BACKUP_MODE=system SYSTEMCTL_LOG="$SYSTEMCTL_LOG" run_deploy "$WORKDIR/c9.out" "$SHA"; then
+  if grep -qx 'is-active hybrid-ai-backup-capture.timer' "$SYSTEMCTL_LOG"; then
+    pass "system mode checks the system capture timer"
+  else
+    fail "system mode did not check the system capture timer"
+  fi
+else
+  fail "system-mode deploy failed unexpectedly"
 fi
 
 echo "== done =="

@@ -816,16 +816,159 @@ done
 # STEP 11. Encrypted offsite backups (Cloudflare R2 via restic)
 # ---------------------------------------------------------------------------
 # BACKUP_CONF_DIR is resolved by the shared helper above.
-R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
-RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
+#
+# HYBRID_AI_BACKUP_MODE selects the whole shape of this step:
+#   user   (default)  install systemd USER units and keep credentials in
+#                     BACKUP_CONF_DIR. Unchanged from before.
+#   system            install the split capture/upload SYSTEM units into
+#                     /etc/systemd/system and keep credentials in
+#                     /etc/credstore/hybrid-ai-backup (root 0600). The system
+#                     units are installed only when this script runs as root;
+#                     when it does not, it verifies and warns and never calls
+#                     sudo. In system mode the user units are never installed.
+BACKUP_MODE="${HYBRID_AI_BACKUP_MODE:-user}"
+if [[ "$BACKUP_MODE" == "system" ]]; then
+  BACKUP_CRED_DIR="/etc/credstore/hybrid-ai-backup"
+  SYSTEM_UNIT_DIR="/etc/systemd/system"
+else
+  BACKUP_CRED_DIR="$BACKUP_CONF_DIR"
+fi
+R2_ENV_FILE="${BACKUP_CRED_DIR}/r2.env"
+RESTIC_PW_FILE="${BACKUP_CRED_DIR}/repo-password"
 BACKUP_UNITS=(
   hybrid-ai-backup.service
   hybrid-ai-backup.timer
   hybrid-ai-check.service
   hybrid-ai-check.timer
 )
+# The system units, in the order they are installed, with the timers enabled.
+BACKUP_SYSTEM_UNITS=(
+  hybrid-ai-backup-capture.service
+  hybrid-ai-backup-upload.service
+  hybrid-ai-backup-capture.timer
+  hybrid-ai-backup-check.service
+  hybrid-ai-backup-check.timer
+)
+BACKUP_SYSTEM_TIMERS=(
+  hybrid-ai-backup-capture.timer
+  hybrid-ai-backup-check.timer
+)
 
 install_backup_scheduler() {
+  if [[ "$BACKUP_MODE" == "system" ]]; then
+    install_backup_scheduler_system
+    return $?
+  fi
+  install_backup_scheduler_user
+}
+
+# --- System mode: install the split units as ROOT ---------------------------
+# The split capture/upload units run as the dedicated hybrid-ai-backup account
+# and take their credentials from /etc/credstore. Only root can install them, so
+# when this script is not root it verifies and warns -- it never calls sudo.
+install_backup_scheduler_system() {
+  local unit source_file target_file
+  local install_failed=0
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl is unavailable. Install the system backup units manually."
+    event "backup_schedule_missing" "reason=systemctl_missing" "mode=system"
+    return 1
+  fi
+
+  if [[ "$(id -u)" != "0" ]]; then
+    # Not root: verify what we can and warn. Never invoke sudo from here.
+    warn "HYBRID_AI_BACKUP_MODE=system needs root to install the system units."
+    warn "Re-run ./install.sh as root (card F's deploy unit does this), or install"
+    warn "backup/system/* into ${SYSTEM_UNIT_DIR} yourself."
+    local missing=0
+    for unit in "${BACKUP_SYSTEM_UNITS[@]}"; do
+      [[ -f "${APP_DIR}/backup/system/${unit}" ]] || { missing=1; warn "Missing system unit template: ${unit}"; }
+    done
+    if (( missing )); then
+      event "backup_unit_install_failed" "reason=template_missing" "mode=system"
+      return 1
+    fi
+    event "backup_system_install_skipped" "reason=not_root"
+    return 0
+  fi
+
+  mkdir -p "$SYSTEM_UNIT_DIR"
+  chmod 0755 "$SYSTEM_UNIT_DIR" 2>/dev/null || true
+
+  log "Installing backup system units into ${SYSTEM_UNIT_DIR}..."
+  for unit in "${BACKUP_SYSTEM_UNITS[@]}"; do
+    source_file="${APP_DIR}/backup/system/${unit}"
+    target_file="${SYSTEM_UNIT_DIR}/${unit}"
+
+    if [[ ! -f "$source_file" ]]; then
+      warn "Missing backup system unit template: ${source_file}"
+      event "backup_unit_install_failed" "unit=${unit}" "reason=template_missing"
+      install_failed=1
+      continue
+    fi
+
+    # These units use absolute /opt/hybrid-ai paths, so no __REPO_DIR__
+    # substitution is needed; copy verbatim with root-owned 0644.
+    if ! install -m 0644 -o root -g root "$source_file" "${target_file}.tmp"; then
+      warn "Could not install ${unit}."
+      rm -f "${target_file}.tmp"
+      event "backup_unit_install_failed" "unit=${unit}" "reason=render_failed"
+      install_failed=1
+      continue
+    fi
+    mv -f "${target_file}.tmp" "$target_file"
+  done
+
+  if (( install_failed )); then
+    warn "One or more backup system units could not be installed."
+    return 1
+  fi
+
+  if ! systemctl daemon-reload; then
+    warn "systemd daemon reload failed."
+    event "backup_schedule_failed" "reason=daemon_reload" "mode=system"
+    return 1
+  fi
+
+  for unit in "${BACKUP_SYSTEM_UNITS[@]}"; do
+    if systemctl cat "$unit" >/dev/null 2>&1; then
+      ok "${unit} installed."
+    else
+      warn "${unit} is not visible to systemd."
+      event "backup_unit_install_failed" "unit=${unit}" "reason=not_loaded"
+      install_failed=1
+    fi
+  done
+  if (( install_failed )); then
+    return 1
+  fi
+
+  for unit in "${BACKUP_SYSTEM_TIMERS[@]}"; do
+    if systemctl enable --now "$unit" >/dev/null 2>&1; then
+      ok "${unit} enabled and active."
+    else
+      warn "${unit} could not be enabled or started."
+      event "backup_timer_failed" "unit=${unit}" "mode=system"
+      return 1
+    fi
+  done
+
+  for unit in "${BACKUP_SYSTEM_TIMERS[@]}"; do
+    if ! systemctl is-enabled "$unit" >/dev/null 2>&1 ||
+       ! systemctl is-active "$unit" >/dev/null 2>&1; then
+      warn "${unit} verification failed."
+      event "backup_timer_verification_failed" "unit=${unit}" "mode=system"
+      return 1
+    fi
+  done
+
+  event "backup_schedule_installed" "units=${#BACKUP_SYSTEM_UNITS[@]}" "mode=system"
+  return 0
+}
+
+# --- User mode: install the user units (unchanged) --------------------------
+install_backup_scheduler_user() {
   local unit_dir="${HOME}/.config/systemd/user"
   local unit source_file target_file
   local install_failed=0
@@ -957,13 +1100,23 @@ setup_backups() {
 
   if [[ -f "$R2_ENV_FILE" && -f "$RESTIC_PW_FILE" ]]; then
     backups_configured=1
-    ok "Backup credentials already configured (${BACKUP_CONF_DIR})."
+    ok "Backup credentials already configured (${BACKUP_CRED_DIR})."
   elif [[ -f "$R2_ENV_FILE" || -f "$RESTIC_PW_FILE" ]]; then
     warn "Backup configuration is incomplete. Both r2.env and repo-password are required."
     event "backup_setup_incomplete"
   fi
 
   if (( ! backups_configured )); then
+    if [[ "$BACKUP_MODE" == "system" && "$(id -u)" != "0" ]]; then
+      # Credentials for the system units live in /etc/credstore, which only root
+      # can write. Never call sudo from here; warn instead (card F's deploy unit
+      # runs install.sh as root and writes them).
+      warn "HYBRID_AI_BACKUP_MODE=system keeps credentials in ${BACKUP_CRED_DIR};"
+      warn "writing them needs root. Re-run ./install.sh as root to configure backups."
+      event "backup_setup_skipped" "reason=not_root" "mode=system"
+      install_backup_scheduler || warn "Backup scheduler installation needs attention."
+      return 0
+    fi
     if (( NON_INTERACTIVE )); then
       warn "Backups are not configured; skipping credential prompts in non-interactive mode."
       event "backup_setup_skipped" "reason=non_interactive"
@@ -983,8 +1136,13 @@ setup_backups() {
       return 1
     fi
 
-    mkdir -p "$BACKUP_CONF_DIR"
-    chmod 700 "$BACKUP_CONF_DIR"
+    mkdir -p "$BACKUP_CRED_DIR"
+    chmod 700 "$BACKUP_CRED_DIR"
+    # In system mode the credential directory is root-owned so only root and
+    # systemd's LoadCredential= can read it. User mode keeps the human owner.
+    if [[ "$BACKUP_MODE" == "system" ]]; then
+      chown root:root "$BACKUP_CRED_DIR" 2>/dev/null || true
+    fi
 
     while [[ -z "$cf_account" ]]; do
       read -r -p "    Cloudflare account ID: " cf_account < /dev/tty
@@ -1031,7 +1189,7 @@ setup_backups() {
       chmod 600 "$RESTIC_PW_FILE"
     fi
 
-    tmp_env="$(mktemp "${BACKUP_CONF_DIR}/.r2.XXXXXX")"
+    tmp_env="$(mktemp "${BACKUP_CRED_DIR}/.r2.XXXXXX")"
     chmod 600 "$tmp_env"
     cat > "$tmp_env" <<EOF2
 # hybrid-ai backup credentials -- generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -1044,11 +1202,16 @@ RESTIC_HOST=$(hostname -s)
 EOF2
     mv -f "$tmp_env" "$R2_ENV_FILE"
     chmod 600 "$R2_ENV_FILE"
+    if [[ "$BACKUP_MODE" == "system" ]]; then
+      chown root:root "$R2_ENV_FILE" "$RESTIC_PW_FILE" 2>/dev/null || true
+    fi
     unset cf_secret pw1 pw2
     ok "Credentials written to ${R2_ENV_FILE} (0600)."
 
     log "Initialising the encrypted repository..."
-    if "${APP_DIR}/backup/backup.sh" --init; then
+    # In system mode the credentials live in /etc/credstore, not BACKUP_CONF_DIR,
+    # so point backup.sh at them for this one call.
+    if BACKUP_CONF_DIR="$BACKUP_CRED_DIR" "${APP_DIR}/backup/backup.sh" --init; then
       newly_configured=1
       event "backup_repo_ready" "bucket=${cf_bucket}"
     else
@@ -1064,7 +1227,7 @@ EOF2
   if (( newly_configured )); then
     read -r -p "  Run the first backup now? [Y/n]: " _first < /dev/tty
     if [[ "${_first,,}" != "n" ]]; then
-      if "${APP_DIR}/backup/backup.sh"; then
+      if BACKUP_CONF_DIR="$BACKUP_CRED_DIR" "${APP_DIR}/backup/backup.sh"; then
         ok "First backup completed successfully."
         event "backup_validation_success"
       else

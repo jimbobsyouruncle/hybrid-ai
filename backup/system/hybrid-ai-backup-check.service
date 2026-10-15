@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-check.service
+# PURPOSE (plain English):
+#   Runs the monthly integrity check (backup.sh --check) against the backup
+#   repository, reading a random 5% of the stored data and confirming it
+#   decrypts and matches its checksums.
+#
+#   It has the SAME credential and network shape as the upload unit: no read
+#   privilege over the data, the R2 credentials from the systemd credential
+#   store, and network access to R2. It touches no container.
+#
+# INSTALL:
+#   Installed by ./install.sh into /etc/systemd/system when HYBRID_AI_BACKUP_MODE
+#   =system and install.sh runs as root.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai backup integrity verification (system)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hybrid-ai-backup
+Group=hybrid-ai-backup
+
+# Same shape as the upload unit: no capabilities, no docker socket.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# The restic cache is the only writable path this unit needs.
+CacheDirectory=hybrid-ai-backup
+LogsDirectory=hybrid-ai-backup
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_BACKUP_MODE=system
+Environment=BACKUP_CONTAINER_CONTROL=external
+
+LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env
+LoadCredential=repo-password:/etc/credstore/hybrid-ai-backup/repo-password
+
+ReadWritePaths=/var/cache/hybrid-ai-backup
+
+ExecStart=/opt/hybrid-ai/backup/backup.sh --check
+
+# An INCOMPLETE backup (exit 3) is not a check failure; do not retry it.
+RestartPreventExitStatus=3
+
+TimeoutStartSec=6h
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=10

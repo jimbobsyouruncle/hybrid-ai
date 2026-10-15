@@ -21,7 +21,8 @@ set -uo pipefail
 unset HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR HYBRID_AI_LOG_DIR \
       HYBRID_AI_WORK_DIR HYBRID_AI_UID HYBRID_AI_GID OPENHANDS_WORKSPACE \
       AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR RESTIC_CACHE_DIR \
-      BACKUP_LOG 2>/dev/null || true
+      BACKUP_LOG HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
+      BACKUP_CONTAINER_CONTROL 2>/dev/null || true
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd -- "${HERE}/.." && pwd)"
@@ -87,6 +88,51 @@ check "BACKUP_CONF_DIR default" "$HOME/.config/hybrid-ai-backup" "$(resolve "$EM
 check "RESTIC_CACHE_DIR default" "$HOME/.cache/restic" "$(resolve "$EMPTY" RESTIC_CACHE_DIR)"
 check "UID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_UID)"
 check "GID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_GID)"
+check "HERMES_HOME_DIR default is \$HOME/.hermes" "$HOME/.hermes" \
+  "$(resolve "$EMPTY" HYBRID_AI_HERMES_HOME_DIR)"
+check "BACKUP_MODE default is user" "user" "$(resolve "$EMPTY" HYBRID_AI_BACKUP_MODE)"
+check "BACKUP_CONTAINER_CONTROL default is auto" "auto" \
+  "$(resolve "$EMPTY" BACKUP_CONTAINER_CONTROL)"
+
+# ---------------------------------------------------------------------------
+# 1b. Mode selectors accept only their allowed words; HERMES_HOME_DIR is a path
+# ---------------------------------------------------------------------------
+echo "== mode selectors =="
+# HYBRID_AI_BACKUP_MODE accepts exactly user|system.
+for w in user system; do
+  f="${TMPROOT}/mode_${w}.env"
+  printf 'HYBRID_AI_BACKUP_MODE=%s\n' "$w" > "$f"
+  check "BACKUP_MODE accepts '$w'" "$w" "$(resolve "$f" HYBRID_AI_BACKUP_MODE)"
+done
+f="${TMPROOT}/mode_bad.env"
+printf 'HYBRID_AI_BACKUP_MODE=server\n' > "$f"
+if resolve_rc "$f"; then bad "BACKUP_MODE refused 'server'"; else ok "BACKUP_MODE refused 'server'"; fi
+# The environment is authoritative and is also validated.
+if env HYBRID_AI_BACKUP_MODE=bogus HYBRID_AI_ENV_FILE="$EMPTY" \
+     bash -c "source '$HELPER'" >/dev/null 2>&1; then
+  bad "BACKUP_MODE refused the environment value 'bogus'"
+else
+  ok "BACKUP_MODE refused the environment value 'bogus'"
+fi
+
+# BACKUP_CONTAINER_CONTROL accepts exactly auto|external.
+for w in auto external; do
+  f="${TMPROOT}/cc_${w}.env"
+  printf 'BACKUP_CONTAINER_CONTROL=%s\n' "$w" > "$f"
+  check "BACKUP_CONTAINER_CONTROL accepts '$w'" "$w" "$(resolve "$f" BACKUP_CONTAINER_CONTROL)"
+done
+f="${TMPROOT}/cc_bad.env"
+printf 'BACKUP_CONTAINER_CONTROL=always\n' > "$f"
+if resolve_rc "$f"; then bad "BACKUP_CONTAINER_CONTROL refused 'always'"; else ok "BACKUP_CONTAINER_CONTROL refused 'always'"; fi
+
+# HERMES_HOME_DIR is a PATH setting: a set value is validated like the others.
+f="${TMPROOT}/hermes.env"
+printf 'HYBRID_AI_HERMES_HOME_DIR=/srv/hai/hermes\n' > "$f"
+check "HERMES_HOME_DIR accepts an absolute path" "/srv/hai/hermes" \
+  "$(resolve "$f" HYBRID_AI_HERMES_HOME_DIR)"
+f="${TMPROOT}/hermes_bad.env"
+printf 'HYBRID_AI_HERMES_HOME_DIR=relative/hermes\n' > "$f"
+if resolve_rc "$f"; then bad "HERMES_HOME_DIR refused a relative path"; else ok "HERMES_HOME_DIR refused a relative path"; fi
 
 # ---------------------------------------------------------------------------
 # 2. A value in the env file is DATA, not code

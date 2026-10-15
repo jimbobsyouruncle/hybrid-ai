@@ -324,7 +324,13 @@ fi
 } 2>&1 | redact >> "$OUTFILE"
 
 sub "Backup credentials"
-BC="$BACKUP_CONF_DIR"
+# In system mode the credentials live in the root-owned systemd credential
+# store; report that directory instead of BACKUP_CONF_DIR.
+if [[ "${HYBRID_AI_BACKUP_MODE:-user}" == "system" ]]; then
+  BC="${HYBRID_AI_BACKUP_CRED_DIR:-/etc/credstore/hybrid-ai-backup}"
+else
+  BC="$BACKUP_CONF_DIR"
+fi
 if [[ -d "$BC" ]]; then
   {
     for f in r2.env repo-password; do
@@ -519,10 +525,18 @@ run "Ollama models" bash -c "docker exec ollama ollama list 2>/dev/null || echo 
 # ---------------------------------------------------------------------------
 printf '  %s[9/9]%s Backups...\n' "$C_INF" "$C_RST"
 sec "9. BACKUPS"
-run "Timers" bash -c "systemctl --user list-timers 'hybrid-ai-*' --no-pager 2>/dev/null || echo 'no user timers'"
-run "Linger (required for backups to run while logged out)" bash -c "loginctl show-user \"\$USER\" 2>/dev/null | grep -i linger || echo 'unknown'"
-run "Recent backup events" bash -c "grep '^EVENT' '$BACKUP_LOG' 2>/dev/null | tail -25 || echo '(no backup.log)'"
-run "Backup service journal" bash -c "journalctl --user -u hybrid-ai-backup.service -n 40 --no-pager 2>/dev/null || echo 'unavailable'"
+# System mode uses the system capture timer and system journal; user mode keeps
+# the user timer. HYBRID_AI_BACKUP_MODE defaults to user.
+if [[ "${HYBRID_AI_BACKUP_MODE:-user}" == "system" ]]; then
+  run "Timers" bash -c "systemctl list-timers 'hybrid-ai-*' --no-pager 2>/dev/null || echo 'no system timers'"
+  run "Recent backup events" bash -c "grep '^EVENT' '$BACKUP_LOG' 2>/dev/null | tail -25 || echo '(no backup.log)'"
+  run "Backup capture journal" bash -c "journalctl -u hybrid-ai-backup-capture.service -n 40 --no-pager 2>/dev/null || echo 'unavailable'"
+else
+  run "Timers" bash -c "systemctl --user list-timers 'hybrid-ai-*' --no-pager 2>/dev/null || echo 'no user timers'"
+  run "Linger (required for backups to run while logged out)" bash -c "loginctl show-user \"\$USER\" 2>/dev/null | grep -i linger || echo 'unknown'"
+  run "Recent backup events" bash -c "grep '^EVENT' '$BACKUP_LOG' 2>/dev/null | tail -25 || echo '(no backup.log)'"
+  run "Backup service journal" bash -c "journalctl --user -u hybrid-ai-backup.service -n 40 --no-pager 2>/dev/null || echo 'unavailable'"
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Self-audit -- scan the finished file for anything still secret-shaped

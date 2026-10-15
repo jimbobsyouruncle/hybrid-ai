@@ -40,6 +40,12 @@ the Pi.
 | `build_pipe.py --check` | A forgotten rebuild — the pasted pipe not matching its reviewed sources |
 | `pip install httpx==0.28.1` | Installs the pinned dependency the behavioural tests import (`runpod_core.py` imports `httpx`, which the job does not otherwise install) |
 | `test_refactor.py` | Regressions in mesh enforcement, credential scrubbing, truncation detection |
+| `test-hybrid-ai-env.sh` | Path-helper regressions: defaults no longer matching today, a refused value accepted, or the mode selectors accepting a wrong word |
+| `test-backup.sh` | Backup capture/upload regressions, including `--stage-only` / `--upload-only`, the systemd credential directory, and external container control (no docker call). restic, docker and systemctl are stubbed on PATH |
+| `test-read-probe.sh` | The open-based readability probe losing its open(2) behaviour (it would then misreport `CAP_DAC_READ_SEARCH`-readable files in system mode) |
+| `test-backup-system-units.sh` | A backup `system/` unit losing a hardening or privilege-split directive; also runs `systemd-analyze verify` where available |
+| `test-backup-mode-timers.sh` | `doctor.sh` / `collect-diagnostics.sh` / `backup.sh` checking the wrong timers for the mode |
+| `test-deploy-remote.sh` | `scripts/deploy-remote.sh` regressions, including the user/system backup-timer check |
 | `docker compose config`, all three files | Malformed compose file, OpenHands overlay, or Hermes overlay |
 | **Caddy allowlist assertion** | A sensitive route losing its `trusted_only` IP allowlist |
 | **Hermes gateway pin assertion** | The `hermes -p default gateway run --replace` CMD being dropped from `hermes/Dockerfile` |

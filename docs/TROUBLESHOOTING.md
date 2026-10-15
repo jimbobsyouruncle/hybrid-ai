@@ -848,6 +848,47 @@ journalctl --user -u hybrid-ai-backup.service -n 50
 
 A healthy run logs `backup_success` followed by `retention_applied`. A run that uploaded but missed durable state logs `backup_incomplete` and exits **3** — it is expected sometimes and is not retried.
 
+### System mode (`HYBRID_AI_BACKUP_MODE=system`)
+
+In system mode the schedule is two **system** units instead of the user units,
+and they run as the dedicated `hybrid-ai-backup` account:
+
+| Unit | Role |
+|---|---|
+| `hybrid-ai-backup-capture.service` / `.timer` | nightly capture (03:15), no network, no credentials |
+| `hybrid-ai-backup-upload.service` | upload, holds the R2 credentials and network |
+| `hybrid-ai-backup-check.service` / `.timer` | monthly integrity check |
+
+Diagnose them with the system manager, not `--user`:
+
+```bash
+systemctl list-timers 'hybrid-ai-*'
+journalctl -u hybrid-ai-backup-capture.service -n 50
+journalctl -u hybrid-ai-backup-upload.service -n 50
+```
+
+The capture hands off to the upload through `OnSuccess=`; the two share only
+the staging directory and its `STATUS` file. `doctor.sh`, `collect-diagnostics.sh`
+and the deploy script all check the system timers when `HYBRID_AI_BACKUP_MODE=system`
+and the user timers otherwise.
+
+**Exit codes.** A capture or upload exits **0** when it completed, **3** when it
+finished but missed durable state (INCOMPLETE — it still uploads, tagged
+`complete:false`, and is deliberately not retried), and **1** when it aborted.
+`SuccessExitStatus=3` on the capture unit and `RestartPreventExitStatus=3` on
+the upload unit make exit 3 a handled outcome rather than a retry loop.
+
+**A capture was killed.** The root helper's `ExecStopPost=+… unpause` always
+resumes the containers, even after a hard kill. If they are somehow still
+paused, `sudo /opt/hybrid-ai/backup/backup-containers.sh unpause` is idempotent
+and succeeds when nothing is paused. The helper never stops or starts a
+container.
+
+**`external_control_unreadable` / the cold-copy fallback was declined.** Under
+`BACKUP_CONTAINER_CONTROL=external`, `backup.sh` runs no docker command, so it
+cannot fall back to a cold copy. A database it cannot capture online stays out
+of the snapshot and the run is INCOMPLETE (exit 3).
+
 ### Backup events
 
 | Event | Meaning | Action |

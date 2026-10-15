@@ -1006,6 +1006,13 @@ fi
 section "Backups"
 
 BACKUP_CONF="$BACKUP_CONF_DIR"
+# In system mode the credentials live in the root-owned systemd credential
+# store instead of BACKUP_CONF_DIR. HYBRID_AI_BACKUP_CRED_DIR overrides that
+# location (used by the offline fixture tests and by an operator who relocated
+# the store); it is only consulted in system mode.
+if [[ "${HYBRID_AI_BACKUP_MODE:-user}" == "system" ]]; then
+  BACKUP_CONF="${HYBRID_AI_BACKUP_CRED_DIR:-/etc/credstore/hybrid-ai-backup}"
+fi
 if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   pass "Backup credentials present"
 
@@ -1019,17 +1026,27 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   done
 
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user is-active hybrid-ai-backup.timer >/dev/null 2>&1; then
-      NEXT="$(systemctl --user list-timers hybrid-ai-backup.timer --no-pager 2>/dev/null | awk 'NR==2 {print $1, $2}')"
+    # In system mode the schedule is the system capture timer; in user mode it
+    # is the user backup timer. HYBRID_AI_BACKUP_MODE defaults to user.
+    if [[ "${HYBRID_AI_BACKUP_MODE:-user}" == "system" ]]; then
+      BACKUP_TIMER="hybrid-ai-backup-capture.timer"
+      SYSTEMCTL_SCOPE=()      # system manager
+    else
+      BACKUP_TIMER="hybrid-ai-backup.timer"
+      SYSTEMCTL_SCOPE=(--user)
+    fi
+    if systemctl "${SYSTEMCTL_SCOPE[@]}" is-active "$BACKUP_TIMER" >/dev/null 2>&1; then
+      NEXT="$(systemctl "${SYSTEMCTL_SCOPE[@]}" list-timers "$BACKUP_TIMER" --no-pager 2>/dev/null | awk 'NR==2 {print $1, $2}')"
       pass "Nightly backup timer active${NEXT:+ (next: ${NEXT})}"
     else
       fail "Backup timer is not active" \
-           "Enable it: systemctl --user enable --now hybrid-ai-backup.timer"
+           "Enable it: systemctl ${SYSTEMCTL_SCOPE[*]} enable --now ${BACKUP_TIMER}"
     fi
 
     # Without linger, user timers do not run when you are logged out -- which
-    # means the nightly backup silently never happens.
-    if command -v loginctl >/dev/null 2>&1; then
+    # means the nightly backup silently never happens. System timers do not
+    # need linger, so this check only applies in user mode.
+    if [[ "${HYBRID_AI_BACKUP_MODE:-user}" != "system" ]] && command -v loginctl >/dev/null 2>&1; then
       if loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
         pass "Linger enabled (backups run while logged out)"
       else
@@ -1049,8 +1066,13 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
         if (( AGE_H <= 36 )); then
           pass "Last successful backup ${AGE_H}h ago"
         elif (( AGE_H <= 168 )); then
-          warn "Last successful backup was ${AGE_H}h ago" \
-               "Expected nightly. Check: journalctl --user -u hybrid-ai-backup.service -n 50"
+          if [[ "${HYBRID_AI_BACKUP_MODE:-user}" == "system" ]]; then
+            warn "Last successful backup was ${AGE_H}h ago" \
+                 "Expected nightly. Check: journalctl -u hybrid-ai-backup-capture.service -n 50"
+          else
+            warn "Last successful backup was ${AGE_H}h ago" \
+                 "Expected nightly. Check: journalctl --user -u hybrid-ai-backup.service -n 50"
+          fi
         else
           fail "Last successful backup was ${AGE_H}h ago (over a week)" \
                "Backups are not running. Run ./backup/backup.sh manually to see the error."

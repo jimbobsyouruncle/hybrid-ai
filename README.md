@@ -497,10 +497,26 @@ every path is exactly the default above.
 | `HYBRID_AI_DATA_DIR` | Durable data (`hermes_data/`, `webui_data/`, `ollama_data/`) | the repo directory |
 | `HYBRID_AI_LOG_DIR` | Logs (`install.log`, `backup.log`) | the repo directory |
 | `HYBRID_AI_WORK_DIR` | Backup/restore scratch (`.backup-staging`, `.restore-work`, `.restore-test-*`) | the repo directory |
+| `HYBRID_AI_HERMES_HOME_DIR` | Durable per-user Hermes state captured by the backup | `$HOME/.hermes` |
 
 Resolution order is: the process environment, then the env file (parsed line by
 line, **never** sourced), then the default. A set value must be an absolute path
 with no whitespace, control character, `:` or `,`, and it must not be `/`.
+
+Two settings select behaviour rather than a path. Each accepts only its allowed
+words; anything else is refused:
+
+| Setting | Values | Default |
+|---|---|---|
+| `HYBRID_AI_BACKUP_MODE` | `user`, `system` | `user` |
+| `BACKUP_CONTAINER_CONTROL` | `auto`, `external` | `auto` |
+
+`HYBRID_AI_BACKUP_MODE=system` runs the backup as a split pair of **system**
+units under a dedicated `hybrid-ai-backup` account: a capture unit with read
+access, no network and no credentials, and an upload unit with the R2
+credentials and network but no read privilege. With the setting unset, today's
+user-unit backup is unchanged. See
+[`backup/README.md`](backup/README.md#system-mode-fresh-install-and-migration).
 
 The settings that already existed keep their names and defaults:
 `OPENHANDS_WORKSPACE`, `AGENT_REPOS_DIR`, `OPENHANDS_STATE_DIR`,

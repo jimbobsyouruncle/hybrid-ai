@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-capture.timer
+# PURPOSE (plain English):
+#   Decides WHEN the system-mode capture runs. Same schedule as the user timer:
+#   03:15 local time, daily, with a 15-minute random delay.
+#
+#   Enable it with:
+#     systemctl enable --now hybrid-ai-backup-capture.timer
+#   Check the next run:
+#     systemctl list-timers hybrid-ai-backup-capture.timer
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Nightly hybrid-ai backup capture
+Documentation=file:///opt/hybrid-ai/backup/README.md
+
+[Timer]
+# 03:15 local time every day -- the same schedule as the user timer.
+OnCalendar=*-*-* 03:15:00
+
+# If the host was off at 03:15, run shortly after it next boots.
+Persistent=true
+
+# Spread the start over a 15-minute window.
+RandomizedDelaySec=15min
+
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

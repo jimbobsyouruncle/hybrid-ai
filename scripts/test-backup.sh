@@ -31,6 +31,14 @@
 #      cold copy still cannot capture the DB, cold_copy_failed, exit 3
 #   j) an uncapturable webui_data DB: only open-webui is stopped, exit 3
 #   k) a cold-copy stop failure: no backup_failed, exit 3
+#   l) --stage-only: no credentials loaded, STAGING_DIR kept, STATUS written
+#   m) --upload-only: reads STATUS, tags complete:true, removes STAGING_DIR
+#   n) --upload-only refuses a missing STAGING_DIR or STATUS (exit 3)
+#   o) --upload-only with STATUS=incomplete: complete:false, exit 3, still uploads
+#   p) credentials read from $CREDENTIALS_DIRECTORY when it is set
+#   q) BACKUP_CONTAINER_CONTROL=external: NO docker call, paused-list CONSISTENCY,
+#      host-info copied, cold-copy fallback declined (INCOMPLETE, exit 3)
+#   r) no flag at all: today's whole-run behaviour, exit 0
 #
 # Exit 0 when every case passes, non-zero otherwise. Exit 2 on usage error.
 # ---------------------------------------------------------------------------
@@ -60,36 +68,39 @@ TMPROOT="$(mktemp -d)"
 STUB="$TMPROOT/stub"
 SQLITE_LOG="$TMPROOT/sqlite.log"
 DOCKER_LOG="$TMPROOT/docker.log"
+RESTIC_LOG="$TMPROOT/restic.log"
 mkdir -p "$STUB"
 : > "$SQLITE_LOG"
 : > "$DOCKER_LOG"
+: > "$RESTIC_LOG"
 
 # --- stubs -----------------------------------------------------------------
-cat > "$STUB/restic" <<'EOF'
+cat > "$STUB/restic" <<EOF
 #!/usr/bin/env bash
-# Assume the repository exists and every operation succeeds. On "backup" the
-# staging directory (still present) is copied aside so the test can inspect the
-# exact artifact that would have been uploaded. On "restore" it lays down a
-# fixture snapshot given in SNAPSHOT_SRC, so restore.sh --test has something
-# real to verify.
-case "$1" in
+# Log every invocation's argv so a case can assert the tags (complete:true /
+# complete:false) that were passed. On "backup" the staging directory (still
+# present) is copied aside so the test can inspect the exact artifact that
+# would have been uploaded. On "restore" it lays down a fixture snapshot given
+# in SNAPSHOT_SRC, so restore.sh --test has something real to verify.
+printf '%s\n' "\$*" >> '${RESTIC_LOG}'
+case "\$1" in
   snapshots) exit 0 ;;
   backup)
-    if [[ -n "${CAPTURE_DIR:-}" && -d "${2:-}" ]]; then
-      rm -rf "$CAPTURE_DIR"
-      cp -a "$2" "$CAPTURE_DIR" 2>/dev/null || true
+    if [[ -n "\${CAPTURE_DIR:-}" && -d "\${2:-}" ]]; then
+      rm -rf "\$CAPTURE_DIR"
+      cp -a "\$2" "\$CAPTURE_DIR" 2>/dev/null || true
     fi
     exit 0 ;;
   restore)
-    if [[ -n "${SNAPSHOT_SRC:-}" && -d "${SNAPSHOT_SRC:-}" ]]; then
+    if [[ -n "\${SNAPSHOT_SRC:-}" && -d "\${SNAPSHOT_SRC:-}" ]]; then
       target=""; prev=""
-      for a in "$@"; do
-        [[ "$prev" == "--target" ]] && target="$a"
-        prev="$a"
+      for a in "\$@"; do
+        [[ "\$prev" == "--target" ]] && target="\$a"
+        prev="\$a"
       done
-      if [[ -n "$target" ]]; then
-        mkdir -p "$target"
-        cp -a "$SNAPSHOT_SRC/." "$target/" 2>/dev/null || true
+      if [[ -n "\$target" ]]; then
+        mkdir -p "\$target"
+        cp -a "\$SNAPSHOT_SRC/." "\$target/" 2>/dev/null || true
       fi
     fi
     exit 0 ;;
@@ -162,12 +173,16 @@ chmod 600 "$CONF/repo-password"
 
 LOG="$TMPROOT/backup.log"
 CAPTURE="$TMPROOT/capture"
-export BACKUP_CONF_DIR="$CONF" BACKUP_LOG="$LOG" HOME="$REPO/home" SQLITE_LOG DOCKER_LOG
+export BACKUP_CONF_DIR="$CONF" BACKUP_LOG="$LOG" HOME="$REPO/home" SQLITE_LOG DOCKER_LOG RESTIC_LOG
 export CAPTURE_DIR="$CAPTURE"
 export PATH="$STUB:$PATH"
 export BACKUP_NO_PAUSE=1
 
 BACKUP="$REPO/backup/backup.sh"
+# The path helper derives STAGING_DIR from HYBRID_AI_WORK_DIR, so point WORK_DIR
+# at the scratch tree. The default layout keeps all four under $REPO, so the
+# staging directory lives at "$REPO/.backup-staging".
+STAGE_DIR="$REPO/.backup-staging"
 
 mkwal() {  # mkwal <path> <rows>
   python3 - "$1" "$2" <<'PY'
@@ -457,6 +472,230 @@ assert "case g: restore test dir made under WORK_DIR" \
   bash -c "compgen -G '$WORK2/.restore-test-*' >/dev/null"
 assert "case g: restore wrote nothing under APP_DIR" \
   bash -c "[[ \"\$(find '$APP2' -mindepth 1 | sort)\" == '$APP_BEFORE' ]]"
+
+# ---------------------------------------------------------------------------
+# Case L: --stage-only loads NO credentials, keeps STAGING_DIR, writes STATUS,
+# and exits 0. It must upload nothing. (Whether docker runs depends on
+# BACKUP_CONTAINER_CONTROL: user mode may pause; case Q covers external mode,
+# where NO docker command may run.) Credentials are moved out of the way to
+# prove they are never read on the capture side.
+# ---------------------------------------------------------------------------
+STAGE_DIR="$TMPROOT/work/.backup-staging"
+rm -rf "$STAGE_DIR"
+: > "$LOG"
+: > "$DOCKER_LOG"
+: > "$RESTIC_LOG"
+RUN_RC=0
+env -u BACKUP_CONF_DIR \
+    BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --stage-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case L: stage-only exit code (no credentials)" 0 "$RUN_RC"
+assert "case L: STAGING_DIR kept" test -d "$STAGE_DIR"
+assert "case L: STATUS file written" test -f "$STAGE_DIR/STATUS"
+assert "case L: STATUS is complete" bash -c "grep -qx 'status=complete' '$STAGE_DIR/STATUS'"
+assert "case L: STATUS reasons is -" bash -c "grep -qx 'reasons=-' '$STAGE_DIR/STATUS'"
+assert "case L: no backup_failed" log_lacks 'backup_failed'
+assert "case L: no upload (restic backup never called)" bash -c "! grep -q 'backup ' '$RESTIC_LOG'"
+
+# ---------------------------------------------------------------------------
+# Case M: --upload-only reads STAGING_DIR/STATUS, tags complete:true, uploads,
+# and removes STAGING_DIR after success. It must run NO docker command and read
+# no data tree. The STATUS says complete, so the exit is 0.
+# ---------------------------------------------------------------------------
+: > "$LOG"
+: > "$DOCKER_LOG"
+: > "$RESTIC_LOG"
+CAPTURE="$TMPROOT/capture-m"
+rm -rf "$CAPTURE"
+RUN_RC=0
+env BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    BACKUP_CONF_DIR="$CONF" CAPTURE_DIR="$CAPTURE" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --upload-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case M: upload-only exit code (complete)" 0 "$RUN_RC"
+assert "case M: upload staged the capture" test -d "$CAPTURE"
+assert "case M: STAGING_DIR removed after upload" bash -c "[[ ! -d '$STAGE_DIR' ]]"
+assert "case M: snapshot tagged complete:true" bash -c "grep -q 'complete:true' '$RESTIC_LOG'"
+assert "case M: backup_success emitted" log_has 'backup_success'
+assert "case M: no docker command at all" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+
+# ---------------------------------------------------------------------------
+# Case N: --upload-only REFUSES when STAGING_DIR is missing (exit 3), and when
+# STAGING_DIR exists but STATUS is missing (exit 3).
+# ---------------------------------------------------------------------------
+: > "$LOG"
+rm -rf "$STAGE_DIR"
+RUN_RC=0
+env BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    BACKUP_CONF_DIR="$CONF" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --upload-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case N: upload-only refuses missing STAGING_DIR (exit 3)" 3 "$RUN_RC"
+
+mkdir -p "$STAGE_DIR"
+RUN_RC=0
+env BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    BACKUP_CONF_DIR="$CONF" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --upload-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case N: upload-only refuses missing STATUS (exit 3)" 3 "$RUN_RC"
+
+# ---------------------------------------------------------------------------
+# Case O: --upload-only with STATUS=incomplete tags complete:false and exits 3,
+# but STILL uploads what was captured (a partial snapshot is worth keeping).
+# ---------------------------------------------------------------------------
+printf 'status=incomplete\nreasons=data_unreadable\n' > "$STAGE_DIR/STATUS"
+: > "$RESTIC_LOG"
+: > "$LOG"
+CAPTURE="$TMPROOT/capture-o"
+rm -rf "$CAPTURE"
+RUN_RC=0
+env BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    BACKUP_CONF_DIR="$CONF" CAPTURE_DIR="$CAPTURE" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --upload-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case O: upload-only exit code (incomplete STATUS)" 3 "$RUN_RC"
+assert "case O: snapshot tagged complete:false" bash -c "grep -q 'complete:false' '$RESTIC_LOG'"
+assert "case O: backup_incomplete emitted" log_has 'backup_incomplete'
+assert "case O: backup_failed NOT emitted" log_lacks 'backup_failed'
+assert "case O: STAGING_DIR still removed after upload" bash -c "[[ ! -d '$STAGE_DIR' ]]"
+assert "case O: no docker command at all" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+
+# ---------------------------------------------------------------------------
+# Case P: credentials come from $CREDENTIALS_DIRECTORY when it is set, with the
+# same parser and required keys. Put the real credentials there and remove
+# BACKUP_CONF_DIR entirely; a normal run must still succeed.
+# ---------------------------------------------------------------------------
+CREDDIR="$TMPROOT/credstore"
+rm -rf "$CREDDIR"; mkdir -p "$CREDDIR"; chmod 700 "$CREDDIR"
+cp "$CONF/r2.env" "$CREDDIR/r2.env"; chmod 600 "$CREDDIR/r2.env"
+cp "$CONF/repo-password" "$CREDDIR/repo-password"; chmod 600 "$CREDDIR/repo-password"
+: > "$LOG"
+CAPTURE="$TMPROOT/capture-p"
+rm -rf "$CAPTURE"
+RUN_RC=0
+env -u BACKUP_CONF_DIR \
+    CREDENTIALS_DIRECTORY="$CREDDIR" \
+    BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    BACKUP_NO_PAUSE=1 CAPTURE_DIR="$CAPTURE" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case P: credentials from CREDENTIALS_DIRECTORY exit code" 0 "$RUN_RC"
+assert "case P: backup_success emitted" log_has 'backup_success'
+assert "case P: capture uploaded" test -d "$CAPTURE"
+
+# ---------------------------------------------------------------------------
+# Case Q: BACKUP_CONTAINER_CONTROL=external runs NO docker command, reads the
+# paused list for CONSISTENCY, copies host-info into staging/host, and declines
+# the cold-copy fallback (INCOMPLETE, exit 3) when a DB cannot be captured.
+# ---------------------------------------------------------------------------
+RUNDIR="$TMPROOT/run"
+rm -rf "$RUNDIR"; mkdir -p "$RUNDIR/host-info"
+printf 'open-webui\nhermes-agent\n' > "$RUNDIR/paused"
+printf 'image-a\nimage-b\n' > "$RUNDIR/host-info/container-images.txt"
+printf 'docker=0.0.0-stub\n' > "$RUNDIR/host-info/platform.txt"
+
+# A clean external run: no docker call, CONSISTENCY paused, host copied.
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+: > "$LOG"; : > "$DOCKER_LOG"
+STAGE_DIR="$TMPROOT/work/.backup-staging"; rm -rf "$STAGE_DIR"
+RUN_RC=0
+env -u BACKUP_CONF_DIR -u BACKUP_NO_PAUSE \
+    BACKUP_CONTAINER_CONTROL=external HYBRID_AI_BACKUP_RUN_DIR="$RUNDIR" \
+    BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --stage-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case Q: external stage-only exit code" 0 "$RUN_RC"
+assert "case Q: NO docker command at all" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+assert "case Q: CONSISTENCY is paused" bash -c "grep -q 'consistency_method : paused' '$STAGE_DIR/MANIFEST.txt'"
+assert "case Q: host-info copied into staging/host" test -f "$STAGE_DIR/host/container-images.txt"
+
+# The cold-copy fallback is declined under external control: a database that
+# cannot be captured must NOT trigger a container stop (there is no docker),
+# and the run is INCOMPLETE.
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+printf 'SQLite format 3\0boom' > "$REPO/hermes_data/boom.db"
+: > "$LOG"; : > "$DOCKER_LOG"
+STAGE_DIR="$TMPROOT/work/.backup-staging"; rm -rf "$STAGE_DIR"
+RUN_RC=0
+env -u BACKUP_CONF_DIR -u BACKUP_NO_PAUSE \
+    BACKUP_CONTAINER_CONTROL=external HYBRID_AI_BACKUP_RUN_DIR="$RUNDIR" \
+    BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    SQLITE_FAIL_MARKER='boom.db' \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --stage-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case Q: external cold-copy declined (exit 3)" 3 "$RUN_RC"
+assert "case Q: NO docker command at all (cold-copy case)" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+assert "case Q: no backup_failed" log_lacks 'backup_failed'
+assert "case Q: STATUS is incomplete" bash -c "grep -qx 'status=incomplete' '$STAGE_DIR/STATUS'"
+assert "case Q: STATUS names only a fixed code" \
+  bash -c "grep -qE '^reasons=(agent_stop_declined|cold_copy_skipped|cold_copy_failed)(,|$)' '$STAGE_DIR/STATUS'"
+assert "case Q: STATUS never names a discovered path" bash -c "! grep -q 'boom' '$STAGE_DIR/STATUS'"
+rm -f "$REPO/hermes_data/boom.db"
+
+# Case Q2: an uncapturable webui_data DB under external control must also run NO
+# docker command (a webui failure would otherwise reach is_running / docker
+# stop) and must be INCOMPLETE, exit 3.
+mkdir -p "$REPO/webui_data"
+printf 'SQLite format 3\0boomw' > "$REPO/webui_data/webui.db"
+: > "$LOG"; : > "$DOCKER_LOG"
+STAGE_DIR="$TMPROOT/work/.backup-staging"; rm -rf "$STAGE_DIR"
+RUN_RC=0
+env -u BACKUP_CONF_DIR -u BACKUP_NO_PAUSE \
+    BACKUP_CONTAINER_CONTROL=external HYBRID_AI_BACKUP_RUN_DIR="$RUNDIR" \
+    BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    HYBRID_AI_BACKUP_STAGING_DIR="$STAGE_DIR" \
+    SQLITE_FAIL_MARKER='webui.db' \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --stage-only --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case Q2: external webui-failure exit code" 3 "$RUN_RC"
+assert "case Q2: NO docker command at all (webui failure)" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+assert "case Q2: no backup_failed" log_lacks 'backup_failed'
+assert "case Q2: STATUS is incomplete" bash -c "grep -qx 'status=incomplete' '$STAGE_DIR/STATUS'"
+rm -f "$REPO/webui_data/webui.db"
+
+# ---------------------------------------------------------------------------
+# Case R: no flag at all still behaves exactly as today (stage + upload, one
+# process, exit 0 on a clean fixture).
+# ---------------------------------------------------------------------------
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+: > "$LOG"
+CAPTURE="$TMPROOT/capture-r"; rm -rf "$CAPTURE"
+RUN_RC=0
+env BACKUP_LOG="$LOG" HOME="$REPO/home" \
+    HYBRID_AI_APP_DIR="$REPO" HYBRID_AI_DATA_DIR="$REPO" \
+    HYBRID_AI_LOG_DIR="$TMPROOT/log" HYBRID_AI_WORK_DIR="$TMPROOT/work" \
+    BACKUP_CONF_DIR="$CONF" BACKUP_NO_PAUSE=1 CAPTURE_DIR="$CAPTURE" \
+    PATH="$STUB:$PATH" \
+  bash "$BACKUP" --non-interactive > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+check "case R: no-flag run exit code" 0 "$RUN_RC"
+assert "case R: backup_success emitted" log_has 'backup_success'
 
 # ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then

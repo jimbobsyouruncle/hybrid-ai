@@ -186,6 +186,13 @@ Both scripts **refuse to run** if either file is not mode 0600. They also
 of those trees would be swept up by a git operation or by the very data a
 restore writes.
 
+In system mode the credentials live in `/etc/credstore/hybrid-ai-backup/`
+instead (root 0600), and systemd hands them to the upload unit through
+`$CREDENTIALS_DIRECTORY` (see [System mode](#system-mode-fresh-install-and-migration)).
+`backup.sh` reads them from that directory with the same parser and the same
+required keys when `$CREDENTIALS_DIRECTORY` is set, and from `BACKUP_CONF_DIR`
+otherwise.
+
 ---
 
 ## Where the data lives
@@ -203,6 +210,7 @@ relocation restores into the split layout.
 | `HYBRID_AI_LOG_DIR` | `backup.log` | the repo directory |
 | `HYBRID_AI_WORK_DIR` | `.backup-staging`, `.restore-work`, `.restore-test-*` | the repo directory |
 | `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env` |
+| `HYBRID_AI_HERMES_HOME_DIR` | the durable per-user Hermes state | `$HOME/.hermes` |
 | `BACKUP_CONF_DIR` | the credentials above | `~/.config/hybrid-ai-backup` |
 | `RESTIC_CACHE_DIR` | the restic cache | `~/.cache/restic` |
 
@@ -290,6 +298,93 @@ restic restore latest --target /tmp/recover --include '*/files/docs/thatfile.pdf
 This performs a complete restore into a scratch directory and runs SQLite's integrity check on every recovered database. Nothing live is touched, so it is safe on a working system.
 
 An untested backup is a hypothesis. Put a recurring reminder in your calendar — the monthly `--check` timer verifies the *repository*, but only `--test` proves the *data* comes back usable.
+
+---
+
+## System mode (fresh install and migration)
+
+The default backup is a pair of **user** units that run as the login account.
+That account usually is not root and is not in the `docker` group, so it cannot
+read the container-owned data directly. System mode replaces the user units with
+a **split** pair of **system** units that run as a dedicated `hybrid-ai-backup`
+account:
+
+* the **capture** unit reads the data through one narrow capability
+  (`CAP_DAC_READ_SEARCH`), and has **no network** and **no credentials**;
+* the **upload** unit has the R2 credentials and network, and **no read
+  privilege** and no docker socket.
+
+A small root helper pauses and unpauses the containers, so the capture unit
+itself never touches the docker socket. No account joins the `docker` group.
+
+Select it by setting `HYBRID_AI_BACKUP_MODE=system` in
+`/etc/hybrid-ai/hybrid-ai.env`. With the setting unset, today's user-unit
+backup is unchanged.
+
+### What card F must create (the one bootstrap)
+
+Installing the account and the credential store is a separate step. Exactly
+these, and nothing more, are needed before `./install.sh` can install the
+system units as root:
+
+1. **The account.** A no-login system account named `hybrid-ai-backup`, with a
+   matching group of the same name. It is never added to the `docker` group.
+
+2. **The credential store.** A root-owned directory
+   `/etc/credstore/hybrid-ai-backup/` (0700) holding two files, each 0600 and
+   owned by root:
+   * `r2.env` — the R2 keys and repository URL, in the same format as
+     `~/.config/hybrid-ai-backup/r2.env`.
+   * `repo-password` — the restic encryption key.
+
+   systemd reads these as root and hands them to the upload unit through
+   `LoadCredential=`; the account itself cannot read the directory.
+
+3. **The settings**, in `/etc/hybrid-ai/hybrid-ai.env` (names and paths only):
+
+   | Setting | Value |
+   |---|---|
+   | `HYBRID_AI_BACKUP_MODE` | `system` |
+   | `BACKUP_CONTAINER_CONTROL` | `external` |
+   | `HYBRID_AI_APP_DIR` | `/opt/hybrid-ai` |
+   | `HYBRID_AI_ENV_FILE` | `/etc/hybrid-ai/hybrid-ai.env` |
+   | `HYBRID_AI_DATA_DIR` | the durable data directory |
+   | `HYBRID_AI_LOG_DIR` | the log directory |
+   | `HYBRID_AI_WORK_DIR` | the staging work directory |
+   | `HYBRID_AI_HERMES_HOME_DIR` | the durable `~/.hermes` state directory |
+   | `RESTIC_CACHE_DIR` | `/var/cache/hybrid-ai-backup` |
+
+   With none of these set, every resolved path is exactly today's default.
+
+### Installing and verifying
+
+```bash
+# Install the system units (runs as root; card F's deploy unit does this).
+sudo ./install.sh --non-interactive
+
+# Confirm the units and the schedule.
+systemctl list-timers 'hybrid-ai-*'
+systemctl status hybrid-ai-backup-capture.service
+
+# Run one capture and upload by hand and read the result.
+sudo systemctl start hybrid-ai-backup-capture.service
+journalctl -u hybrid-ai-backup-capture.service -n 50
+journalctl -u hybrid-ai-backup-upload.service -n 50
+```
+
+A successful run writes `STAGING_DIR/STATUS` with `status=complete` and uploads
+a snapshot tagged `complete:true`. A run that missed durable state writes
+`status=incomplete` with fixed reason codes only (never a discovered name) and
+uploads a snapshot tagged `complete:false`; the capture exits 0 or 3, and the
+upload exits 3.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | the capture or upload completed |
+| 3 | the run finished but missed durable state (INCOMPLETE); not retried |
+| 1 | the run aborted (a real failure) |
 
 ---
 

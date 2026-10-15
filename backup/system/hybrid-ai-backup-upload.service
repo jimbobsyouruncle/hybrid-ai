@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# FILE: backup/system/hybrid-ai-backup-upload.service
+# PURPOSE (plain English):
+#   The UPLOAD half of a system-mode backup. It runs as the same dedicated
+#   `hybrid-ai-backup` account but with the OPPOSITE privileges to the capture
+#   unit:
+#     * NO capabilities (CapabilityBoundingSet= is empty) and no docker socket,
+#       so it cannot read the live data trees or drive docker;
+#     * the R2 credentials, loaded by systemd from /etc/credstore/hybrid-ai-backup
+#       (LoadCredential=) and handed to the process through $CREDENTIALS_DIRECTORY;
+#     * network access, because it talks to Cloudflare R2.
+#
+#   It runs `backup.sh --upload-only`, which reads ONLY the staging directory
+#   (never a data tree), tags the snapshot complete:true/false from
+#   STAGING_DIR/STATUS, removes the staging directory after a successful upload,
+#   and exits 3 when STATUS says the capture was incomplete.
+#
+# WHY Restart IS SAFE HERE (and is NOT on the capture unit):
+#   This unit touches no container. A retry can never pause or stop the stack,
+#   so a bounded retry (see below) is safe. Exit 3 is excluded from restarts: a
+#   retry cannot make an incomplete capture complete.
+#
+# INSTALL:
+#   Installed by ./install.sh into /etc/systemd/system when HYBRID_AI_BACKUP_MODE
+#   =system and install.sh runs as root (see backup/README.md, "System mode").
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai backup upload (R2 credentials, network, no read privilege)
+Documentation=file:///opt/hybrid-ai/backup/README.md
+After=network-online.target
+Wants=network-online.target
+
+# BOUNDED RETRY: a transient R2 failure should retry, but a failure that
+# repeats identically must give up rather than loop forever.
+StartLimitIntervalSec=1h
+StartLimitBurst=2
+
+[Service]
+Type=oneshot
+User=hybrid-ai-backup
+Group=hybrid-ai-backup
+
+# No capabilities at all: this process has no read privilege over the data.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+
+# The docker socket is unreachable; this unit never needs it.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
+
+# Filesystem hardening. ProtectSystem=strict makes everything read-only; the
+# only writable places are the restic cache (CacheDirectory) and, transiently,
+# the staging directory it removes after a successful upload.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# The staging directory must be READABLE (it is the only input) but this unit
+# may only WRITE by removing it after a successful upload. StateDirectory=
+# exposes /var/lib/hybrid-ai-backup; ReadWritePaths re-grants exactly that path
+# so `rm -rf` of the staging subtree is permitted, and nothing else under it is
+# writable beyond removal (the upload never writes into staging).
+StateDirectory=hybrid-ai-backup
+# The restic cache lives here (/var/cache/hybrid-ai-backup); systemd exports
+# CACHE_DIRECTORY. RESTIC_CACHE_DIR is set to it below.
+CacheDirectory=hybrid-ai-backup
+LogsDirectory=hybrid-ai-backup
+
+# Restic's cache must be writable. The env file sets RESTIC_CACHE_DIR to the
+# CacheDirectory so the value and the writable path agree.
+Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_BACKUP_MODE=system
+Environment=BACKUP_CONTAINER_CONTROL=external
+
+# Credentials come from the systemd credential store, never from a file this
+# account can read on its own. systemd reads these as root and exposes them
+# read-only under $CREDENTIALS_DIRECTORY for the lifetime of the process.
+LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env
+LoadCredential=repo-password:/etc/credstore/hybrid-ai-backup/repo-password
+
+# The upload only reads staging and removes it on success; the restic cache is
+# the other writable path. ReadWritePaths grants both explicitly.
+ReadWritePaths=/var/lib/hybrid-ai-backup /var/cache/hybrid-ai-backup
+
+# No docker command runs here (external control), so no socket is needed.
+ExecStart=/opt/hybrid-ai/backup/backup.sh --upload-only
+
+# A transient failure retries (bounded above). Exit 3 (INCOMPLETE) is NOT
+# retried: a retry cannot recover the missing durable state.
+Restart=on-failure
+RestartSec=15min
+RestartPreventExitStatus=3
+
+TimeoutStartSec=4h
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20

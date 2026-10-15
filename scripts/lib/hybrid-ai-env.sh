@@ -21,6 +21,12 @@
 #     HYBRID_AI_UID, HYBRID_AI_GID, OPENHANDS_WORKSPACE, AGENT_REPOS_DIR,
 #     OPENHANDS_STATE_DIR, BACKUP_CONF_DIR, RESTIC_CACHE_DIR, BACKUP_LOG
 #
+#   And the mode selectors (defaults keep today's behaviour exactly):
+#
+#     HYBRID_AI_HERMES_HOME_DIR  durable ~/.hermes state (default: $HOME/.hermes)
+#     HYBRID_AI_BACKUP_MODE      user|system (default: user)
+#     BACKUP_CONTAINER_CONTROL   auto|external (default: auto)
+#
 #   With NO settings, every resolved path equals today's, byte for byte.
 #
 # RESOLUTION ORDER (per setting):
@@ -161,6 +167,32 @@ _hybrid_ai_resolve_scalar() {
   return 0
 }
 
+# Resolve one CHOICE setting: environment, then env file, then default. The
+# value must be one of the allowed words; anything else is refused, naming the
+# setting and the allowed values but never echoing the rejected value (it may
+# have come from the env file).
+_hybrid_ai_resolve_choice() {
+  local name="$1" default="$2" envfile="$3" allowed="$4" val ok_word
+  val="${!name:-}"
+  if [[ -z "$val" ]]; then
+    val="$(_hybrid_ai_file_get "$envfile" "$name")"
+  fi
+  if [[ -z "$val" ]]; then val="$default"; fi
+  ok_word=0
+  local w
+  for w in $allowed; do
+    [[ "$val" == "$w" ]] && ok_word=1
+  done
+  if (( ! ok_word )); then
+    printf 'hybrid-ai-env: %s must be one of: %s (leave it unset for the default).\n' \
+      "$name" "$allowed" >&2
+    return 1
+  fi
+  printf -v "$name" '%s' "$val"
+  export "${name?}"
+  return 0
+}
+
 # --- Resolve everything -----------------------------------------------------
 hybrid_ai_env_load() {
   # Bootstrap: find the env file we will read values from. Prefer an explicit
@@ -201,6 +233,11 @@ hybrid_ai_env_load() {
   _hybrid_ai_resolve_path HYBRID_AI_LOG_DIR  "$repo_default" "$ef" || return 1
   _hybrid_ai_resolve_path HYBRID_AI_WORK_DIR "$repo_default" "$ef" || return 1
 
+  # Durable per-user Hermes state captured by the backup. A resolvable PATH
+  # setting whose default is exactly where backup.sh and restore.sh already
+  # looked, so a host that sets nothing keeps the same path byte for byte.
+  _hybrid_ai_resolve_path HYBRID_AI_HERMES_HOME_DIR "${HOME:-}/.hermes" "$ef" || return 1
+
   # Kept settings -- same names, same defaults as before this helper existed.
   _hybrid_ai_resolve_scalar HYBRID_AI_UID "" "$ef" || return 1
   _hybrid_ai_resolve_scalar HYBRID_AI_GID "" "$ef" || return 1
@@ -210,6 +247,15 @@ hybrid_ai_env_load() {
   _hybrid_ai_resolve_path BACKUP_CONF_DIR     "${HOME:-}/.config/hybrid-ai-backup" "$ef" || return 1
   _hybrid_ai_resolve_path RESTIC_CACHE_DIR    "${HOME:-}/.cache/restic"   "$ef" || return 1
 
+  # --- Mode selectors -------------------------------------------------------
+  # HYBRID_AI_BACKUP_MODE: user (today's user-unit behaviour) or system (the
+  # split capture/upload system units). Any other value is refused.
+  _hybrid_ai_resolve_choice HYBRID_AI_BACKUP_MODE "user" "$ef" "user system" || return 1
+  # BACKUP_CONTAINER_CONTROL: auto (backup.sh controls containers itself, the
+  # default) or external (a root helper pauses/unpauses; backup.sh runs no
+  # docker command at all).
+  _hybrid_ai_resolve_choice BACKUP_CONTAINER_CONTROL "auto" "$ef" "auto external" || return 1
+
   # --- Derived paths (names unchanged) --------------------------------------
   HYBRID_AI_HERMES_DATA_DIR="${HYBRID_AI_DATA_DIR}/hermes_data"
   HYBRID_AI_WEBUI_DATA_DIR="${HYBRID_AI_DATA_DIR}/webui_data"
@@ -217,12 +263,8 @@ hybrid_ai_env_load() {
   HYBRID_AI_INSTALL_LOG="${HYBRID_AI_LOG_DIR}/install.log"
   HYBRID_AI_BACKUP_STAGING_DIR="${HYBRID_AI_WORK_DIR}/.backup-staging"
   HYBRID_AI_RESTORE_WORK_DIR="${HYBRID_AI_WORK_DIR}/.restore-work"
-  # Durable per-user state captured by the backup. Derived from HOME, exactly
-  # where backup.sh and restore.sh already looked.
-  HYBRID_AI_HERMES_HOME_DIR="${HOME:-}/.hermes"
   export HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR HYBRID_AI_OLLAMA_DATA_DIR
   export HYBRID_AI_INSTALL_LOG HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR
-  export HYBRID_AI_HERMES_HOME_DIR
 
   # BACKUP_LOG keeps its name and default: $LOG_DIR/backup.log. The resolved
   # value is exported so backup.sh/restore.sh/doctor.sh share one path.

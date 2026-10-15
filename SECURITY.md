@@ -349,6 +349,50 @@ The gate is fail-closed. It depends on all five jobs with `if: always()`, prints
 | Working directories gitignored | `.backup-staging/`, `.restore-work/`, `.restore-test-*/`, `webui_data.pre-restore-*/`, `backup.log` |
 | Metadata-only logging | Backup events record sizes, counts, and durations — never document names or chat content |
 
+### System-mode backup account and the privilege split
+
+The default backup is a pair of **user** units run as the login account. When
+that account is not root and is not in the `docker` group, it cannot read the
+container-owned data, so a run reports INCOMPLETE rather than capturing
+everything. System mode (`HYBRID_AI_BACKUP_MODE=system`) replaces the user units
+with a **split** pair of **system** units that run as a dedicated
+`hybrid-ai-backup` account. The privilege split is the control:
+
+| Unit | Read access | Network | Credentials | Docker socket |
+|---|---|---|---|---|
+| capture (`backup.sh --stage-only`) | `CAP_DAC_READ_SEARCH` only | none (`PrivateNetwork=yes`) | none | unreachable (`InaccessiblePaths=`) |
+| upload (`backup.sh --upload-only`) | none (`CapabilityBoundingSet=` empty) | yes (to R2) | `LoadCredential=` from the credstore | unreachable |
+| check (`backup.sh --check`) | none | yes (to R2) | `LoadCredential=` from the credstore | unreachable |
+
+* **No account joins the `docker` group.** The docker socket is a
+  root-equivalent control channel, so it is made unreachable in every unit.
+* **Only fixed, root-owned commands run with privilege.** The container pause,
+  unpause and host-info steps are the `+`-prefixed `ExecStartPre=`/`ExecStopPost=`
+  lines, which systemd runs as root. The capture process itself runs with no
+  docker access at all (`BACKUP_CONTAINER_CONTROL=external`).
+* **The capture side never holds credentials or network; the upload side never
+  holds read privilege or docker access.** The two share only the staging
+  directory and its `STATUS` file.
+* **No unit stops or starts a container.** The root helper only pauses and
+  unpauses, and unpause is idempotent. The capture unit has no `Restart=`, so a
+  retry loop can never pause and resume the stack every 15 minutes (incident B1).
+* **Credentials live in a root-owned store.** In system mode they sit in
+  `/etc/credstore/hybrid-ai-backup/` (0700, files 0600, root-owned). systemd
+  reads them as root and exposes them read-only under `$CREDENTIALS_DIRECTORY`;
+  the `hybrid-ai-backup` account cannot read the directory itself. The
+  credentials-outside-data-trees guard, line-by-line (never `source`d) parsing,
+  and 600 file modes all still apply.
+* **Readability is probed with `open(2)`, not `access(2)`.** Linux drops
+  effective capabilities for `access(2)` when the real uid is not root, so
+  `find -readable` and `[[ -r ]]` would report a `CAP_DAC_READ_SEARCH`-readable
+  file as unreadable. System mode uses an open-based probe instead; user mode
+  keeps the cheaper access(2) checks.
+
+The root helper is `backup/backup-containers.sh`. It accepts only the verb
+(`pause`|`unpause`|`host-info`), never a path or a container name from its
+arguments, uses a fixed container list, and writes only under
+`/run/hybrid-ai-backup`.
+
 ### Residual backup risk: deletion by a compromised host
 
 The Pi's token can write **and** delete. An attacker with access could run `restic forget --prune` to destroy backup history before encrypting live data — the standard second stage of a targeted ransomware run.
