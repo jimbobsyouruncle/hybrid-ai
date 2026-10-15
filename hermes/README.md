@@ -122,8 +122,8 @@ and are excluded from the backup.
 |---|---|---|---|
 | *none (baked into the image)* | `/opt/hermes-agent` | **read-only to the runtime uid** | The pinned Hermes Agent code and its toolchain. Root-owned, outside every mount, so the runtime never writes here. The WebUI is pinned to it with `HERMES_WEBUI_AGENT_DIR`. |
 | *none (baked into the image)* | `/app` | **read-only to the runtime uid** | The pinned Hermes WebUI code (the container PID 1). Root-owned; byte-compiled at build. `.git` is removed, so it carries no checkout fingerprint. |
-| `./hermes_data` | `/root/.hermes` | read-write | Persistent memory, SQLite state, FTS5 indexes and acquired skills. This is a subdirectory of the **deployment directory** — see the gaps below. The image's own `/root/.hermes` is empty; the code is not stored here. |
-| `./hermes_data/workspace` | `/root/workspace` | read-write | Persistent WebUI workspace; the same host folder the container also sees at `/root/.hermes/workspace`. |
+| `${HYBRID_AI_DATA_DIR}/hermes_data` | `/root/.hermes` | read-write | Persistent memory, SQLite state, FTS5 indexes and acquired skills. With the default layout this is `./hermes_data` under the deployment directory — see the gaps below. The image's own `/root/.hermes` is empty; the code is not stored here. |
+| `${HYBRID_AI_DATA_DIR}/hermes_data/workspace` | `/root/workspace` | read-write | Persistent WebUI workspace; the same host folder the container also sees at `/root/.hermes/workspace`. |
 | `${OPENHANDS_WORKSPACE}` | `/workspace` | **read-only** | The OpenHands clone. Read-only so Hermes can read code without editing it. |
 | `${OPENHANDS_WORKSPACE}` | `/agent-repo` | **read-only** | The same clone again, under a name that makes its purpose explicit: the read-only view of the OpenHands working clone. Writes here fail inside the container. |
 | `${AGENT_REPOS_DIR}` | `/agent-repos` | **read-only** | The agent repo reference tree: one read-only clone of every non-fork repo you own, each on its own default branch, built by `scripts/sync-agent-repos.sh`. Defaults to `${HOME}/hybrid-ai-repos` when unset. |
@@ -166,8 +166,11 @@ repositories, each on its default branch, so a second, separate tree is mounted 
   is skipped as `skipped:symlinks` and left untouched.
 - It takes an `flock` so two runs cannot collide, and it is idempotent, reads no credentials,
   and writes only under `AGENT_REPOS_DIR`.
-- It **refuses** a target that is, is inside, or contains the deployment directory or
-  `OPENHANDS_WORKSPACE`, so mounting it read-only cannot expose `.env` or the logs.
+- It **refuses** a target that is, is inside, or contains any protected tree —
+  `HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR`, `HYBRID_AI_LOG_DIR`,
+  `HYBRID_AI_WORK_DIR`, the directory the env file lives in, `OPENHANDS_WORKSPACE`
+  or `BACKUP_CONF_DIR` — so mounting it read-only cannot expose the env file, the
+  logs, or the backup credentials.
 
 ### Inventory and verification
 
@@ -325,11 +328,12 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | `HERMES_WEBUI_SERVER_CWD` | image `ENV` | The server's working directory; a runtime-writable path (`/root/.hermes/webui`) in the data volume, since the agent dir is read-only to the runtime uid. |
 | `HERMES_WEBUI_DISABLE_LOCAL_VENV` | image `ENV` | `1` makes bootstrap fail closed instead of creating `/app/.venv` at runtime (a write into the read-only WebUI tree) when the pinned interpreter cannot import both the WebUI deps and the Agent. |
 | `HERMES_HOME` | image `ENV` | Pins runtime dependency state (incl. the venv generation `.leases`) to the data volume `/root/.hermes`. Must never be `/opt/hermes-agent`, which is read-only to the runtime uid. |
-| `HYBRID_AI_UID` | `docker-compose.hermes.yml`, `hermes/Dockerfile`, `install.sh`, `doctor.sh` | Dedicated non-root uid the Hermes image builds and runs as. Unset or `0` means the legacy uid 0. Set by the account migration. |
-| `HYBRID_AI_GID` | `docker-compose.hermes.yml`, `hermes/Dockerfile` | Group id matching `HYBRID_AI_UID`. Unset or `0` means the legacy gid 0. |
+| `HYBRID_AI_UID` | `docker-compose.hermes.yml`, `docker-compose.yml` (status `user:`), `openhands/docker-compose.openhands.yml` (`SANDBOX_USER_ID`), `hermes/Dockerfile`, `install.sh`, `doctor.sh` | Dedicated non-root uid. Drives the Hermes container uid, the status-container `user:`, and the OpenHands sandbox uid, so the whole stack runs as that account. Unset keeps today's behaviour: the login account's uid. Set by the account migration. |
+| `HYBRID_AI_GID` | `docker-compose.hermes.yml`, `hermes/Dockerfile`, `install.sh` | Group id matching `HYBRID_AI_UID`. Unset keeps the login account's gid. |
+| `HYBRID_AI_DATA_DIR` | `docker-compose.yml`, `hermes/docker-compose.hermes.yml`, `scripts/lib/hybrid-ai-env.sh` | Host data root. `hermes_data/`, `webui_data/` and `ollama_data/` live under it, names unchanged. Default: the repo directory (bind source `${HYBRID_AI_DATA_DIR:-.}/hermes_data`). |
 | `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |
 | `LOCAL_DOMAIN` | container env | Used for local subdomain routing. |
-| `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory, but the overlay currently hardcodes `./hermes_data`. |
+| `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory; the overlay now binds `${HYBRID_AI_DATA_DIR:-.}/hermes_data`. |
 
 ---
 

@@ -23,6 +23,14 @@ set -uo pipefail   # deliberately NOT -e: a failing check must not abort the run
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
+
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
+APP_DIR="$HYBRID_AI_APP_DIR"
+ENV_FILE="$HYBRID_AI_ENV_FILE"
+
 QUIET=0
 NO_CLOUD=0
 for arg in "$@"; do
@@ -57,10 +65,10 @@ fail() {
   [[ -n "${2:-}" ]] && REMEDIES+=("${C_ERR}✗${C_RST} $2")
 }
 
-# Read one key from .env, stripping optional surrounding quotes.
+# Read one key from the resolved env file, stripping optional surrounding quotes.
 env_get() {
   local v
-  v="$(grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+  v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)"
   v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
   printf '%s' "$v"
 }
@@ -86,9 +94,9 @@ env_key_state() {
 # throwaway fixtures without touching the live deployment. Production defaults
 # point at the real bind-mounted paths under the deployment directory.
 # ---------------------------------------------------------------------------
-HERMES_DATA_DIR="${HERMES_DATA_DIR:-hermes_data}"
+HERMES_DATA_DIR="${HERMES_DATA_DIR:-${HYBRID_AI_HERMES_DATA_DIR}}"
 DOCTOR_TRIAGE_STALL_MIN="${DOCTOR_TRIAGE_STALL_MIN:-15}"
-DEPLOY_ENV="${DEPLOY_ENV:-.env}"
+DEPLOY_ENV="${DEPLOY_ENV:-$HYBRID_AI_ENV_FILE}"
 
 # Read one environment variable from a container's config (not a live exec).
 container_env() {
@@ -99,13 +107,40 @@ container_env() {
 # Every compose command must use the same project, env file and BOTH compose
 # files. Running with only the OpenHands file makes Compose try to recreate the
 # shared network and stops OpenHands -- so remedies always print the full form.
-COMPOSE_CMD="docker compose -p hybrid-ai --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml"
+COMPOSE_CMD="docker compose -p hybrid-ai --env-file ${ENV_FILE} --project-directory ${APP_DIR} -f ${APP_DIR}/docker-compose.yml -f ${APP_DIR}/openhands/docker-compose.openhands.yml -f ${APP_DIR}/hermes/docker-compose.hermes.yml"
 
 (( QUIET )) || {
   printf '%s\n' "============================================================"
   printf '  hybrid-ai health check  ::  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
   printf '%s\n' "============================================================"
 }
+
+# ---------------------------------------------------------------------------
+# 0. Paths
+# ---------------------------------------------------------------------------
+# Print the resolved host paths so a split layout is obvious at a glance. Only
+# PATH settings are printed -- never a credential, a uid, or any other value
+# from the env file. A path that was SET (present in the env file or the
+# environment) but does not exist is a WARNING, never a failure: the directory
+# may simply not have been created yet.
+section "Paths"
+# The helper records which settings were SET (by the environment or the env
+# file) in HYBRID_AI_EXPLICIT_SETTINGS. Only a SET path is warned about when it
+# does not exist -- a default is never noise.
+PATH_IS_EXPLICIT=" ${HYBRID_AI_EXPLICIT_SETTINGS:-} "
+for _name in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR \
+             HYBRID_AI_LOG_DIR HYBRID_AI_WORK_DIR OPENHANDS_WORKSPACE \
+             AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR \
+             RESTIC_CACHE_DIR BACKUP_LOG; do
+  _p="${!_name}"
+  pass "${_name} = ${_p}"
+  if [[ "$_name" != "HYBRID_AI_ENV_FILE" && ! -e "$_p" \
+        && "$PATH_IS_EXPLICIT" == *" ${_name} "* ]]; then
+    warn "${_name} is set but does not exist: ${_p}" \
+         "Create it, or unset ${_name} to fall back to the default."
+  fi
+done
+unset _name _p PATH_IS_EXPLICIT
 
 # ---------------------------------------------------------------------------
 # 1. Host prerequisites
@@ -251,13 +286,13 @@ fi
 # ---------------------------------------------------------------------------
 section "Configuration"
 
-if [[ -f .env ]]; then
-  pass ".env present"
-  PERMS="$(stat -c '%a' .env 2>/dev/null)"
+if [[ -f "$ENV_FILE" ]]; then
+  pass "env file present ($ENV_FILE)"
+  PERMS="$(stat -c '%a' "$ENV_FILE" 2>/dev/null)"
   if [[ "$PERMS" == "600" ]]; then
-    pass ".env permissions correct (600)"
+    pass "env file permissions correct (600)"
   else
-    fail ".env permissions are ${PERMS}, expected 600" "Fix: chmod 600 .env"
+    fail "env file permissions are ${PERMS}, expected 600" "Fix: chmod 600 ${ENV_FILE}"
   fi
 
   for key in WEBUI_SECRET_KEY RUNPOD_API_KEY RUNPOD_POD_ID TAILSCALE_IP PEER_HOSTNAME; do
@@ -273,9 +308,9 @@ if [[ -f .env ]]; then
   # no visible error. Presence only -- the value is never printed.
   OR_KEY="$(env_get OPENROUTER_API_KEY)"
   if [[ -n "$OR_KEY" ]]; then
-    pass "OPENROUTER_API_KEY is set in .env"
+    pass "OPENROUTER_API_KEY is set in the env file"
   else
-    warn "OPENROUTER_API_KEY is empty in .env" \
+    warn "OPENROUTER_API_KEY is empty in the env file" \
          "The Hermes decomposer and the OpenRouter fallback need it. Set it (see .env.example), then: ${COMPOSE_CMD} up -d"
   fi
   unset OR_KEY
@@ -297,7 +332,7 @@ if [[ -f .env ]]; then
         unreadable) warn "cannot read ${prof_env}" \
                          "The OpenRouter credential in this profile cannot be verified by this user." ;;
         *)          warn "OPENROUTER_API_KEY is missing or empty in ${prof_env}" \
-                         "Set it in that profile's .env (see .env.example) and restart Hermes: ${COMPOSE_CMD} up -d hermes" ;;
+                         "Set it in that profile's env file (see .env.example) and restart Hermes: ${COMPOSE_CMD} up -d hermes" ;;
       esac
     done
   fi
@@ -317,13 +352,13 @@ if [[ -f .env ]]; then
   # --- OpenHands credential store -----------------------------------------
   # Holds the LLM provider key you enter in the OpenHands UI. Outside the repo
   # so it is never committed and never visible to the agent sandbox.
-  if [[ -d "${HOME}/.openhands" ]]; then
-    OH_PERMS="$(stat -c '%a' "${HOME}/.openhands" 2>/dev/null)"
+  if [[ -d "$OPENHANDS_STATE_DIR" ]]; then
+    OH_PERMS="$(stat -c '%a' "$OPENHANDS_STATE_DIR" 2>/dev/null)"
     if [[ "$OH_PERMS" == "700" ]]; then
-      pass "${HOME}/.openhands permissions correct (700)"
+      pass "${OPENHANDS_STATE_DIR} permissions correct (700)"
     else
-      fail "${HOME}/.openhands is ${OH_PERMS}, expected 700" \
-           "Fix: chmod 700 ${HOME}/.openhands"
+      fail "${OPENHANDS_STATE_DIR} is ${OH_PERMS}, expected 700" \
+           "Fix: chmod 700 ${OPENHANDS_STATE_DIR}"
     fi
   fi
 
@@ -335,12 +370,12 @@ if [[ -f .env ]]; then
   OH_WS="$(env_get OPENHANDS_WORKSPACE)"
   if [[ -n "$OH_WS" ]]; then
     OH_WS_REAL="$(readlink -f "$OH_WS" 2>/dev/null || echo "$OH_WS")"
-    DEPLOY_REAL="$(readlink -f "$SCRIPT_DIR")"
+    DEPLOY_REAL="$(readlink -f "$APP_DIR")"
     if [[ "$OH_WS_REAL" == "$DEPLOY_REAL" ]]; then
       fail "OPENHANDS_WORKSPACE is the deployment directory" \
-           "The agent sandbox could read .env and the log files. Fix: ./scripts/setup-agent-workspace.sh"
-    elif [[ -e "${OH_WS}/.env" ]]; then
-      fail "A .env exists inside the agent workspace" \
+           "The agent sandbox could read the env file and the log files. Fix: ./scripts/setup-agent-workspace.sh"
+    elif [[ -e "${OH_WS}/.env" || -e "$HYBRID_AI_ENV_FILE" && "$(readlink -f "$OH_WS")" == "$(dirname "$(readlink -f "$HYBRID_AI_ENV_FILE")")" ]]; then
+      fail "An env file exists inside the agent workspace" \
            "That defeats the isolation. Remove it: rm ${OH_WS}/.env"
     elif [[ -d "${OH_WS}/.git" ]]; then
       pass "Agent workspace isolated from the deployment directory"
@@ -350,7 +385,7 @@ if [[ -f .env ]]; then
     fi
   fi
 else
-  fail ".env is missing" "Run ./install.sh to create it."
+  fail "env file is missing ($ENV_FILE)" "Run ./install.sh to create it."
 fi
 
 # ---------------------------------------------------------------------------
@@ -861,7 +896,7 @@ fi
 # ---------------------------------------------------------------------------
 section "Agent clones"
 
-CRED_CHECK="${SCRIPT_DIR}/scripts/check-git-remotes.sh"
+CRED_CHECK="${APP_DIR}/scripts/check-git-remotes.sh"
 CRED_ROOTS=()
 # Each root is used only when it is set AND exists; either one may be absent.
 OH_WS_CRED="${OPENHANDS_WORKSPACE:-$(env_get OPENHANDS_WORKSPACE)}"
@@ -903,7 +938,7 @@ fi
 # writes nothing. Exit 0 is a pass; exit 1 (stale, or a skipped row) or exit 2
 # (missing dir, HEAD mismatch, inventory unreadable) is a WARNING here, never a
 # failure -- a stale reference tree must not turn a deploy red.
-SYNC_CHECK="${SCRIPT_DIR}/scripts/sync-agent-repos.sh"
+SYNC_CHECK="${APP_DIR}/scripts/sync-agent-repos.sh"
 AR_SET="${AGENT_REPOS_DIR:-$(env_get AGENT_REPOS_DIR)}"
 if [[ -z "$AR_SET" ]]; then
   : # Reference tree not configured; nothing to check.
@@ -970,7 +1005,7 @@ fi
 # ---------------------------------------------------------------------------
 section "Backups"
 
-BACKUP_CONF="${HOME}/.config/hybrid-ai-backup"
+BACKUP_CONF="$BACKUP_CONF_DIR"
 if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   pass "Backup credentials present"
 
@@ -1005,8 +1040,8 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   fi
 
   # --- How old is the last successful backup? -------------------------------
-  if [[ -f backup.log ]]; then
-    LAST="$(grep 'event=backup_success' backup.log 2>/dev/null | tail -1 | grep -o 'ts=[^ ]*' | cut -d= -f2)"
+  if [[ -f "$BACKUP_LOG" ]]; then
+    LAST="$(grep 'event=backup_success' "$BACKUP_LOG" 2>/dev/null | tail -1 | grep -o 'ts=[^ ]*' | cut -d= -f2)"
     if [[ -n "$LAST" ]]; then
       LAST_EPOCH="$(date -d "$LAST" +%s 2>/dev/null || echo 0)"
       if (( LAST_EPOCH > 0 )); then
@@ -1028,18 +1063,18 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
     # Count failures and incomplete runs SINCE THE LAST successful backup.
     # Counting the whole file made these numbers only ever grow, even after a
     # clean run; a success must reset them. Severity stays warn.
-    SINCE_LAST="$(awk '/event=backup_success/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' backup.log 2>/dev/null || true)"
+    SINCE_LAST="$(awk '/event=backup_success/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$BACKUP_LOG" 2>/dev/null || true)"
     RECENT_FAIL="$(printf '%s' "$SINCE_LAST" | grep -c 'event=backup_failed\|event=check_failed' 2>/dev/null || true)"
     RECENT_INCOMPLETE="$(printf '%s' "$SINCE_LAST" | grep -c 'event=backup_incomplete' 2>/dev/null || true)"
     RECENT_FAIL="${RECENT_FAIL:-0}"
     RECENT_INCOMPLETE="${RECENT_INCOMPLETE:-0}"
     if (( RECENT_FAIL > 0 )); then
       warn "${RECENT_FAIL} backup failure(s) since the last successful backup" \
-           "Review: grep 'event=backup_failed' backup.log | tail -5"
+           "Review: grep 'event=backup_failed' \"\$BACKUP_LOG\" | tail -5"
     fi
     if (( RECENT_INCOMPLETE > 0 )); then
       warn "${RECENT_INCOMPLETE} incomplete backup run(s) since the last successful backup" \
-           "An incomplete run missed durable state. Review: grep 'event=backup_incomplete' backup.log | tail -5"
+           "An incomplete run missed durable state. Review: grep 'event=backup_incomplete' \"\$BACKUP_LOG\" | tail -5"
     fi
   fi
 
@@ -1067,17 +1102,17 @@ fi
 # ---------------------------------------------------------------------------
 section "Data"
 
-for d in webui_data ollama_data; do
+for d in "$HYBRID_AI_WEBUI_DATA_DIR" "$HYBRID_AI_OLLAMA_DATA_DIR"; do
   if [[ -d "$d" ]]; then
     SZ="$(du -sh "$d" 2>/dev/null | cut -f1)"
-    pass "${d} present (${SZ})"
+    pass "$(basename "$d") present (${SZ})"
   else
-    warn "${d} does not exist" "It will be created on the next ./install.sh run."
+    warn "$(basename "$d") does not exist ($d)" "It will be created on the next ./install.sh run."
   fi
 done
 
-if [[ -d webui_data ]] && command -v sqlite3 >/dev/null 2>&1; then
-  DB="webui_data/webui.db"
+if [[ -d "$HYBRID_AI_WEBUI_DATA_DIR" ]] && command -v sqlite3 >/dev/null 2>&1; then
+  DB="$HYBRID_AI_WEBUI_DATA_DIR/webui.db"
   if [[ -f "$DB" ]]; then
     # Read-only integrity check; does not lock out the running application.
     RESULT="$(sqlite3 "file:${DB}?mode=ro" 'PRAGMA quick_check;' 2>/dev/null | head -1)"
@@ -1091,10 +1126,10 @@ if [[ -d webui_data ]] && command -v sqlite3 >/dev/null 2>&1; then
 fi
 
 # Leftover safety copies from a previous restore waste a lot of space.
-LEFTOVER="$(find . -maxdepth 1 \( -name 'webui_data.pre-restore-*' -o -name '.restore-test-*' \) 2>/dev/null | wc -l | tr -d ' ')"
+LEFTOVER="$(find "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR" -maxdepth 1 \( -name 'webui_data.pre-restore-*' -o -name 'hermes_data.pre-restore-*' -o -name '.restore-test-*' \) 2>/dev/null | wc -l | tr -d ' ')"
 if [[ "${LEFTOVER:-0}" -gt 0 ]]; then
   warn "${LEFTOVER} leftover restore director(ies) taking up space" \
-       "Remove when you are confident: rm -rf webui_data.pre-restore-* .restore-test-*"
+       "Remove when you are confident: rm -rf \"${HYBRID_AI_DATA_DIR}\"/*.pre-restore-* \"${HYBRID_AI_WORK_DIR}\"/*.restore-test-*"
 fi
 
 # ---------------------------------------------------------------------------

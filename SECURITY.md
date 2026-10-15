@@ -166,9 +166,17 @@ fail inside the container.
 Two properties keep this safe:
 
 - **`:ro` is enforced by Docker.** The mount is not writable from inside the container.
-- **The clone is never the deployment directory.** `scripts/setup-agent-workspace.sh` refuses
-  a workspace that is, or is inside, the deployment directory, so the read-only mount cannot
-  expose `.env` or the log files.
+- **The clone is never a protected tree.** `scripts/setup-agent-workspace.sh` refuses a
+  workspace that is, is inside, or contains any of `HYBRID_AI_APP_DIR`,
+  `HYBRID_AI_DATA_DIR`, `HYBRID_AI_LOG_DIR`, `HYBRID_AI_WORK_DIR`, the directory the env file
+  lives in, or `BACKUP_CONF_DIR`. The read-only mount therefore cannot expose the env file,
+  the log files, or the backup credentials. `scripts/sync-agent-repos.sh` applies the same
+  guard to `AGENT_REPOS_DIR`, and `backup/backup.sh` / `backup/restore.sh` refuse a
+  `BACKUP_CONF_DIR` inside `HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR` or
+  `HYBRID_AI_WORK_DIR`.
+
+With the default layout every guarded path is the deployment directory, so the guard is the
+same boundary as before; a split layout widens it to each relocated tree.
 
 `doctor.sh` checks that the `/agent-repo` mount exists and is read-only.
 
@@ -180,7 +188,7 @@ later phase.
 | Gap | Detail |
 |---|---|
 | Hermes ports bind all interfaces | `HERMES_PORT` (default `8501`) and `HERMES_API_PORT` (default `8642`) are published on `0.0.0.0`. |
-| Hermes mounts the deployment directory read-write | `./hermes_data`, inside the deployment directory, is writable at `/root/.hermes`. |
+| Hermes mounts the data directory read-write | `${HYBRID_AI_DATA_DIR}/hermes_data` is writable at `/root/.hermes`. With the default layout that directory is inside the deployment directory. |
 | Hermes runs as root | **Fixed in the image**; active on a host once `HYBRID_AI_UID` is set. `hermes/Dockerfile` now creates a dedicated `hermes` group/user and adds `USER ${HYBRID_AI_UID}:${HYBRID_AI_GID}` (default `10001`), and the compose overlay passes the ids through and pins `no-new-privileges`. A host keeps the legacy uid 0 until the account migration sets `HYBRID_AI_UID` in `.env`. Verbatim proof: the `hermes-nonroot-smoke` CI job builds the image as `10001` and runs it there. |
 | OpenHands sandbox ports publish on all interfaces | Sandboxes publish their agent-server port on the host. |
 | Hermes has no Docker socket | Good — listed for contrast: the read-only mount gives Hermes code visibility, not control. |

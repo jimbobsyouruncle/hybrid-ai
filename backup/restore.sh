@@ -48,15 +48,29 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-cd "$REPO_DIR" || exit 1
+# Every host path comes from the ONE shared helper. With no settings, the
+# resolved paths are exactly today's.
+HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/lib" && pwd)"
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
+cd "$HYBRID_AI_APP_DIR" || exit 1
 
-BACKUP_CONF_DIR="${BACKUP_CONF_DIR:-${HOME}/.config/hybrid-ai-backup}"
 R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
 RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
-RESTORE_WORK="${REPO_DIR}/.restore-work"
-BACKUP_LOG="${BACKUP_LOG:-${REPO_DIR}/backup.log}"
+RESTORE_WORK="$HYBRID_AI_RESTORE_WORK_DIR"
+
+# --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
+# Same boundary as backup.sh: the credential directory must not be swept up by
+# a git operation or by the very data this script restores.
+path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
+for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
+  if path_within "${BACKUP_CONF_DIR%/}" "${_tree%/}"; then
+    printf '[ X ] BACKUP_CONF_DIR is inside %s.\n' "$_tree" >&2
+    printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
+    exit 1
+  fi
+done
+unset _tree
 
 # Every container that can touch webui_data or hermes_data, stopped by NAME so
 # overlay services (OpenHands, Hermes) are included and a stale .env cannot
@@ -171,7 +185,7 @@ fi
 # against the recovered databases. It touches nothing live.
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "test" ]]; then
-  TEST_DIR="${REPO_DIR}/.restore-test-${STAMP}"
+  TEST_DIR="${HYBRID_AI_WORK_DIR}/.restore-test-${STAMP}"
   log "Test restore into ${TEST_DIR} (nothing live is touched)..."
   mkdir -p "$TEST_DIR"
   restic restore latest --tag hybrid-ai --target "$TEST_DIR" || die "Test restore failed."
@@ -233,10 +247,10 @@ STAGED_ROOT="$(dirname "$STAGED")"
 # Repo-relative layout (databases/webui_data/... or databases/hermes_data/...)
 # vs legacy (databases/webui.db, i.e. relative to webui_data).
 if [[ -d "${STAGED}/webui_data" || -d "${STAGED}/hermes_data" ]]; then
-  DB_DEST_ROOT="$REPO_DIR"
+  DB_DEST_ROOT="$HYBRID_AI_DATA_DIR"
   LAYOUT="repo-relative"
 else
-  DB_DEST_ROOT="${REPO_DIR}/webui_data"
+  DB_DEST_ROOT="${HYBRID_AI_DATA_DIR}/webui_data"
   LAYOUT="legacy"
 fi
 
@@ -291,13 +305,13 @@ fi
 
 # --- Move existing data aside ----------------------------------------------
 # webui_data is replaced wholesale, so it is simply moved aside.
-if [[ -d "${REPO_DIR}/webui_data" ]]; then
-  SAFETY="${REPO_DIR}/webui_data.pre-restore-${STAMP}"
+if [[ -d "${HYBRID_AI_DATA_DIR}/webui_data" ]]; then
+  SAFETY="${HYBRID_AI_DATA_DIR}/webui_data.pre-restore-${STAMP}"
   log "Preserving current data at $(basename "$SAFETY")"
-  mv "${REPO_DIR}/webui_data" "$SAFETY"
+  mv "${HYBRID_AI_DATA_DIR}/webui_data" "$SAFETY"
   event "pre_restore_snapshot_kept" "path=$(basename "$SAFETY")"
 fi
-mkdir -p "${REPO_DIR}/webui_data"
+mkdir -p "${HYBRID_AI_DATA_DIR}/webui_data"
 
 # hermes_data is ONLY ever merged, never moved wholesale: it holds large,
 # rebuildable excluded directories (tools/, hermes-agent/, ...) that must never
@@ -319,18 +333,18 @@ if [[ -d "${STAGED_ROOT}/files" ]]; then
   if [[ -d "${STAGED_ROOT}/files/webui_data" || -d "${STAGED_ROOT}/files/hermes_data" ]]; then
     # Repo-relative: files/webui_data -> webui_data, files/hermes_data -> hermes_data
     if [[ -d "${STAGED_ROOT}/files/webui_data" ]]; then
-      rsync -a "${STAGED_ROOT}/files/webui_data/" "${REPO_DIR}/webui_data/" || die "Document restore failed."
+      rsync -a "${STAGED_ROOT}/files/webui_data/" "${HYBRID_AI_DATA_DIR}/webui_data/" || die "Document restore failed."
     fi
     if [[ -d "${STAGED_ROOT}/files/hermes_data" ]]; then
-      mkdir -p "${REPO_DIR}/hermes_data"
-      HERMES_BACKUP_DIR="${REPO_DIR}/hermes_data.pre-restore-${STAMP}"
+      mkdir -p "${HYBRID_AI_DATA_DIR}/hermes_data"
+      HERMES_BACKUP_DIR="${HYBRID_AI_DATA_DIR}/hermes_data.pre-restore-${STAMP}"
       log "Preserving overwritten hermes_data files under $(basename "$HERMES_BACKUP_DIR")"
       rsync -a --backup --backup-dir="$HERMES_BACKUP_DIR" \
-        "${STAGED_ROOT}/files/hermes_data/" "${REPO_DIR}/hermes_data/" || die "Hermes state restore failed."
+        "${STAGED_ROOT}/files/hermes_data/" "${HYBRID_AI_DATA_DIR}/hermes_data/" || die "Hermes state restore failed."
     fi
   else
     # Legacy: files/ was relative to webui_data.
-    rsync -a "${STAGED_ROOT}/files/" "${REPO_DIR}/webui_data/" || die "Document restore failed."
+    rsync -a "${STAGED_ROOT}/files/" "${HYBRID_AI_DATA_DIR}/webui_data/" || die "Document restore failed."
   fi
 fi
 
@@ -360,8 +374,8 @@ while IFS= read -r -d '' db; do
   dest="${DB_DEST_ROOT}/${rel}"
   mkdir -p "$(dirname "$dest")"
 
-  if [[ "$DB_DEST_ROOT" == "$REPO_DIR" && "$rel" == hermes_data/* ]]; then
-    [[ -n "$HERMES_BACKUP_DIR" ]] || HERMES_BACKUP_DIR="${REPO_DIR}/hermes_data.pre-restore-${STAMP}"
+  if [[ "$DB_DEST_ROOT" == "$HYBRID_AI_DATA_DIR" && "$rel" == hermes_data/* ]]; then
+    [[ -n "$HERMES_BACKUP_DIR" ]] || HERMES_BACKUP_DIR="${HYBRID_AI_DATA_DIR}/hermes_data.pre-restore-${STAMP}"
 
     # Preserve the live database's main file (if it is there). If the copy
     # FAILS (e.g. a full disk) we must NOT overwrite the live database: that
@@ -430,7 +444,7 @@ else
 fi
 
 # Caddy needs this directory before the proxy starts again.
-mkdir -p "${REPO_DIR}/webui_data/caddy"
+mkdir -p "${HYBRID_AI_DATA_DIR}/webui_data/caddy"
 
 # --- Home-directory state (~/.hermes, ~/.openhands) -------------------------
 # Offered, not forced: on an existing Pi the live copy is usually newer.
@@ -450,19 +464,19 @@ restore_home_dir() {
   rsync -a "${src}/" "${dest}/" || { warn "Could not restore ${label}."; return 0; }
   ok "Restored ${label} to ${dest}"
 }
-restore_home_dir "${STAGED_ROOT}/hermes"    "${HOME}/.hermes"    "Hermes state"
-restore_home_dir "${STAGED_ROOT}/openhands" "${HOME}/.openhands" "OpenHands state"
-if [[ -d "${HOME}/.openhands" ]]; then chmod 700 "${HOME}/.openhands" 2>/dev/null || true; fi
+restore_home_dir "${STAGED_ROOT}/hermes"    "${HYBRID_AI_HERMES_HOME_DIR}"    "Hermes state"
+restore_home_dir "${STAGED_ROOT}/openhands" "${OPENHANDS_STATE_DIR}" "OpenHands state"
+if [[ -d "${OPENHANDS_STATE_DIR}" ]]; then chmod 700 "${OPENHANDS_STATE_DIR}" 2>/dev/null || true; fi
 
 # --- .env ------------------------------------------------------------------
 if [[ -f "${STAGED_ROOT}/env/.env" ]]; then
-  if [[ -f "${REPO_DIR}/.env" ]]; then
-    cp -a "${STAGED_ROOT}/env/.env" "${REPO_DIR}/.env.restored-${STAMP}"
-    chmod 600 "${REPO_DIR}/.env.restored-${STAMP}"
+  if [[ -f "${HYBRID_AI_ENV_FILE}" ]]; then
+    cp -a "${STAGED_ROOT}/env/.env" "${HYBRID_AI_ENV_FILE}.restored-${STAMP}"
+    chmod 600 "${HYBRID_AI_ENV_FILE}.restored-${STAMP}"
     ok "Kept the existing .env. Backup copy saved as .env.restored-${STAMP} (0600)."
   else
-    cp -a "${STAGED_ROOT}/env/.env" "${REPO_DIR}/.env"
-    chmod 600 "${REPO_DIR}/.env"
+    cp -a "${STAGED_ROOT}/env/.env" "${HYBRID_AI_ENV_FILE}"
+    chmod 600 "${HYBRID_AI_ENV_FILE}"
     ok "Restored .env (0600). Your RunPod settings are back."
   fi
 fi
@@ -476,8 +490,8 @@ if [[ -d "$HOST_SRC" ]]; then
   log "Restoring host state..."
 
   if [[ -f "${HOST_SRC}/docker-compose.override.yml" ]]; then
-    if [[ ! -f "${REPO_DIR}/docker-compose.override.yml" ]]; then
-      cp -a "${HOST_SRC}/docker-compose.override.yml" "${REPO_DIR}/"
+    if [[ ! -f "${HYBRID_AI_APP_DIR}/docker-compose.override.yml" ]]; then
+      cp -a "${HOST_SRC}/docker-compose.override.yml" "${HYBRID_AI_APP_DIR}/"
       ok "Restored docker-compose.override.yml"
     else
       warn "Existing docker-compose.override.yml kept; backup copy is in ${HOST_SRC}"
@@ -487,14 +501,14 @@ if [[ -d "$HOST_SRC" ]]; then
   # Only offered when the backed-up copy differs from what is in git.
   for f in status/Caddyfile status/app.py; do
     [[ -f "${HOST_SRC}/${f}" ]] || continue
-    if [[ ! -f "${REPO_DIR}/${f}" ]]; then
-      mkdir -p "$(dirname "${REPO_DIR}/${f}")"
-      cp -a "${HOST_SRC}/${f}" "${REPO_DIR}/${f}"
+    if [[ ! -f "${HYBRID_AI_APP_DIR}/${f}" ]]; then
+      mkdir -p "$(dirname "${HYBRID_AI_APP_DIR}/${f}")"
+      cp -a "${HOST_SRC}/${f}" "${HYBRID_AI_APP_DIR}/${f}"
       ok "Restored ${f}"
-    elif ! cmp -s "${HOST_SRC}/${f}" "${REPO_DIR}/${f}"; then
+    elif ! cmp -s "${HOST_SRC}/${f}" "${HYBRID_AI_APP_DIR}/${f}"; then
       warn "${f} differs from the version in git."
       if confirm_yes "    Restore the backed-up copy over it?"; then
-        cp -a "${HOST_SRC}/${f}" "${REPO_DIR}/${f}"
+        cp -a "${HOST_SRC}/${f}" "${HYBRID_AI_APP_DIR}/${f}"
         ok "Restored ${f}"
       else
         printf '    Kept the git version. Backup copy: %s\n' "${HOST_SRC}/${f}"
@@ -528,8 +542,9 @@ if [[ -d "$HOST_SRC" ]]; then
         # Existing container first; compose fallback covers a brand-new Pi.
         # Ollama is defined in the main file, so that file alone is enough.
         docker start ollama >/dev/null 2>&1 || \
-          docker compose -p hybrid-ai --env-file "${REPO_DIR}/.env" \
-            -f "${REPO_DIR}/docker-compose.yml" up -d ollama >/dev/null 2>&1 || true
+          docker compose -p hybrid-ai --env-file "${HYBRID_AI_ENV_FILE}" \
+            --project-directory "${HYBRID_AI_APP_DIR}" \
+            -f "${HYBRID_AI_APP_DIR}/docker-compose.yml" up -d ollama >/dev/null 2>&1 || true
         sleep 10
       fi
       PULLED=0; FAILED=0
@@ -564,8 +579,8 @@ fi
 # Restored files must be owned by the invoking user, or containers fail with
 # permission errors that look like data corruption.
 for d in webui_data hermes_data; do
-  if [[ -d "${REPO_DIR}/${d}" ]]; then
-    chown -R "$(id -u):$(id -g)" "${REPO_DIR}/${d}" 2>/dev/null || true
+  if [[ -d "${HYBRID_AI_DATA_DIR}/${d}" ]]; then
+    chown -R "$(id -u):$(id -g)" "${HYBRID_AI_DATA_DIR}/${d}" 2>/dev/null || true
   fi
 done
 
