@@ -229,7 +229,7 @@ ok "No credential files in the agent workspace"
 printf '\n'
 ok "Agent workspace ready"
 printf '    Workspace : %s\n' "$WORKSPACE_REAL"
-printf '    Deployment: %s  (NOT visible to the agent)\n' "$DEPLOY_REAL"
+printf '    Deployment: %s  (NOT visible to the agent)\n' "${DEPLOY_REAL:-/opt/hybrid-ai}"
 printf '\n'
 printf '    The agent branches and commits in the workspace. Review its work,\n'
 printf '    then pull into the deployment directory yourself.\n'
