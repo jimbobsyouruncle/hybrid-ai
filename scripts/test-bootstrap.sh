@@ -1164,12 +1164,15 @@ fi
 
 # Byte-identical files (AC15), when origin/main is available.
 if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  # Keep this list equal to the out-of-scope paths in the job brief: the agent
-  # path fix, the bootstrap re-run fix and the Hermes download retry must not
-  # touch any of them.
+  # Keep this list equal to the out-of-scope paths in the job brief. The card
+  # changes only backup/README.md, backup/backup.sh and backup/restore.sh, so
+  # the rest of backup/ is listed explicitly here rather than as a whole tree.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
     docker-compose.yml hermes/docker-compose.hermes.yml \
-    openhands/docker-compose.openhands.yml doctor.sh status/Caddyfile backup/ \
+    openhands/docker-compose.openhands.yml doctor.sh status/Caddyfile \
+    backup/backup-containers.sh backup/system \
+    backup/hybrid-ai-backup.service backup/hybrid-ai-backup.timer \
+    backup/hybrid-ai-check.service backup/hybrid-ai-check.timer \
     .github/workflows/deploy.yml scripts/deploy-instance.sh \
     deploy/hybrid-ai-deploy@.service deploy/50-hybrid-ai-deploy.rules 2>/dev/null)"
   check "the out-of-scope files are byte-identical to origin/main" "" "$diff_out"

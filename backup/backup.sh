@@ -145,36 +145,19 @@ cd "$HYBRID_AI_APP_DIR" || exit 1
 # careless 'tar czf' of the project folder can ever sweep them up. When the
 # capture/upload split runs the upload unit, systemd hands the same two files
 # over via $CREDENTIALS_DIRECTORY (LoadCredential=); that takes precedence.
+# Otherwise they come from HYBRID_AI_BACKUP_CRED_DIR, the ONE setting that
+# resolves to the credstore in system mode and to BACKUP_CONF_DIR in user mode.
 if [[ -n "${CREDENTIALS_DIRECTORY:-}" ]]; then
   R2_ENV_FILE="${CREDENTIALS_DIRECTORY}/r2.env"
   RESTIC_PW_FILE="${CREDENTIALS_DIRECTORY}/repo-password"
 else
-  R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
-  RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
+  R2_ENV_FILE="${HYBRID_AI_BACKUP_CRED_DIR}/r2.env"
+  RESTIC_PW_FILE="${HYBRID_AI_BACKUP_CRED_DIR}/repo-password"
 fi
 export RESTIC_CACHE_DIR
 
 # Where consistent snapshots are staged before upload. Wiped afterwards.
 STAGING_DIR="$HYBRID_AI_BACKUP_STAGING_DIR"
-
-# --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
-# Backup credentials are the keys to EVERY backup. Kept inside the deploy
-# tree, a data tree, or the staging work tree, they would be swept into a git
-# operation, a diagnostics bundle, or a backup of the tree itself. A --dry-run
-# writes nothing, but the read of a misplaced credential is what we refuse.
-# When credentials come from $CREDENTIALS_DIRECTORY systemd chose the path, so
-# this check does not apply (the directory is a private tmpfs systemd owns).
-path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
-if [[ -z "${CREDENTIALS_DIRECTORY:-}" ]]; then
-  for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
-    if path_within "${BACKUP_CONF_DIR%/}" "${_tree%/}"; then
-      printf '[ X ] BACKUP_CONF_DIR is inside %s.\n' "$_tree" >&2
-      printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
-      exit 1
-    fi
-  done
-  unset _tree
-fi
 
 KEEP_DAILY="${KEEP_DAILY:-7}"
 KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
@@ -216,6 +199,28 @@ for arg in "$@"; do
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+
+# --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
+# Backup credentials are the keys to EVERY backup. Kept inside the deploy tree,
+# a data tree, or the staging work tree, they would be swept into a git
+# operation, a diagnostics bundle, or a backup of the tree itself. A --dry-run
+# writes nothing, but the read of a misplaced credential is what we refuse.
+#
+# It runs only on the condition under which STEP 1 reads a credential file:
+# CREDENTIALS_DIRECTORY unset (a systemd-provided private tmpfs is exempt) AND
+# the phase is not --stage-only (a capture holds no credential and reads none).
+# It follows argument parsing so it can see the phase.
+if [[ -z "${CREDENTIALS_DIRECTORY:-}" && "$RUN_PHASE" != "stage" ]]; then
+  path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
+  for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
+    if path_within "${HYBRID_AI_BACKUP_CRED_DIR%/}" "${_tree%/}"; then
+      printf '[ X ] HYBRID_AI_BACKUP_CRED_DIR is inside %s.\n' "$_tree" >&2
+      printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
+      exit 1
+    fi
+  done
+  unset _tree
+fi
 
 # --- Output helpers --------------------------------------------------------
 if [[ -t 1 ]]; then
