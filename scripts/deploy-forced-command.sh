@@ -30,11 +30,19 @@ set -Eeuo pipefail
 #     hybrid-ai-deploy (see scripts/deploy-instance.sh), so this account can
 #     read the log without any journal access.
 #
-#   NOT ACTIVE UNTIL MIGRATION:
-#     Nothing here runs until the owner's migration. Card F installs the
-#     pieces on the host and an authorized_keys line; a later card switches
-#     .github/workflows/deploy.yml over to this entrypoint. Until then this
-#     file is inert.
+#   THIS IS THE LIVE CONTROL PLANE DEPLOY ENTRYPOINT:
+#     The cutover has landed. .github/workflows/deploy.yml drives this forced
+#     command, which is the live Control Plane deploy entrypoint; the host
+#     pieces are installed by scripts/bootstrap.sh and one authorized_keys line.
+#     It stays a single fixed entrypoint: exactly `deploy <40-lowercase-hex>`,
+#     the system manager only, never a user manager.
+#
+#   LAYOUT-FILE-ONLY ENVIRONMENT:
+#     This account is allowed to read ONLY the 0644 LAYOUT file, and it needs
+#     only layout paths. HYBRID_AI_STACK_ENV_FILE is pinned at the layout file
+#     UNCONDITIONALLY, so an inherited value can never point it back at the
+#     root-only 0600 secrets file. Below, export HYBRID_AI_STACK_ENV_FILE is
+#     given no :- fallback and never consults the incoming environment.
 #
 # USAGE:
 #   Invoked by sshd as the forced command, with SSH_ORIGINAL_COMMAND set.
@@ -51,6 +59,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # is what makes this script and the unit agree on $HYBRID_AI_LOG_DIR (and so on
 # the run-log path). The helper only ever PARSES the file, never sources it.
 export HYBRID_AI_ENV_FILE="${HYBRID_AI_ENV_FILE:-/etc/hybrid-ai/hybrid-ai.env}"
+# This account reads only the 0644 layout file. It needs only layout paths
+# ($HYBRID_AI_LOG_DIR), never a secret. Pin STACK_ENV_FILE at the layout file
+# UNCONDITIONALLY (no :- fallback) so an inherited value cannot point it back
+# at the root-only secrets file.
+export HYBRID_AI_STACK_ENV_FILE="$HYBRID_AI_ENV_FILE"
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
 

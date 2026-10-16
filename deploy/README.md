@@ -94,13 +94,17 @@ The `hybrid-ai-deploy` account holds:
   unit writes each run's log to `$HYBRID_AI_LOG_DIR/deploy/<sha>.log` with mode
   `0640` and group `hybrid-ai-deploy`, so the account reads the log for its own
   run without any journal access.
-- **Read access to the layout env file.** The forced command resolves the host
-  paths the same way the unit does, by reading
+- **Read access to the layout env file, and only that file.** The forced command
+  resolves the host paths the same way the unit does, by reading
   `/etc/hybrid-ai/hybrid-ai.env` (parsed, never sourced). That file is mode
   `0644`, owned by root, so the `hybrid-ai-deploy` account AND the
   `hybrid-ai-backup` account both read it. It holds paths and names only. (An
   earlier draft used mode `0640` group `hybrid-ai-deploy`; that would have
-  locked the backup account out, so it is `0644`.)
+  locked the backup account out, so it is `0644`.) The forced command pins
+  `HYBRID_AI_STACK_ENV_FILE` at this layout file unconditionally, so it never
+  reads the `0600` secrets file `/etc/hybrid-ai/stack.env` and an inherited
+  value cannot point it back at that file. The account is never granted read
+  access to `stack.env`, by mode, group or ACL.
 - **One polkit action, one verb, one unit shape.** The polkit rule returns
   `polkit.Result.YES` only for `subject.user == "hybrid-ai-deploy"`,
   `action.id == "org.freedesktop.systemd1.manage-units"`, `verb == "start"`, and

@@ -395,6 +395,7 @@
 ## scripts/test-deploy-forced-command.sh
 - ok()
 - bad()
+- skip()
 - has_line()
 - hasnt_regex()
 - run()
