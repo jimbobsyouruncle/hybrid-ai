@@ -665,7 +665,11 @@ run_migration() {
     legacy_repos="${DATA_DIR}/agent-repos"
   fi
   preflight_move "$legacy_ws"            "$AGENT_WS"
-  preflight_move "$legacy_repos"         "$AGENT_REPOS"
+  if [[ -e "$legacy_repos" && -d "$AGENT_REPOS" && -n "$(ls -A "$AGENT_REPOS" 2>/dev/null)" ]]; then
+  warn "${AGENT_REPOS} is already populated; preserving it and leaving legacy repo tree ${legacy_repos} untouched."
+  legacy_repos=""
+  fi
+  preflight_move "$legacy_repos" "$AGENT_REPOS"
   preflight_move "$legacy_state"         "$OPENHANDS_STATE"
   local cred_src="${login_home}/.config/hybrid-ai-backup"
   preflight_move "$legacy_env"                       "$STACK_ENV"
@@ -682,7 +686,7 @@ run_migration() {
   move_into "${FROM}/webui_data"  "${DATA_DIR}/webui_data" "move-dir"
   move_into "${FROM}/ollama_data" "${DATA_DIR}/ollama_data" "move-dir"
   move_into "$legacy_ws"    "$AGENT_WS"       "move-dir"
-  move_into "$legacy_repos" "$AGENT_REPOS"    "move-dir"
+  [[ -n "$legacy_repos" ]] && move_into "$legacy_repos" "$AGENT_REPOS" "move-dir"
   move_into "$legacy_state" "$OPENHANDS_STATE" "move-dir"
 
   # (e) The legacy .env becomes the stack env file, byte-identical, 0600 root.
