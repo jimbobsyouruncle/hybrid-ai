@@ -150,8 +150,18 @@ Warnings (`exit 1`) never fail the deploy. If you want to silence one, fix the u
 ## Headless deploy: refusal exit codes
 
 The headless deploy path (`deploy/`, `scripts/deploy-*.sh`, the
-**not active until migration** system unit) reports every refusal with its own
-exit code. Read the code to know which control fired.
+**active after bootstrap** system unit) reports every refusal with its own exit
+code. Read the code to know which control fired.
+
+The client the deploy job runs first, `scripts/deploy-trigger.sh`:
+
+| Exit | Meaning | Fix |
+|---|---|---|
+| `0` | Remote exit 0: the unit started and finished successfully; the job is green | — |
+| `1` | The remote command failed. Remote exit 2 means the forced command refused the request (see below); remote exit 3 means the unit failed; any other code is an SSH-level failure | Read the `::error::` line above the exit |
+| `2` | Bad usage: the argument is missing, or is not a 40-lowercase-hex commit; nothing was sent | Pass exactly one full 40-hex commit |
+| `3` | A local prerequisite failed: a required env value is missing, or the host key could not be fetched | Check the step `env:` block and that the Pi answers `ssh-keyscan` |
+| `4` | The Pi's host-key fingerprint did not match `PI_SSH_HOST_KEY`; ssh was never invoked | See "Headless deploy: host-key mismatch" below |
 
 The forced-command SSH entrypoint, `scripts/deploy-forced-command.sh`:
 
@@ -179,6 +189,54 @@ Every run's output is written to `$HYBRID_AI_LOG_DIR/deploy/<sha>.log` (mode
 `0640`, group `hybrid-ai-deploy`). The deploy account reads its own run log there
 without any systemd-journal access. Full detail is in
 [`deploy/README.md`](../deploy/README.md).
+
+### Headless deploy: the forced command refused the request
+
+Symptom: the deploy job fails with `::error::forced command refused the request`.
+
+`scripts/deploy-forced-command.sh` accepts EXACTLY one string:
+`deploy <40-lowercase-hex>`. It refused what it received. The usual causes:
+
+- The sha was not 40 lowercase hex characters (a short sha, or uppercase).
+- The client sent extra arguments, or a second command.
+- Something other than `scripts/deploy-trigger.sh` connected and asked for a
+  different command.
+
+The client sends exactly the two-token string. If this fires, check that the
+deploy step still calls `scripts/deploy-trigger.sh "$GITHUB_SHA"` and that the
+client was not modified to add arguments. Nothing ran on the host.
+
+### Headless deploy: the deploy unit failed
+
+Symptom: the deploy job fails with `::error::deploy unit failed`.
+
+The forced command started `hybrid-ai-deploy@<sha>.service`, but the unit did not
+finish successfully. The job log above the error carries the unit name
+(`unit:`), its `result:` and the run log. The run log names the failing control
+in `scripts/deploy-instance.sh` or `scripts/deploy-remote.sh` (an ancestor
+refusal, a HEAD mismatch, a doctor.sh failure). Fix the reported problem, then
+push again.
+
+### Headless deploy: host-key mismatch
+
+Symptom: the deploy job fails with
+`::error::deploy-trigger.sh: the Pi's host-key fingerprint does not match PI_SSH_HOST_KEY; refusing to connect.`
+
+`scripts/deploy-trigger.sh` fetched the Pi's ed25519 host key and its SHA256
+fingerprint did not equal the `PI_SSH_HOST_KEY` secret. No authentication was
+attempted and nothing ran on the host. This is the control working: it stops
+anything occupying the Pi's address from impersonating it and harvesting the
+deploy key. The usual causes:
+
+- The Pi was reinstalled or reimaged, so its host key changed. Get the new
+  fingerprint with `ssh-keyscan -t ed25519 <pi-ip> | ssh-keygen -lf -` and update
+  the `PI_SSH_HOST_KEY` secret.
+- The secret holds a raw known_hosts line instead of the `SHA256:...` field.
+  Replace it with the `SHA256:...` value only.
+- The runner reached the wrong host. Check `PI_TAILSCALE_IP`.
+
+Never "fix" this by disabling host-key checking. There is no
+`StrictHostKeyChecking=no` and no `accept-new` path by design.
 
 ---
 

@@ -96,6 +96,7 @@
 - scripts/deploy-forced-command.sh
 - scripts/deploy-instance.sh
 - scripts/deploy-remote.sh
+- scripts/deploy-trigger.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
 - scripts/test-backup-containers.sh - FILE: scripts/test-backup-containers.sh
@@ -108,6 +109,7 @@
 - scripts/test-deploy-forced-command.sh
 - scripts/test-deploy-instance.sh
 - scripts/test-deploy-remote.sh
+- scripts/test-deploy-trigger.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
 - scripts/test-install-health.sh - FILE: scripts/test-install-health.sh

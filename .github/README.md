@@ -2,7 +2,7 @@
 
 | File | Purpose |
 |---|---|
-| `workflows/deploy.yml` | On a push to `main`, reuses `validate.yml` and then updates the Pi over the Tailscale network. |
+| `workflows/deploy.yml` | On a push to `main`, reuses `validate.yml` and then triggers the deploy unit on the Pi over the Tailscale network. |
 | `workflows/validate.yml` | Reusable source validation (`workflow_call` only). Called by `sast-checks.yml` on every pull request and by `deploy.yml` on every push to `main`. Holds no secrets. |
 | `workflows/agent-context.yml` | Checks the checked-in `REPO_MAP.md` and `CODE_INDEX.md` are fresh on every pull request. Read-only; never commits. |
 | `workflows/sast-checks.yml` | The single pull-request gate: ShellCheck, Semgrep, source validation, CodeQL and the Hermes non-root smoke test, ending in the `Security & SAST gate`. |
@@ -12,7 +12,7 @@
 
 ## What this does
 
-Push a change to `main`, and GitHub rents a temporary computer that validates your code, joins your private network, SSHes into your Raspberry Pi, pulls the new version, and re-runs `install.sh`. If the site does not come back up, the build fails loudly with the relevant logs attached.
+Push a change to `main`, and GitHub rents a temporary computer that validates your code, joins your private network, and asks your Raspberry Pi (over SSH, as the dedicated deploy account) to run the exactly-one-thing deploy unit. The unit pulls the new version and re-runs `install.sh`. If the site does not come back up, the build fails loudly with the relevant logs attached.
 
 The interesting part is how it reaches your Pi. **Your Pi has no public IP address, no open firewall ports, and no port forwarding configured.** The GitHub runner temporarily joins your Tailscale network as a member tagged `tag:ci`, connects over the encrypted mesh, does its work, and disappears when the job ends.
 
@@ -57,20 +57,26 @@ Only runs if `validate` passed.
 
 1. Joins the tailnet as an ephemeral node tagged `tag:ci`
 2. Confirms the Pi is reachable, retrying for ~50 seconds while mesh routes establish
-3. SSHes in and resets the Pi to the exact `github.sha` CI validated (not `origin/main`), after refusing any revision that is not an ancestor of `origin/main`
-4. Execs `./scripts/deploy-remote.sh <sha>`, which first re-asserts `HEAD` equals `<sha>` and then runs `./install.sh --non-interactive` itself
-5. Polls the health endpoint for up to two minutes
-6. Runs `./doctor.sh --no-cloud` as a gate: warnings stay green, failures turn the deploy red
-7. On failure, dumps the last 50 log lines into the workflow output so you can diagnose it without SSHing in yourself
+3. Connects as the dedicated `hybrid-ai-deploy` account and sends exactly one command string, `deploy <sha>`, through `scripts/deploy-trigger.sh`
+4. The forced command on the Pi starts the system unit `hybrid-ai-deploy@<sha>.service`, which runs `scripts/deploy-instance.sh <sha>`: it refuses any revision that is not an ancestor of `origin/main`, resets to the exact `github.sha` CI validated, and asserts `HEAD` equals it
+5. `scripts/deploy-instance.sh` hands off to `scripts/deploy-remote.sh <sha>`, which re-asserts `HEAD` and then runs `./install.sh --non-interactive`
+6. `scripts/deploy-remote.sh` polls the health endpoint for up to two minutes and gates on `./doctor.sh --no-cloud`: warnings stay green, failures turn the deploy red
+7. The forced command reads back the unit result and prints the run log into the workflow output, so you can diagnose a failure without SSHing in yourself
 
 **Why the revision is pinned, not `origin/main`.** `validate` tests the commit that
 triggered the run (`GITHUB_SHA`). If the deploy reset to `origin/main`, and `main`
 moved after validation, the Pi would run an unvalidated revision. A manual
 **Run workflow** from a non-main branch would make the validated and deployed
-trees differ outright. Resetting to the exact SHA, and asserting `HEAD` matches
-it twice on the Pi — once in the workflow's remote script right after the reset,
-and once as `scripts/deploy-remote.sh`'s first action — closes that gap. The
-ancestor check keeps the target on the deployed line of history.
+trees differ outright. The client sends the exact SHA, the host refuses any
+revision that is not an ancestor of `origin/main`, and the tree is reset to that
+SHA with a `HEAD` assert — twice, once in `scripts/deploy-instance.sh` and once
+as `scripts/deploy-remote.sh`'s first action. The ancestor check keeps the target
+on the deployed line of history.
+
+**Why the runner no longer runs a shell script on the Pi.** The deploy account's
+SSH key is pinned to ONE forced command. It cannot run git, a shell, or a second
+command. All the host-side work lives in the tracked scripts the unit runs. This
+is what removes the admin-account login from the deploy path.
 
 ---
 
@@ -132,22 +138,27 @@ The workflow holds `permissions: contents: read`, adds no write permission, and 
 
 ---
 
-## Headless deploy (not active until migration)
+## Headless deploy (active after bootstrap)
 
-`deploy/` and `scripts/deploy-*.sh` hold the in-repo pieces of a **headless
+`deploy/` and `scripts/deploy-*.sh` hold the pieces of a **headless
 deploy**: a dedicated, unprivileged `hybrid-ai-deploy` account with a
 forced-command SSH entrypoint that can do exactly one thing — start the system
 unit `hybrid-ai-deploy@<sha>.service` for a 40-character commit.
 
-**Nothing in this path is active yet, and `deploy.yml` is unchanged.** The
-migration is two later owner steps: **card F**, `scripts/bootstrap.sh`, installs
-the unit, the polkit rule, the scripts and the `authorized_keys` line on the host
-and creates the account as a system account with `/bin/sh` and a locked password
-(sshd runs the forced command through the login shell); a later card switches
-`deploy.yml` to call the forced command instead of the current
-`appleboy/ssh-action` step. See [`../deploy/README.md`](../deploy/README.md) for
-the `authorized_keys` line, the install locations, the refusal exit codes and the
-least-privilege statement.
+**This path is now the deploy.** `deploy.yml` connects as the dedicated
+`hybrid-ai-deploy` account and sends exactly one command string, `deploy <sha>`,
+through the tracked client `scripts/deploy-trigger.sh`. It no longer logs in as
+the admin account and no longer runs a shell script on the Pi. The ancestor
+check, the reset to that exact commit and the `HEAD` assert all run inside
+`scripts/deploy-instance.sh`, which the system unit runs as root.
+
+It becomes fully active when the owner runs **card F**, `scripts/bootstrap.sh`,
+which installs the unit, the polkit rule, the scripts and the `authorized_keys`
+line on the host and creates the account as a system account with `/bin/sh` and
+a locked password (sshd runs the forced command through the login shell). Once
+that bootstrap has run, every push to `main` takes this path. See
+[`../deploy/README.md`](../deploy/README.md) for the `authorized_keys` line, the
+install locations, the refusal exit codes and the least-privilege statement.
 
 The account holds no login beyond the forced command (its password is locked), no
 sudo, and is in neither the `docker` nor the `systemd-journal` group. The polkit
@@ -169,9 +180,9 @@ rule grants only
 | Login sessions survive | `WEBUI_SECRET_KEY` is reused, not regenerated, so cookies stay valid |
 | Containers are never destroyed with volumes | The workflow runs `up -d`, never `down -v` |
 | Failure is visible | A health-check failure fails the build with logs attached, and a `doctor.sh` exit 2 fails the build after the health report prints |
-| Validated revision is what runs | The deploy resets to the exact `github.sha` CI validated, and both the workflow and `scripts/deploy-remote.sh` assert `HEAD` equals it |
+| Validated revision is what runs | The deploy asks the host to run exactly the `github.sha` CI validated. `scripts/deploy-instance.sh` refuses unless it is an ancestor of `origin/main`, resets to it and asserts `HEAD` equals it, and `scripts/deploy-remote.sh` re-asserts `HEAD` before reprovisioning |
 
-The workflow also prints disk usage of both data folders before and after, so every run leaves an audit trail showing nothing shrank.
+The deploy prints disk usage of both data folders after the run, so every deploy leaves an audit trail showing nothing shrank.
 
 ---
 
@@ -185,17 +196,16 @@ On your own machine — **not** on the Pi:
 ssh-keygen -t ed25519 -C "github-actions-hybrid-ai" -f ~/.ssh/hybrid_ai_deploy
 ```
 
-Copy the **public** half to the Pi:
+Install the **public** half on the Pi through the bootstrap, which writes it to
+the dedicated `hybrid-ai-deploy` account and pins it to the forced command:
 
 ```bash
-ssh-copy-id -i ~/.ssh/hybrid_ai_deploy.pub pi@<your-pi-tailscale-ip>
+sudo ./scripts/bootstrap.sh --deploy-pubkey ~/.ssh/hybrid_ai_deploy.pub
 ```
 
-Verify it works before going further:
-
-```bash
-ssh -i ~/.ssh/hybrid_ai_deploy pi@<your-pi-tailscale-ip> "echo connected"
-```
+Do not copy it to the admin account with `ssh-copy-id`: the deploy no longer logs
+in as the admin account. See [`../deploy/README.md`](../deploy/README.md) for the
+`authorized_keys` line and the install locations.
 
 ### 2. Create a Tailscale OAuth client
 
@@ -236,12 +246,17 @@ GitHub repo → **Settings** → **Secrets and variables** → **Actions** → *
 | `TS_OAUTH_CLIENT_ID` | OAuth client ID | Step 2 |
 | `TS_OAUTH_SECRET` | OAuth client secret | Step 2 |
 | `PI_TAILSCALE_IP` | `100.x.x.x` | `tailscale ip -4` on the Pi |
-| `PI_SSH_USER` | Usually `pi` | Your Pi's username |
-| `PI_SSH_KEY` | **Private** key contents | `cat ~/.ssh/hybrid_ai_deploy` — include the BEGIN and END lines |
-| `PI_REPO_PATH` | e.g. `/home/pi/hybrid-ai` | `pwd` in the repo folder on the Pi |
-| `PI_SSH_HOST_KEY` | The Pi's SSH host key | `ssh-keyscan -t ed25519 $(tailscale ip -4) \| ssh-keygen -lf -` on the Pi — use the SHA256:... field, not the raw known_hosts line |
+| `PI_SSH_KEY` | **Private** key contents | `cat ~/.ssh/hybrid_ai_deploy` — include the BEGIN and END lines. The matching public key is pinned to the forced command on the `hybrid-ai-deploy` account |
+| `PI_SSH_HOST_KEY` | The Pi's SSH host key fingerprint | `ssh-keyscan -t ed25519 $(tailscale ip -4) \| ssh-keygen -lf -` on the Pi — use the SHA256:... field, not the raw known_hosts line |
+| `PI_SSH_USER` | **Unused** | May be deleted by the owner |
+| `PI_REPO_PATH` | **Unused** | May be deleted by the owner |
 
-> `PI_SSH_KEY` takes the **private** key. That is correct and expected — GitHub needs it to authenticate. It is stored encrypted and masked in logs. This is also why the key should be dedicated to this purpose and authorised only on the Pi, never a key you use elsewhere.
+> `PI_SSH_KEY` takes the **private** key. That is correct and expected — GitHub needs it to authenticate. It is stored encrypted and masked in logs. This is also why the key should be dedicated to this purpose and authorised only on the Pi, never a key you use elsewhere. It is now the key for the dedicated `hybrid-ai-deploy` account, and its `authorized_keys` line pins it to the forced command.
+
+> `PI_SSH_USER` and `PI_REPO_PATH` are unused. The deploy no longer logs in as
+> the admin account (the login name is the literal `hybrid-ai-deploy`), and the
+> remote path is resolved on the host by `scripts/deploy-instance.sh`. The owner
+> may delete both secrets.
 
 ### 5. Optional — require approval before deploying
 
