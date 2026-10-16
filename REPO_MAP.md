@@ -110,6 +110,7 @@
 - scripts/test-deploy-remote.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
+- scripts/test-install-health.sh - FILE: scripts/test-install-health.sh
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 ## scripts/lib

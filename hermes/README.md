@@ -37,6 +37,10 @@ This is deliberate:
   throwaway home.
 - The build downloads the agent installer to a file and checks its sha256 **before** running
   it. A mismatch fails the build. The installer is never piped from the network into a shell.
+  The download retries on a transient failure (`curl -fsSL --retry 5 --retry-all-errors
+  --retry-delay 5`), so an HTTP 429 or 5xx from the raw host does not fail the image build,
+  `install.sh`, or the bootstrap. The sha256 check still runs on every attempt, before the
+  installer executes.
 - The WebUI is cloned, checked out at its pin, and asserted with `git rev-parse`; a mismatch
   fails the build. `.git` is then removed, so neither tree carries a checkout fingerprint.
 - `/opt/hermes-agent` and `/app` are both root-owned and outside every mount, so they are

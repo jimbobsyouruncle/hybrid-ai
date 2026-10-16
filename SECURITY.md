@@ -414,7 +414,9 @@ Everything below is root-owned unless noted.
 | Path | Mode | Holds |
 |---|---|---|
 | `/opt/hybrid-ai` | 0755 | A clone of the public https remote at `origin/main`, fetched with hooks disabled and credential helpers cleared |
-| `/var/lib/hybrid-ai/` | 0755 | Durable data: `hermes_data`, `webui_data`, `ollama_data`, `agent-workspace`, `agent-repos`, `openhands`, `hermes-home` |
+| `/var/lib/hybrid-ai/` | 0755 | Durable data: `hermes_data`, `webui_data`, `ollama_data`, `openhands`, `hermes-home` |
+| `/var/lib/hybrid-ai-agent` | 0755 | The OpenHands agent workspace (a clone). A SIBLING of the data dir, owned by `hybrid-ai`. Never inside `/var/lib/hybrid-ai` |
+| `/var/lib/hybrid-ai-repos` | 0755 | The read-only agent repo reference tree. A SIBLING of the data dir, owned by `hybrid-ai`. Never inside `/var/lib/hybrid-ai` |
 | `/var/log/hybrid-ai` | 0755 | `install.log`, `backup.log`, migration manifests |
 | `/etc/hybrid-ai` | 0755 | The layout env file and the stack env file |
 | `/etc/hybrid-ai/hybrid-ai.env` | **0644** | The LAYOUT file: names and paths only, no secret. Readable by `hybrid-ai-backup` and `hybrid-ai-deploy` |

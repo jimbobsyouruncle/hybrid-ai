@@ -42,7 +42,7 @@ COPY patches/0001-kanban-prompt-body-chars.patch /tmp/hermes-patch/0001-kanban-p
 # pinned interpreter; seal the tree; delete every throwaway path. The image's
 # /root/.hermes is never created (the throwaway HOME guarantees it).
 RUN set -eu; \
-    curl -fsSL -o /tmp/hermes-install.sh \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/hermes-install.sh \
       "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_COMMIT}/scripts/install.sh" \
  && echo "${HERMES_INSTALL_SHA256}  /tmp/hermes-install.sh" | sha256sum -c - \
  && HOME=/tmp/hermes-home \
