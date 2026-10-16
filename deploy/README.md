@@ -7,15 +7,19 @@ that can do exactly one thing: start the systemd unit
 The account cannot run git, read the journal, use sudo, or touch any other unit.
 
 Nothing here is active on its own. Today's deploy path
-(`.github/workflows/deploy.yml`) is unchanged.
+(`.github/workflows/deploy.yml`) already calls this entrypoint through
+`scripts/deploy-trigger.sh`; it becomes fully active once the owner runs the
+bootstrap below.
 
-> ## Not active until the owner's migration
+> ## Active after bootstrap
 >
-> Every file in this directory is inert until an owner migration runs. **Card F**
-> installs the pieces on the host and adds the `authorized_keys` line; a later
-> card switches `.github/workflows/deploy.yml` over to this entrypoint. Until
-> both happen, this is documentation and source only — nothing is created on any
-> host, no account exists, no unit runs, no polkit rule is loaded.
+> The host pieces here are inert until an owner migration runs. **Card F**,
+> `scripts/bootstrap.sh`, installs the pieces on the host and adds the
+> `authorized_keys` line, which makes the deploy pass live. `deploy.yml` has
+> already been switched over: it connects as `hybrid-ai-deploy` and sends exactly
+> `deploy <sha>`. Until the bootstrap runs, no account, unit or polkit rule
+> exists on the host, so that connection fails closed at SSH auth with nothing
+> run.
 
 ---
 
@@ -115,7 +119,10 @@ after the reset.
 
 ## How a deploy flows
 
-1. The client runs `ssh hybrid-ai-deploy@<host> deploy <40-hex>`.
+1. The GitHub deploy job runs `scripts/deploy-trigger.sh "$GITHUB_SHA"`. That
+   client validates the sha, fetches the Pi's host key with `ssh-keyscan`,
+   compares its SHA256 fingerprint with `PI_SSH_HOST_KEY`, then connects as
+   `hybrid-ai-deploy` and sends exactly `deploy <40-hex>`.
 2. sshd runs `deploy-forced-command.sh` with `SSH_ORIGINAL_COMMAND="deploy <40-hex>"`.
 3. The script refuses anything but that exact form (exit 2), then asks the
    **system** manager to start `hybrid-ai-deploy@<sha>.service`.
@@ -132,6 +139,17 @@ after the reset.
 ---
 
 ## Exit codes
+
+`scripts/deploy-trigger.sh` (the client the deploy job runs; it maps the remote
+command's exit code to the job's exit code):
+
+| Code | Meaning |
+|---|---|
+| `0` | Remote exit 0: the unit started and finished successfully; the job is green |
+| `1` | Remote exit 2 (forced command refused the request), remote exit 3 (the unit failed), or any other non-zero remote code. Each prints an `::error::` line |
+| `2` | Bad usage: the argument is missing, or is not a 40-lowercase-hex commit; nothing was sent |
+| `3` | A local prerequisite failed (missing env, or the host key could not be fetched) |
+| `4` | The Pi's host-key fingerprint did not match `PI_SSH_HOST_KEY`; ssh was never invoked |
 
 `scripts/deploy-forced-command.sh`:
 
@@ -171,9 +189,13 @@ running stack. A failed deploy stays failed and is diagnosed from its log.
 
 ## Tests
 
-`scripts/test-deploy-forced-command.sh` and `scripts/test-deploy-instance.sh`
-cover both halves offline — `systemctl`, `git` and `deploy-remote.sh` are stubbed
-on `PATH`, so no Docker, no network and no root are needed. They also check the
+`scripts/test-deploy-trigger.sh`, `scripts/test-deploy-forced-command.sh` and
+`scripts/test-deploy-instance.sh` cover all three halves offline — `ssh`,
+`ssh-keyscan`, `ssh-keygen`, `systemctl`, `git` and `deploy-remote.sh` are stubbed
+on `PATH`, so no Docker, no network and no root are needed. The trigger test
+proves the exact command string and login name, the malformed-sha refusals, the
+host-key mismatch refusal, the exit-code mapping, key-file removal on success and
+failure, and that no weakened host-key option appears. The other two check the
 unit has no `Restart=` line and that the polkit rule contains the exact user,
 action, verb and unit regex. `scripts/test-bootstrap.sh` covers the host
 bootstrap that installs the account, the unit, the polkit rule and the SSH key

@@ -436,8 +436,10 @@ account). In migration mode, after `install.sh` succeeds and `doctor.sh` exits
 code stops it), it removes the deploy key line — matching the exact key blob —
 from the login account's `authorized_keys`, and disables and stops the login
 account's `hybrid-ai-backup.timer` and `hybrid-ai-check.timer` (leaving the unit
-files in place). The old `deploy.yml` path then fails closed at SSH auth, with
-nothing run on the host.
+files in place). With the deploy key removed from the login account, the old
+workflow path — root SSH as the login account — fails closed at SSH auth, with
+nothing run on the host. The current `deploy.yml` no longer uses that path: it
+connects as `hybrid-ai-deploy`, whose key line is the forced command.
 
 ### The login account leaves the `docker` group
 
@@ -463,13 +465,18 @@ only, mode 0600.
 
 ---
 
-## Headless deploy security (not active until migration)
+## Headless deploy security (active after bootstrap)
 
-The in-repo pieces of a headless deploy live under `deploy/` and
-`scripts/deploy-*.sh`. They are **inert until an owner migration**: card F installs
-them on the host and adds the `authorized_keys` line, and a later card switches
-`.github/workflows/deploy.yml` over to them. Today's deploy path is unchanged.
-See [`deploy/README.md`](deploy/README.md).
+The pieces of a headless deploy live under `deploy/` and `scripts/deploy-*.sh`.
+`.github/workflows/deploy.yml` already uses them: it connects as the dedicated
+`hybrid-ai-deploy` account and sends exactly one command string through
+`scripts/deploy-trigger.sh`. They are fully active once card F installs them on
+the host and adds the `authorized_keys` line; until then the connection fails
+closed at SSH auth. See [`deploy/README.md`](deploy/README.md).
+
+The deploy no longer logs in as the admin account, and it no longer sends a shell
+script to the Pi. The only remote command is the two-token string
+`deploy <sha>`.
 
 A dedicated account, `hybrid-ai-deploy`, gets a forced-command SSH entrypoint
 that can do exactly one thing: start the system unit
@@ -477,6 +484,9 @@ that can do exactly one thing: start the system unit
 
 | Control | Mechanism |
 |---|---|
+| One accepted remote command | The client `scripts/deploy-trigger.sh` sends EXACTLY `deploy <40-lowercase-hex>`. It refuses a missing or malformed sha (exit 2) and sends nothing. It never sends a shell script, a heredoc, or an extra argument |
+| Host key verified before authenticating | `scripts/deploy-trigger.sh` fetches the Pi's ed25519 host key with `ssh-keyscan`, computes its SHA256 fingerprint with `ssh-keygen -lf -`, and connects only if it equals `PI_SSH_HOST_KEY`. A mismatch exits non-zero BEFORE any authentication. `StrictHostKeyChecking=yes`, `IdentitiesOnly=yes`, `BatchMode=yes`, a `ConnectTimeout`, a `ServerAliveInterval` and a scan-only `UserKnownHostsFile` are set. `StrictHostKeyChecking=no` and `accept-new` are never used |
+| Private key never lingers or leaks | `scripts/deploy-trigger.sh` writes the key mode `0600` under `$RUNNER_TEMP`, never enables xtrace, and removes it on every exit path. The workflow adds an `if: always()` cleanup step as a second line of defence. Error paths print no key material |
 | Forced command, one accepted verb | `scripts/deploy-forced-command.sh` accepts EXACTLY `deploy <40-lowercase-hex>`. Any other command, extra argument, shell metacharacter or empty command is refused with exit 2 and nothing is run |
 | One polkit action, one verb, one unit shape | `deploy/50-hybrid-ai-deploy.rules` returns `polkit.Result.YES` only for `subject.user == "hybrid-ai-deploy"`, `action.id == "org.freedesktop.systemd1.manage-units"`, `verb == "start"`, and a unit matching `^hybrid-ai-deploy@[0-9a-f]{40}\.service$`. Everything else is the default deny: no stop, restart, enable/disable, daemon-reload, or other unit |
 | No login shell beyond the forced command | sshd runs the forced command for every connection. `restrict,command=...` disables PTY, X11, agent and port forwarding |

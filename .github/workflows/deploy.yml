@@ -7,13 +7,24 @@
 #
 #     1. Checks your code for syntax errors and accidentally committed secrets.
 #     2. Joins your private Tailscale network as a temporary member.
-#     3. Connects to your Raspberry Pi over SSH using that private network.
-#     4. Pulls the new code and re-runs install.sh.
-#     5. Confirms the site came back up, and fails loudly if it did not.
+#     3. Confirms the Pi answers on that private network.
+#     4. Connects to the Pi as the dedicated `hybrid-ai-deploy` account and
+#        sends exactly one command: `deploy <sha>`.
+#     5. The forced command on the Pi starts the system unit
+#        hybrid-ai-deploy@<sha>.service, which pulls the validated revision,
+#        reprovisions the host and gates on doctor.sh.
+#     6. Fails loudly if the unit did not finish successfully.
 #
 #   The clever part is step 2: your Pi never needs a public IP address, an open
 #   firewall port, or port forwarding on your home router. GitHub's runner
 #   joins your private network for the ~2 minutes it needs, then disappears.
+#
+#   WHY THE RUNNER NO LONGER RUNS A SHELL SCRIPT ON THE PI:
+#     The runner used to log in as the admin account and run git and install.sh
+#     over SSH. That is gone. The deploy account's SSH key is pinned to ONE
+#     forced command, so the connection can only start the deploy unit. The
+#     ancestor check, the reset to the exact SHA and the HEAD assert all happen
+#     inside scripts/deploy-instance.sh, which the unit runs as root.
 #
 # DATA SAFETY:
 #   This workflow never runs "docker compose down -v", never touches the
@@ -27,14 +38,21 @@
 #     TS_OAUTH_CLIENT_ID   Tailscale OAuth client ID  (scope: auth_keys, tag:ci)
 #     TS_OAUTH_SECRET      Tailscale OAuth client secret
 #     PI_TAILSCALE_IP      100.x.x.x address of your Pi
-#     PI_SSH_USER          SSH username on the Pi, e.g. pi
-#     PI_SSH_KEY           private SSH key authorised on the Pi
-#     PI_REPO_PATH         absolute path to the checkout, e.g. /home/pi/hybrid-ai
+#     PI_SSH_KEY           private SSH key authorised on the Pi as the
+#                          `hybrid-ai-deploy` account (the key line is pinned
+#                          to the forced command, scripts/deploy-forced-command.sh)
 #     PI_SSH_HOST_KEY      SHA256 fingerprint of the Pi's SSH host key:
 #                            ssh-keyscan -t ed25519 <pi-ip> | ssh-keygen -lf -
-#                          Use the SHA256:... field. A raw known_hosts line is
-#                          NOT accepted by the action and silently disables
-#                          host verification.
+#                          Use the SHA256:... field. scripts/deploy-trigger.sh
+#                          compares the scanned fingerprint against this value
+#                          and refuses to connect on any mismatch.
+#
+#     PI_SSH_USER          UNUSED. The deploy no longer logs in as the admin
+#                          account; the login name is the literal
+#                          `hybrid-ai-deploy`. May be deleted by the owner.
+#     PI_REPO_PATH         UNUSED. The remote path is resolved on the host by
+#                          scripts/deploy-instance.sh via HYBRID_AI_APP_DIR.
+#                          May be deleted by the owner.
 #
 #   You must also add an ACL rule in Tailscale allowing tag:ci to reach the Pi
 #   on port 22. Full walkthrough in .github/README.md.
@@ -82,6 +100,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: production  # lets you require manual approval in repo settings
     steps:
+      - name: Checkout
+        # The runner now calls a tracked script (scripts/deploy-trigger.sh),
+        # so it needs the repository present. Credentials are not persisted:
+        # the deploy authenticates with the dedicated deploy key, not with the
+        # GitHub token, and nothing here pushes.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Connect to tailnet
         # Joins the runner to your private network as an ephemeral node tagged
         # "tag:ci". It is removed automatically when the job ends.
@@ -109,57 +136,33 @@ jobs:
           echo "::error::Pi at ${{ secrets.PI_TAILSCALE_IP }} is unreachable over the tailnet."
           exit 1
 
-      - name: Pull and reprovision
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        with:
-          host: ${{ secrets.PI_TAILSCALE_IP }}
-          username: ${{ secrets.PI_SSH_USER }}
-          key: ${{ secrets.PI_SSH_KEY }}
-          port: 22
-          # SECURITY: verify the Pi's SSH host key instead of blindly trusting
-          # whatever answers. Without this, anything able to occupy that
-          # address could impersonate the Pi and harvest the deploy key.
-          # Populate PI_SSH_HOST_KEY with the output of:
-          #   ssh-keyscan -t ed25519 <pi-tailscale-ip>
-          fingerprint: ${{ secrets.PI_SSH_HOST_KEY }}
-          command_timeout: 20m
-          script_stop: true       # abort on the first failing command
-          script: |
-            set -Eeuo pipefail
-            cd "${{ secrets.PI_REPO_PATH }}"
+      - name: Trigger deploy
+        # Connects as the dedicated `hybrid-ai-deploy` account and sends
+        # EXACTLY one command string: `deploy <sha>`. The account's key is
+        # pinned to the forced command, so this is all the connection can do.
+        #
+        # Secrets arrive only through this env: block; none is interpolated
+        # into the run: body. GITHUB_SHA is the runner-provided commit CI
+        # validated. scripts/deploy-trigger.sh validates the sha, verifies the
+        # Pi's host key fingerprint BEFORE authenticating, writes the private
+        # key mode 0600 under $RUNNER_TEMP, and removes it on every exit path.
+        timeout-minutes: 20   # matches the old appleboy "command_timeout: 20m"
+        env:
+          PI_HOST: ${{ secrets.PI_TAILSCALE_IP }}
+          PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}
+          PI_SSH_HOST_KEY: ${{ secrets.PI_SSH_HOST_KEY }}
+        run: |
+          ./scripts/deploy-trigger.sh "$GITHUB_SHA"
 
-            echo "==> Pre-deploy state"
-            du -sh webui_data ollama_data 2>/dev/null || true
-
-            echo "==> Fetching origin"
-            git fetch origin --prune
-
-            # Deploy the EXACT revision CI validated. If main moved after
-            # validation, or a manual run targets a non-main branch, resetting
-            # to origin/main would deploy an unvalidated tree.
-            SHA="${{ github.sha }}"
-            if ! git merge-base --is-ancestor "$SHA" origin/main; then
-              echo "::error::Validated revision $SHA is not an ancestor of origin/main. Refusing to deploy."
-              exit 1
-            fi
-
-            # "reset --hard" makes the Pi match the repo exactly. Safe here
-            # because .gitignore keeps all your real data untracked.
-            git reset --hard "$SHA"
-
-            if [ "$(git rev-parse HEAD)" != "$SHA" ]; then
-              echo "::error::After reset, HEAD is $(git rev-parse HEAD) but expected $SHA."
-              exit 1
-            fi
-
-            # install.sh chmods the rest itself, but it cannot run if it is
-            # not executable to begin with.
-            chmod +x scripts/deploy-remote.sh
-
-            # Hand off to the tracked remote-deploy script, which re-asserts
-            # HEAD == $SHA as its first action, reprovisions, and gates on
-            # doctor.sh (exit 2 now fails the deploy).
-            exec ./scripts/deploy-remote.sh "$SHA"
+      - name: Clean up temporary SSH key material
+        # Second line of defence. deploy-trigger.sh removes the temporary key
+        # and the scanned known_hosts file itself, but this runs on EVERY
+        # exit path (even a cancelled or failed step) so nothing lingers on
+        # the runner. It prints no secret value.
+        if: always()
+        run: |
+          rm -f -- "${RUNNER_TEMP}/hybrid-ai-deploy-key" \
+                   "${RUNNER_TEMP}/hybrid-ai-deploy-known_hosts"
 
       - name: Summary
         # "if: always()" means this runs even when the deploy failed, so you

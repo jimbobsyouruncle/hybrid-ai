@@ -278,6 +278,9 @@
 ## scripts/deploy-remote.sh
 - (no symbols)
 
+## scripts/deploy-trigger.sh
+- (no symbols)
+
 ## scripts/lib/hybrid-ai-env.sh
 - _hybrid_ai_canon()
 - _hybrid_ai_expand_tilde()
@@ -416,6 +419,15 @@
 - line_number()
 - repo_sha()
 - run_deploy()
+
+## scripts/test-deploy-trigger.sh
+- ok()
+- bad()
+- has_line()
+- hasnt_regex()
+- run()
+- ssh_called()
+- key_left()
 
 ## scripts/test-hermes-nonroot-preflight.sh
 - run_check()
