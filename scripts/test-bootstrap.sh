@@ -881,24 +881,80 @@ else
   ok "the user units were NOT disabled after the install.sh failure"
 fi
 
-# doctor.sh failure: exit 8, and the cut-off still does not run.
+# doctor.sh reported failures: exit 8, and the cut-off must not run at all.
+# A migration root primed with the deploy key line, so the cut-off has a key
+# line to remove if it wrongly runs.
+setup_doctor_migration_root() {
+  local r="$1" legacy="$1/legacy"
+  mkdir -p "$legacy/openhands" "$legacy/hermes"
+  : > "$legacy/.env"; : > "$legacy/docker-compose.yml"
+  : > "$legacy/openhands/docker-compose.openhands.yml"
+  : > "$legacy/hermes/docker-compose.hermes.yml"
+  mkdir -p "$r/home/pi/.ssh"
+  printf '%s\n' "restrict,command=\"/opt/hybrid-ai/scripts/deploy-forced-command.sh\" $(cat "$PUBKEY")" \
+    > "$r/home/pi/.ssh/authorized_keys"
+}
+assert_no_cutoff() { # label
+  if grep -q 'gpasswd-docker' "$EVENTS"; then
+    bad "the docker group was changed despite $1"
+  else
+    ok "the docker group was NOT changed after $1"
+  fi
+  check "the deploy key line was NOT removed ($1)" "1" \
+    "$(grep -cF "$KEY_BLOB" "$R/home/pi/.ssh/authorized_keys")"
+  if grep -q 'systemctl --user disable' "$EVENTS"; then
+    bad "the user units were disabled despite $1"
+  else
+    ok "the user units were NOT disabled after $1"
+  fi
+}
+
 R="$(new_root)"
-LEGACY="$R/legacy"; mkdir -p "$LEGACY/openhands" "$LEGACY/hermes"
-: > "$LEGACY/.env"; : > "$LEGACY/docker-compose.yml"
-: > "$LEGACY/openhands/docker-compose.openhands.yml"
-: > "$LEGACY/hermes/docker-compose.hermes.yml"
-mkdir -p "$R/home/pi/.ssh"
-printf '%s\n' "restrict,command=\"/opt/hybrid-ai/scripts/deploy-forced-command.sh\" $(cat "$PUBKEY")" \
-  > "$R/home/pi/.ssh/authorized_keys"
+setup_doctor_migration_root "$R"
+rc=0
+EXTRA_ENV=(DOCTOR_RC=2)
+run_bootstrap "$R" "$WORK/r_doctor.log" --deploy-pubkey "$PUBKEY" --from "$R/legacy" --login-user pi || rc=$?
+check "a doctor.sh failure (exit 2) exits 8" "8" "$rc"
+assert_no_cutoff "the doctor.sh failure (exit 2)"
+
+# Any other non-zero doctor.sh code is a failure too: exit 8, no cut-off.
+R="$(new_root)"
+setup_doctor_migration_root "$R"
+rc=0
+EXTRA_ENV=(DOCTOR_RC=3)
+run_bootstrap "$R" "$WORK/r_doctor3.log" --deploy-pubkey "$PUBKEY" --from "$R/legacy" --login-user pi || rc=$?
+check "an unexpected doctor.sh code (exit 3) exits 8" "8" "$rc"
+assert_no_cutoff "the unexpected doctor.sh code (exit 3)"
+
+# doctor.sh warnings only (exit 1) in migration mode: exit 0, warning printed,
+# and the cut-off runs exactly as on a healthy exit.
+R="$(new_root)"
+setup_doctor_migration_root "$R"
 rc=0
 EXTRA_ENV=(DOCTOR_RC=1)
-run_bootstrap "$R" "$WORK/r_doctor.log" --deploy-pubkey "$PUBKEY" --from "$LEGACY" --login-user pi || rc=$?
-check "a doctor.sh failure exits 8" "8" "$rc"
+run_bootstrap "$R" "$WORK/r_doctorwarn.log" --deploy-pubkey "$PUBKEY" --from "$R/legacy" --login-user pi || rc=$?
+check "a doctor.sh warning (exit 1) in migration mode exits 0" "0" "$rc"
+have "the doctor warning is reported and the run continues" "$(cat "$WORK/r_doctorwarn.log")" \
+  "doctor.sh reported warnings"
 if grep -q 'gpasswd-docker' "$EVENTS"; then
-  bad "the docker group was changed despite the doctor.sh failure"
+  ok "the docker group was changed after a doctor.sh warning"
 else
-  ok "the docker group was NOT changed after the doctor.sh failure"
+  bad "the docker group was NOT changed after a doctor.sh warning"
 fi
+check "the deploy key line was removed after a doctor.sh warning" "0" \
+  "$(grep -cF "$KEY_BLOB" "$R/home/pi/.ssh/authorized_keys")"
+if grep -q 'systemctl --user disable' "$EVENTS"; then
+  ok "the user units were disabled after a doctor.sh warning"
+else
+  bad "the user units were NOT disabled after a doctor.sh warning"
+fi
+
+# doctor.sh warnings only (exit 1) in fresh-install mode: exit 0, no cut-off.
+R="$(new_root)"
+rc=0
+EXTRA_ENV=(DOCTOR_RC=1)
+run_bootstrap "$R" "$WORK/r_doctorwarn_fresh.log" --deploy-pubkey "$PUBKEY" --login-user pi || rc=$?
+check "a doctor.sh warning (exit 1) in fresh-install mode exits 0" "0" "$rc"
 
 # 1 -- a usage error.
 R="$(new_root)"
