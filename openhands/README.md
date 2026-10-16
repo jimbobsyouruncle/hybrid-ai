@@ -58,6 +58,14 @@ file is found in the clone. On a bootstrapped host the layout file
 (`/etc/hybrid-ai/hybrid-ai.env`) and the stack file (`/etc/hybrid-ai/stack.env`) are two
 different files, and BOTH of their directories are guarded.
 
+On a bootstrapped host the workspace and the repo tree are SIBLINGS of the data dir, never
+children of it: `scripts/bootstrap.sh` renders `OPENHANDS_WORKSPACE=/var/lib/hybrid-ai-agent`
+and `AGENT_REPOS_DIR=/var/lib/hybrid-ai-repos`, both owned by the `hybrid-ai` account. This
+keeps them outside `HYBRID_AI_DATA_DIR` (`/var/lib/hybrid-ai`), which the guards above refuse.
+A re-run against a tree an earlier, wrong bootstrap left under `/var/lib/hybrid-ai/agent-*`
+moves that child up to its sibling with a same-device rename; if both copies hold data it
+refuses with exit `6` before any move.
+
 On every run it also refreshes the existing clone, so the workspace-root copy of
 `openhands/AGENTS.md` stays current without a manual pull. The refresh fetches, then
 fast-forwards only when the clone is clean and on its default branch. If the tree is dirty, on

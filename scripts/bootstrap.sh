@@ -115,8 +115,13 @@ CRED_DIR="$(host_path /etc/credstore/hybrid-ai-backup)"
 DATA_DIR="$(host_path /var/lib/hybrid-ai)"
 WORK_DIR="${DATA_DIR}/work"
 LOG_DIR="$(host_path /var/log/hybrid-ai)"
-AGENT_WS="${DATA_DIR}/agent-workspace"
-AGENT_REPOS="${DATA_DIR}/agent-repos"
+# The agent workspace and the repo reference tree are SIBLINGS of the data dir,
+# never children of it. setup-agent-workspace.sh and sync-agent-repos.sh both
+# refuse a path inside HYBRID_AI_DATA_DIR (it would sit one traversal away from
+# the stack env file and the backup credentials), so the bootstrap must render
+# these two paths outside it.
+AGENT_WS="$(host_path /var/lib/hybrid-ai-agent)"
+AGENT_REPOS="$(host_path /var/lib/hybrid-ai-repos)"
 OPENHANDS_STATE="${DATA_DIR}/openhands"
 HERMES_HOME="${DATA_DIR}/hermes-home"
 HERMES_DATA="${DATA_DIR}/hermes_data"
@@ -379,8 +384,10 @@ make_dir 0700 root:root "$CRED_DIR"
 make_dir 0755 root:root "$DATA_DIR"
 make_dir 0755 root:root "$WORK_DIR"
 make_dir 0755 root:root "$LOG_DIR"
-make_dir 0755 root:root "$AGENT_WS"
-make_dir 0755 root:root "$AGENT_REPOS"
+# The agent workspace and repo tree belong to the stack account: the OpenHands
+# sandbox and the Hermes mount both read them.
+make_dir 0755 "${STACK_ACCOUNT}:${STACK_ACCOUNT}" "$AGENT_WS"
+make_dir 0755 "${STACK_ACCOUNT}:${STACK_ACCOUNT}" "$AGENT_REPOS"
 make_dir 0755 root:root "$OPENHANDS_STATE"
 # Empty, owned by the stack account: it is that account's per-user Hermes home.
 make_dir 0700 "${STACK_ACCOUNT}:${STACK_ACCOUNT}" "$HERMES_HOME"
@@ -605,14 +612,31 @@ run_migration() {
   login_home="$(host_path "$login_home")"
 
 
-  # (a) Stop the stack with the LEGACY env. down, never -v.
+  # (a) Stop the stack. `down`, never -v.
+  # The env file is the LEGACY .env on a first run. A completed migration moved
+  # that file to the stack env file, so a re-run must stop the stack with
+  # whichever env file is readable: the legacy one if present, else the resolved
+  # stack env file. When neither is readable the stop is skipped with a warning
+  # ONLY if no `hybrid-ai` compose container is running; otherwise it refuses.
   if [[ -f "${FROM}/docker-compose.yml" ]]; then
-    log "Stopping the running stack (down, never -v)..."
-    docker compose -p hybrid-ai --env-file "$legacy_env" --project-directory "$FROM" \
-      -f "${FROM}/docker-compose.yml" \
-      -f "${FROM}/openhands/docker-compose.openhands.yml" \
-      -f "${FROM}/hermes/docker-compose.hermes.yml" down \
-      || die 1 "could not stop the stack; refusing to migrate while it runs"
+    local stop_env="$legacy_env"
+    [[ -r "$stop_env" ]] || stop_env="$STACK_ENV"
+    if [[ -r "$stop_env" ]]; then
+      log "Stopping the running stack (down, never -v)..."
+      docker compose -p hybrid-ai --env-file "$stop_env" --project-directory "$FROM" \
+        -f "${FROM}/docker-compose.yml" \
+        -f "${FROM}/openhands/docker-compose.openhands.yml" \
+        -f "${FROM}/hermes/docker-compose.hermes.yml" down \
+        || die 1 "could not stop the stack; refusing to migrate while it runs"
+    else
+      local running
+      running="$(docker ps -q --filter 'label=com.docker.compose.project=hybrid-ai' 2>/dev/null || true)"
+      if [[ -z "$running" ]]; then
+        warn "No readable env file ('${legacy_env}' or '${STACK_ENV}'); no hybrid-ai container is running, so the stop step is skipped."
+      else
+        die 1 "could not stop the stack; refusing to migrate while it runs"
+      fi
+    fi
   else
     warn "No docker-compose.yml under ${FROM}; skipped the stop step."
   fi
@@ -629,6 +653,17 @@ run_migration() {
   preflight_move "${FROM}/hermes_data"   "${HERMES_DATA}"
   preflight_move "${FROM}/webui_data"    "${DATA_DIR}/webui_data"
   preflight_move "${FROM}/ollama_data"   "${DATA_DIR}/ollama_data"
+  # Repair an earlier run that moved the agent trees to the OLD child paths
+  # ("${DATA_DIR}/agent-*") before the layout was corrected to the siblings.
+  # When the legacy source is gone but the child copy is present, the child IS
+  # the source: the same preflight then refuses (exit 6) if the sibling already
+  # holds data, and move_into renames it there when the sibling is absent/empty.
+  if [[ ! -e "$legacy_ws" && -e "${DATA_DIR}/agent-workspace" ]]; then
+    legacy_ws="${DATA_DIR}/agent-workspace"
+  fi
+  if [[ ! -e "$legacy_repos" && -e "${DATA_DIR}/agent-repos" ]]; then
+    legacy_repos="${DATA_DIR}/agent-repos"
+  fi
   preflight_move "$legacy_ws"            "$AGENT_WS"
   preflight_move "$legacy_repos"         "$AGENT_REPOS"
   preflight_move "$legacy_state"         "$OPENHANDS_STATE"

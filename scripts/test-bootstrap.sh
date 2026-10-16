@@ -353,8 +353,10 @@ LAYOUT="$R1/etc/hybrid-ai/hybrid-ai.env"
 check "layout file mode is 0644" "644" "$(stat -c '%a' "$LAYOUT" 2>/dev/null)"
 check "app dir cloned" "yes" "$([[ -d "$R1/opt/hybrid-ai/.git" ]] && echo yes || echo no)"
 check "data dir" "yes" "$([[ -d "$R1/var/lib/hybrid-ai" ]] && echo yes || echo no)"
-check "data subdir agent-workspace" "yes" "$([[ -d "$R1/var/lib/hybrid-ai/agent-workspace" ]] && echo yes)"
-check "data subdir agent-repos" "yes" "$([[ -d "$R1/var/lib/hybrid-ai/agent-repos" ]] && echo yes)"
+check "agent workspace is a SIBLING of the data dir" "yes" "$([[ -d "$R1/var/lib/hybrid-ai-agent" ]] && echo yes)"
+check "agent repos is a SIBLING of the data dir" "yes" "$([[ -d "$R1/var/lib/hybrid-ai-repos" ]] && echo yes)"
+check "no agent-workspace child under the data dir" "no" "$([[ -e "$R1/var/lib/hybrid-ai/agent-workspace" ]] && echo yes || echo no)"
+check "no agent-repos child under the data dir" "no" "$([[ -e "$R1/var/lib/hybrid-ai/agent-repos" ]] && echo yes || echo no)"
 check "data subdir openhands" "yes" "$([[ -d "$R1/var/lib/hybrid-ai/openhands" ]] && echo yes)"
 check "log dir" "yes" "$([[ -d "$R1/var/log/hybrid-ai" ]] && echo yes)"
 check "etc dir mode" "755" "$(stat -c '%a' "$R1/etc/hybrid-ai" 2>/dev/null)"
@@ -387,8 +389,8 @@ for needle in \
   "HYBRID_AI_DATA_DIR=$R1/var/lib/hybrid-ai" \
   "HYBRID_AI_LOG_DIR=$R1/var/log/hybrid-ai" \
   "HYBRID_AI_WORK_DIR=$R1/var/lib/hybrid-ai/work" \
-  "OPENHANDS_WORKSPACE=$R1/var/lib/hybrid-ai/agent-workspace" \
-  "AGENT_REPOS_DIR=$R1/var/lib/hybrid-ai/agent-repos" \
+  "OPENHANDS_WORKSPACE=$R1/var/lib/hybrid-ai-agent" \
+  "AGENT_REPOS_DIR=$R1/var/lib/hybrid-ai-repos" \
   "OPENHANDS_STATE_DIR=$R1/var/lib/hybrid-ai/openhands" \
   "RESTIC_CACHE_DIR=$R1/var/cache/hybrid-ai-backup" \
   "HYBRID_AI_HERMES_HOME_DIR=$R1/var/lib/hybrid-ai/hermes-home" \
@@ -493,8 +495,8 @@ check "hermes_data inode preserved" "$inode_hermes" "$(stat -c '%i' "$R2/var/lib
 check "the legacy hermes_data is gone (moved, not copied)" "no" "$([[ -e "$LEGACY/hermes_data" ]] && echo yes || echo no)"
 
 # The relocated trees landed where the redirect points.
-check "agent workspace file moved" "yes" "$([[ -f "$R2/var/lib/hybrid-ai/agent-workspace/KEY" ]] && echo yes || echo no)"
-check "agent workspace inode preserved" "$inode_ws" "$(stat -c '%i' "$R2/var/lib/hybrid-ai/agent-workspace/KEY" 2>/dev/null)"
+check "agent workspace file moved to the sibling" "yes" "$([[ -f "$R2/var/lib/hybrid-ai-agent/KEY" ]] && echo yes || echo no)"
+check "agent workspace inode preserved" "$inode_ws" "$(stat -c '%i' "$R2/var/lib/hybrid-ai-agent/KEY" 2>/dev/null)"
 
 # The legacy .env became the stack env file, byte-identical, 0600.
 check "stack env mode 0600" "600" "$(stat -c '%a' "$R2/etc/hybrid-ai/stack.env" 2>/dev/null)"
@@ -576,6 +578,133 @@ fi
 # this only proves the move itself was faithful.
 check "the moved stack file is still byte-identical to the legacy .env" "yes" \
   "$(cmp -s "$R2/etc/hybrid-ai/stack.env" "$LEGACY_ENV_COPY" && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+echo
+echo "== a second --from run after a completed migration reaches install.sh (D6) =="
+# The first run MOVED the legacy .env to the stack env file. A second --from run
+# must stop the stack with the resolved STACK env file, not the now-missing
+# legacy .env. The docker stub fails on a missing --env-file path, exactly as
+# real compose does, so a stale path fails the run.
+cat > "$STUBS/docker" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf 'docker %s\n' "$*" >> "$EVENTS"
+# Real compose refuses a --env-file path that does not exist.
+args=("$@"); i=0
+while (( i < ${#args[@]} )); do
+  if [[ "${args[i]}" == "--env-file" ]]; then
+    i=$(( i + 1 ))
+    if [[ ! -e "${args[i]}" ]]; then
+      printf 'docker: --env-file %s does not exist\n' "${args[i]}" >&2
+      exit 1
+    fi
+  fi
+  i=$(( i + 1 ))
+done
+exit 0
+EOF
+chmod +x "$STUBS/docker"
+R6="$(new_root)"
+LEGACY6="$R6/legacy"; mkdir -p "$LEGACY6/openhands" "$LEGACY6/hermes"
+printf '# legacy env\n' > "$LEGACY6/.env"
+chmod 600 "$LEGACY6/.env"
+: > "$LEGACY6/docker-compose.yml"
+: > "$LEGACY6/openhands/docker-compose.openhands.yml"
+: > "$LEGACY6/hermes/docker-compose.hermes.yml"
+mkdir -p "$R6/home/pi/.ssh"
+printf '%s\n' "restrict,command=\"/opt/hybrid-ai/scripts/deploy-forced-command.sh\" $(cat "$PUBKEY")" \
+  > "$R6/home/pi/.ssh/authorized_keys"
+# Run 1 completes the migration and MOVES the legacy .env away.
+rc=0
+run_bootstrap "$R6" "$WORK/rerun-from-1.log" --deploy-pubkey "$PUBKEY" --from "$LEGACY6" --login-user pi || rc=$?
+check "the first --from run exits 0" "0" "$rc"
+check "the legacy .env was moved away by the first run" "no" \
+  "$([[ -e "$LEGACY6/.env" ]] && echo yes || echo no)"
+# Run 2 must reach the install.sh hand-off with the STACK env file.
+rc=0
+run_bootstrap "$R6" "$WORK/rerun-from-2.log" --deploy-pubkey "$PUBKEY" --from "$LEGACY6" --login-user pi || rc=$?
+check "a second --from run exits 0" "0" "$rc"
+if (( rc != 0 )); then sed 's/^/      /' "$WORK/rerun-from-2.log" >&2; fi
+have "the re-run stopped the stack with the stack env file" "$(cat "$EVENTS")" \
+  "docker compose -p hybrid-ai --env-file $R6/etc/hybrid-ai/stack.env"
+have "the re-run reached the install.sh hand-off" "$(cat "$EVENTS")" "install.sh HYBRID_AI_ENV_FILE="
+if grep -q 'could not stop the stack' "$WORK/rerun-from-2.log"; then
+  bad "the second --from run died at the stop step"
+else
+  ok "the second --from run did not die at the stop step"
+fi
+# Restore the real docker stub for the remaining cases.
+# shellcheck disable=SC2016  # $* must expand inside the generated stub, not here
+printf '#!/usr/bin/env bash\nprintf "docker %%s\\n" "$*" >> "$EVENTS"\nexit 0\n' > "$STUBS/docker"
+chmod +x "$STUBS/docker"
+
+# ---------------------------------------------------------------------------
+echo
+echo "== D8 repair: a re-run relocates the wrong child agent dirs =="
+# An earlier bad run may have moved the agent trees to ${DATA_DIR}/agent-*.
+# A re-run must rename them to the siblings when the sibling is absent, and
+# refuse (exit 6, before any move) when both copies hold data.
+R8="$(new_root)"
+mkdir -p "$R8/var/lib/hybrid-ai/agent-workspace" "$R8/var/lib/hybrid-ai/agent-repos"
+printf 'ws\n' > "$R8/var/lib/hybrid-ai/agent-workspace/KEY"
+printf 'repos\n' > "$R8/var/lib/hybrid-ai/agent-repos/REPO"
+LEGACY8="$R8/legacy"; mkdir -p "$LEGACY8/openhands" "$LEGACY8/hermes"
+printf '# legacy env\n' > "$LEGACY8/.env"; chmod 600 "$LEGACY8/.env"
+: > "$LEGACY8/docker-compose.yml"
+: > "$LEGACY8/openhands/docker-compose.openhands.yml"
+: > "$LEGACY8/hermes/docker-compose.hermes.yml"
+inode8_ws="$(stat -c '%i' "$R8/var/lib/hybrid-ai/agent-workspace/KEY")"
+rc=0
+run_bootstrap "$R8" "$WORK/repair.log" --deploy-pubkey "$PUBKEY" --from "$LEGACY8" --login-user pi || rc=$?
+check "the repair re-run exits 0" "0" "$rc"
+if (( rc != 0 )); then sed 's/^/      /' "$WORK/repair.log" >&2; fi
+check "the child agent-workspace was relocated to the sibling" "yes" \
+  "$([[ -f "$R8/var/lib/hybrid-ai-agent/KEY" ]] && echo yes || echo no)"
+check "the repair preserved the inode (a rename)" "$inode8_ws" \
+  "$(stat -c '%i' "$R8/var/lib/hybrid-ai-agent/KEY" 2>/dev/null)"
+check "the old child agent-workspace is gone" "no" \
+  "$([[ -e "$R8/var/lib/hybrid-ai/agent-workspace" ]] && echo yes || echo no)"
+check "the child agent-repos was relocated to the sibling" "yes" \
+  "$([[ -f "$R8/var/lib/hybrid-ai-repos/REPO" ]] && echo yes || echo no)"
+# shellcheck disable=SC2012  # the manifest name has no spaces; ls glob is fine
+manifest8="$(ls "$R8/var/log/hybrid-ai/"bootstrap-*.manifest 2>/dev/null | head -1)"
+if [[ -n "$manifest8" ]] && grep -q -- 'agent-workspace ->' "$manifest8"; then
+  ok "the repair move is recorded in the manifest"
+else
+  bad "the repair move is not recorded in the manifest"
+fi
+# The layout file must now carry the SIBLING paths, never the old child paths.
+LAYOUT8="$R8/etc/hybrid-ai/hybrid-ai.env"
+check "the repaired layout names the sibling OPENHANDS_WORKSPACE" \
+  "$R8/var/lib/hybrid-ai-agent" \
+  "$(grep -E '^OPENHANDS_WORKSPACE=' "$LAYOUT8" | cut -d= -f2-)"
+check "the repaired layout names the sibling AGENT_REPOS_DIR" \
+  "$R8/var/lib/hybrid-ai-repos" \
+  "$(grep -E '^AGENT_REPOS_DIR=' "$LAYOUT8" | cut -d= -f2-)"
+if grep -qE '^OPENHANDS_WORKSPACE=.*/agent-workspace$|^AGENT_REPOS_DIR=.*/agent-repos$' "$LAYOUT8"; then
+  bad "the repaired layout still names an old child agent path"
+else
+  ok "the repaired layout names no old child agent path"
+fi
+
+# Both copies non-empty: refuse with exit 6 BEFORE any move.
+R9="$(new_root)"
+mkdir -p "$R9/var/lib/hybrid-ai/agent-workspace" "$R9/var/lib/hybrid-ai-agent"
+printf 'old\n' > "$R9/var/lib/hybrid-ai/agent-workspace/KEY"
+printf 'new\n' > "$R9/var/lib/hybrid-ai-agent/KEY"
+LEGACY9="$R9/legacy"; mkdir -p "$LEGACY9/openhands" "$LEGACY9/hermes"
+printf '# legacy env\n' > "$LEGACY9/.env"; chmod 600 "$LEGACY9/.env"
+: > "$LEGACY9/docker-compose.yml"
+: > "$LEGACY9/openhands/docker-compose.openhands.yml"
+: > "$LEGACY9/hermes/docker-compose.hermes.yml"
+rc=0
+run_bootstrap "$R9" "$WORK/repair-both.log" --deploy-pubkey "$PUBKEY" --from "$LEGACY9" --login-user pi || rc=$?
+check "both copies non-empty is refused with 6" "6" "$rc"
+check "the refusal left the old child copy untouched" "yes" \
+  "$([[ -f "$R9/var/lib/hybrid-ai/agent-workspace/KEY" ]] && echo yes || echo no)"
+check "the refusal left the sibling copy untouched" "yes" \
+  "$([[ -f "$R9/var/lib/hybrid-ai-agent/KEY" ]] && echo yes || echo no)"
 
 # ---------------------------------------------------------------------------
 echo
@@ -979,12 +1108,14 @@ fi
 
 # Byte-identical files (AC15), when origin/main is available.
 if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+  # Keep this list equal to the out-of-scope paths in the job brief: the agent
+  # path fix, the bootstrap re-run fix and the Hermes download retry must not
+  # touch any of them.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
+    docker-compose.yml hermes/docker-compose.hermes.yml \
+    openhands/docker-compose.openhands.yml doctor.sh status/Caddyfile backup/ \
     .github/workflows/deploy.yml scripts/deploy-forced-command.sh \
-    scripts/deploy-instance.sh deploy/hybrid-ai-deploy@.service \
-    deploy/50-hybrid-ai-deploy.rules backup/system docker-compose.yml \
-    openhands/docker-compose.openhands.yml hermes/docker-compose.hermes.yml \
-    hermes/Dockerfile 2>/dev/null)"
+    scripts/deploy-instance.sh deploy/ 2>/dev/null)"
   check "the out-of-scope files are byte-identical to origin/main" "" "$diff_out"
 else
   printf 'skip: origin/main is not available; the byte-identical check is a no-op here\n'

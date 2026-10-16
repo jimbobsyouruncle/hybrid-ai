@@ -800,7 +800,10 @@ if EFFECTIVE_CTX="$(docker exec ollama sh -c 'printf "%s" "${OLLAMA_CONTEXT_LENG
 fi
 
 wait_for "open-webui"   "http://127.0.0.1:3000/health"    600 || HEALTH_FAILED=1
-wait_for "hermes-agent" "http://127.0.0.1:${HERMES_PORT:-8501}" 120 || warn "Hermes WebUI initializing..."
+# Hermes is a core service: a failed wait sets HEALTH_FAILED, so install.sh
+# exits non-zero instead of logging install_success. 300 s covers a cold first
+# start on the Pi (a first run builds and imports the agent tree).
+wait_for "hermes-agent" "http://127.0.0.1:${HERMES_PORT:-8501}" 300 || HEALTH_FAILED=1
 wait_for "openhands"    "http://127.0.0.1:${OPENHANDS_PORT:-3001}" 240 || warn "OpenHands initializing..."
 wait_for "status page"  "http://127.0.0.1:80/status/healthz" 60 || warn "Status reverse proxy initializing..."
 

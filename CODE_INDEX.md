@@ -428,6 +428,12 @@
 - resolve()
 - resolve_rc()
 
+## scripts/test-install-health.sh
+- ok()
+- bad()
+- check()
+- run_install()
+
 ## scripts/test-read-probe.sh
 - ok()
 - bad()

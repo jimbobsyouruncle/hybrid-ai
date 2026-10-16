@@ -178,7 +178,7 @@ Hermes reads the OpenHands working clone at `/agent-repo` (mounted read-only) an
 
 ## OpenHands code-maintenance agent
 
-The project includes a separate OpenHands service for natural-language code maintenance. It works in a separate clone at `~/hybrid-ai-agent`; the deployment directory is not visible to the agent, creates isolated agent-server containers, and supports an inspect, branch, edit, test, and commit workflow. 
+The project includes a separate OpenHands service for natural-language code maintenance. It works in a separate clone at `~/hybrid-ai-agent` (on a bootstrapped host, `/var/lib/hybrid-ai-agent`); the deployment directory is not visible to the agent, creates isolated agent-server containers, and supports an inspect, branch, edit, test, and commit workflow.
 
 The OpenHands controller uses the Docker socket to create sandboxes. Docker-socket access is effectively host-level control. Keep human review and branch protection enabled. See [openhands/README.md](openhands/README.md).
 

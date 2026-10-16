@@ -206,6 +206,51 @@ login account from the `docker` group) run ONLY when both `install.sh` and
 `doctor.sh` succeed. On exit `7` or `8` none of them runs. Full detail is in
 [`deploy/README.md`](../deploy/README.md) and [`SECURITY.md`](../SECURITY.md).
 
+### Re-running after exit 7
+
+Exit `7` means `install.sh` failed while the migration moves had already
+completed. The script is safe to re-run: the moves are idempotent, so a second
+run skips anything already in place and continues from where it stopped.
+
+```bash
+sudo /opt/hybrid-ai/scripts/bootstrap.sh --deploy-pubkey <pub> --from <legacy checkout>
+```
+
+The most common cause of exit `7` on a first run is the Hermes image build. The
+build downloads the pinned installer over the network; a transient HTTP 429 or
+5xx used to fail the build, and with it `install.sh` and the bootstrap. The
+download now retries (`curl --retry 5 --retry-all-errors --retry-delay 5`) and
+the pinned sha256 is still checked before the installer runs, so simply re-running
+is usually enough. See [`hermes/README.md`](../hermes/README.md).
+
+Note that the first run MOVED the legacy `.env` to the stack env file
+(`/etc/hybrid-ai/stack.env`). A re-run stops the stack with whichever env file is
+readable, so the missing legacy `.env` is not an error on the second run.
+
+### The Hermes health wait
+
+`install.sh` waits for `hermes-agent` to answer its health endpoint. That wait is
+now 300 s (raised from 120 s), because the first start on a Pi builds and imports
+the agent tree and can take several minutes on a cold cache. A failed wait sets
+`HEALTH_FAILED`, so `install.sh` exits non-zero, logs `install_failed
+reason=healthcheck`, and does NOT log `install_success`. The bootstrap then stops
+with exit `7` instead of cutting over an unhealthy Hermes. `OpenHands` and the
+status page still only warn. If the wait keeps failing, run `./doctor.sh`, then
+check the Hermes container logs.
+
+### `OPENHANDS_WORKSPACE is ... a protected directory` after bootstrap
+
+`scripts/setup-agent-workspace.sh` and `scripts/sync-agent-repos.sh` refuse a
+workspace or repo tree that is inside `HYBRID_AI_DATA_DIR`. The bootstrap now
+renders these two paths as SIBLINGS of the data dir, `/var/lib/hybrid-ai-agent`
+and `/var/lib/hybrid-ai-repos`, never as `/var/lib/hybrid-ai/agent-*`. A run
+against a tree that an earlier, wrong bootstrap left under `/var/lib/hybrid-ai/`
+moves the misplaced `agent-workspace` / `agent-repos` child up to its sibling with
+a same-device rename before the hand-off. If BOTH the child copy and the sibling
+copy hold data, the re-run refuses with exit `6` before any move: merge them by
+hand, empty one, then re-run. See
+[`openhands/README.md`](../openhands/README.md).
+
 ---
 
 ## Relocated paths (split layout)

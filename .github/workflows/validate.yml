@@ -145,6 +145,13 @@ jobs:
         # polkit are stubbed; HYBRID_AI_BOOTSTRAP_ROOT points at a scratch tree.
         run: bash scripts/test-bootstrap.sh
 
+      - name: Install health-gate tests
+        # Offline. Proves install.sh exits non-zero and withholds install_success
+        # when the hermes-agent health wait fails, so the bootstrap's hand-off
+        # cannot cut over an unhealthy Hermes. Docker, curl and friends are
+        # stubbed on PATH; the Hermes wait window is asserted at 300 s.
+        run: bash scripts/test-install-health.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. The bind sources are
