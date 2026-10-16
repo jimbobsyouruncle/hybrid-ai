@@ -369,6 +369,8 @@
 - priv_ed25519()
 - new_root()
 - run_bootstrap()
+- setup_doctor_migration_root()
+- assert_no_cutoff()
 - run_real_install()
 
 ## scripts/test-check-agent-context.sh

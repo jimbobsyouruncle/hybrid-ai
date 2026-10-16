@@ -198,12 +198,14 @@ control fired.
 | `5` | polkitd is absent, or its version predates `.rules` (JavaScript) support | Install or upgrade polkit; the bootstrap never edits polkit's own config |
 | `6` | A migration move is cross-device, or a move target already exists and is not empty (refused BEFORE any move) | Put the data on one filesystem, or empty the target, then re-run |
 | `7` | `install.sh` failed | Read the install log under `HYBRID_AI_LOG_DIR`; the cut-off steps did not run |
-| `8` | `doctor.sh` failed | Fix the reported problem, then re-run the bootstrap |
+| `8` | `doctor.sh` reported failures (exit `2` or any code other than `0`/`1`) | Fix the reported problem, then re-run the bootstrap. Warnings (`1`) do not stop the run |
 
 In migration mode the three cut-off steps (disable the login account's timers,
 remove the deploy key line from the login account's `authorized_keys`, remove the
-login account from the `docker` group) run ONLY when both `install.sh` and
-`doctor.sh` succeed. On exit `7` or `8` none of them runs. Full detail is in
+login account from the `docker` group) run ONLY when `install.sh` succeeds and
+`doctor.sh` exits `0` or `1`. Doctor warnings (`exit 1`) do not stop the run, so
+only `exit 2` or any other non-zero code triggers `8`. On exit `7` or `8` none of
+the cut-off steps runs. Full detail is in
 [`deploy/README.md`](../deploy/README.md) and [`SECURITY.md`](../SECURITY.md).
 
 ### Re-running after exit 7

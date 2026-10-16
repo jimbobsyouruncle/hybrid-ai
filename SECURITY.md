@@ -431,12 +431,13 @@ public remote, or whose origin carries a credential.
 The bootstrap writes exactly one line
 `restrict,command="/opt/hybrid-ai/scripts/deploy-forced-command.sh" <type> <base64>`
 to `~hybrid-ai-deploy/.ssh/authorized_keys` (dir 0700, file 0600, owned by the
-account). In migration mode, after `install.sh` and `doctor.sh` succeed, it
-removes the deploy key line — matching the exact key blob — from the login
-account's `authorized_keys`, and disables and stops the login account's
-`hybrid-ai-backup.timer` and `hybrid-ai-check.timer` (leaving the unit files in
-place). The old `deploy.yml` path then fails closed at SSH auth, with nothing run
-on the host.
+account). In migration mode, after `install.sh` succeeds and `doctor.sh` exits
+`0` or `1` (doctor warnings do not stop the run; `exit 2` or any other non-zero
+code stops it), it removes the deploy key line — matching the exact key blob —
+from the login account's `authorized_keys`, and disables and stops the login
+account's `hybrid-ai-backup.timer` and `hybrid-ai-check.timer` (leaving the unit
+files in place). The old `deploy.yml` path then fails closed at SSH auth, with
+nothing run on the host.
 
 ### The login account leaves the `docker` group
 

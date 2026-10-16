@@ -70,7 +70,8 @@ set -Eeuo pipefail
 #   6  a migration move is cross-device, or a move target already exists and is
 #      not empty (refused BEFORE any move)
 #   7  install.sh failed
-#   8  doctor.sh failed
+#   8  doctor.sh reported failures (exit 2 or any code other than 0/1);
+#      warnings (1) do not stop the run
 # ---------------------------------------------------------------------------
 
 # --- Output helpers --------------------------------------------------------
@@ -759,14 +760,29 @@ fi
 ok "install.sh finished."
 
 log "Running the health gate (${APP_DIR}/doctor.sh --no-cloud)..."
-if ! env "${HANDOFF_ENV[@]}" "${APP_DIR}/doctor.sh" --no-cloud; then
-  die 8 "doctor.sh failed; nothing was cut over"
-fi
-ok "doctor.sh passed."
+# Map doctor.sh's documented exit-code contract (0 healthy, 1 warnings only,
+# 2 failures). Capture the code without tripping set -e / the ERR trap: a bare
+# call would abort the run before the case could classify it. Warnings continue
+# to the cut-off; only a failure (2, or any other non-zero code including 126/127
+# for a missing or non-executable doctor.sh) stops the run.
+doctor_rc=0
+env "${HANDOFF_ENV[@]}" "${APP_DIR}/doctor.sh" --no-cloud || doctor_rc=$?
+case "$doctor_rc" in
+  0)
+    ok "doctor.sh passed."
+    ;;
+  1)
+    warn "doctor.sh reported warnings; continuing to the cut-off."
+    ;;
+  *)
+    die 8 "doctor.sh reported failures (exit ${doctor_rc}); nothing was cut over"
+    ;;
+esac
 
 # --- 11. Cut-off (migration only) ------------------------------------------
-# Only after BOTH succeeded. Order matters: the login account is removed from
-# the docker group LAST, when every privileged step has already completed.
+# Only after install.sh succeeded and doctor.sh did not report failures. Order
+# matters: the login account is removed from the docker group LAST, when every
+# privileged step has already completed.
 run_cutoff() {
   local login_user="$1" login_home="$2"
   local uid xdg unit
