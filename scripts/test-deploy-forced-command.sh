@@ -15,6 +15,14 @@ set -Eeuo pipefail
 #   is a non-zero exit (3), and that the run log is printed from
 #   $HYBRID_AI_LOG_DIR/deploy/<sha>.log.
 #
+#   It also reproduces the real bootstrapped split in one case: a 0644 LAYOUT
+#   file names both the log dir and the 0600 stack file, with
+#   HYBRID_AI_LOG_DIR and HYBRID_AI_STACK_ENV_FILE unset in the environment. The
+#   forced command must pin STACK_ENV_FILE at the layout file and never read the
+#   unreadable stack file. A mode-000 file is readable to root, so the case drops
+#   to an unprivileged uid when run as root; if it cannot, it prints SKIP and is
+#   not counted as a pass.
+#
 #   It also statically checks the polkit rule grants only what the forced
 #   command needs: the exact user, action id, verb and unit regex.
 #
@@ -47,8 +55,10 @@ export SYSCTL_LOG
 
 PASS=0
 FAIL=0
-ok()  { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
-bad() { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
+SKIP=0
+ok()   { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
+bad()  { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
+skip() { SKIP=$(( SKIP + 1 )); printf 'SKIP %s\n' "$*"; }
 has_line()    { grep -Fq -- "$2" "$1"; }
 hasnt_regex() { ! grep -Eq -- "$2" "$1"; }
 
@@ -160,6 +170,86 @@ else
   sed 's/^/      /' "$WORKDIR/out" >&2 || true
 fi
 
+echo "== layout-only split (bootstrapped host) =="
+# Reproduce the real bootstrapped split: a 0644 LAYOUT file names BOTH the log
+# dir and the 0600 stack file, and HYBRID_AI_LOG_DIR / HYBRID_AI_STACK_ENV_FILE
+# are NOT exported. The forced command must pin STACK_ENV_FILE at the layout
+# file, so it never reads the unreadable stack file, and it must take
+# HYBRID_AI_LOG_DIR from the layout file (proved by printing that log).
+#
+# A mode-000 file is readable to root, so the case must run as a NON-root uid.
+# When the caller is already unprivileged it runs itself as-is.
+if (( EUID == 0 )); then
+  UNPRIV_USER="nobody"
+  if command -v setpriv >/dev/null 2>&1; then
+    priv_pre=(setpriv --reuid="$UNPRIV_USER" --regid="$UNPRIV_USER" --clear-groups)
+  elif command -v runuser >/dev/null 2>&1; then
+    priv_pre=(runuser -u "$UNPRIV_USER" --)
+  else
+    priv_pre=()
+  fi
+else
+  priv_pre=()
+fi
+
+if (( ${#priv_pre[@]} > 0 )) && ! "${priv_pre[@]}" true >/dev/null 2>&1; then
+  # Running as root and cannot drop to an unprivileged uid. Be explicit, do not
+  # count a pass, and do not fail: the GitHub runner is never root.
+  skip "layout-only split case (cannot drop privileges to an unprivileged uid)"
+else
+  SPLIT="$WORKDIR/split"
+  SPLIT_LOG="$SPLIT/log"
+  SPLIT_STACK="$SPLIT/stack.env"
+  mkdir -p "${SPLIT_LOG}/deploy"
+  cat > "${SPLIT}/layout.env" <<EOF
+HYBRID_AI_LOG_DIR=${SPLIT_LOG}
+HYBRID_AI_STACK_ENV_FILE=${SPLIT_STACK}
+EOF
+  chmod 0644 "${SPLIT}/layout.env"
+  : > "${SPLIT_STACK}"
+  chmod 000 "${SPLIT_STACK}"
+  printf 'hello-from-the-layout-log\n' > "${SPLIT_LOG}/deploy/${SHA}.log"
+
+  if (( EUID == 0 )); then
+    # The unprivileged uid needs to reach the temp dirs on the path.
+    chmod 0755 "$WORKDIR" "$SPLIT"
+    chmod -R a+rX "$SPLIT_LOG" "$BIN"
+    chmod 0644 "${BIN}/systemctl" "${SPLIT}/layout.env"
+  fi
+
+  if [[ -r "$SPLIT_STACK" ]]; then
+    # Honesty guard: if the file is readable here, the case does not reproduce
+    # the split and must not claim a pass.
+    bad "layout-only split case: ${SPLIT_STACK} is readable, so the split is not exercised"
+  else
+    : > "$SYSCTL_LOG"
+    if (( EUID == 0 )); then chmod 0666 "$SYSCTL_LOG"; fi
+    split_rc=0
+    "${priv_pre[@]}" env -u HYBRID_AI_LOG_DIR -u HYBRID_AI_STACK_ENV_FILE \
+      SSH_ORIGINAL_COMMAND="deploy $SHA" \
+      HYBRID_AI_ENV_FILE="${SPLIT}/layout.env" \
+      PATH="$BIN:$PATH" SYSCTL_LOG="$SYSCTL_LOG" \
+      "$SCRIPT" >"$WORKDIR/out" 2>&1 || split_rc=$?
+    if [[ "$split_rc" == "0" ]]; then
+      ok "layout-only split: exit 0 (stack file unreadable, layout file read)"
+    else
+      bad "layout-only split: exited $split_rc (want 0)"
+      sed 's/^/      /' "$WORKDIR/out" >&2 || true
+    fi
+    if has_line "$SYSCTL_LOG" "start hybrid-ai-deploy@${SHA}.service"; then
+      ok "layout-only split: started the exact system unit hybrid-ai-deploy@<sha>.service"
+    else
+      bad "layout-only split: did not start the expected unit"
+    fi
+    if [[ "$split_rc" == "0" ]] && has_line "$WORKDIR/out" "hello-from-the-layout-log"; then
+      ok "layout-only split: printed the run log from the LAYOUT's \$HYBRID_AI_LOG_DIR"
+    else
+      bad "layout-only split: did not print the run log from the layout's log dir"
+      sed 's/^/      /' "$WORKDIR/out" >&2 || true
+    fi
+  fi
+fi
+
 echo "== static checks =="
 # The polkit rule must contain the exact user, action id, verb and unit regex.
 for needle in \
@@ -179,5 +269,5 @@ else
   bad "polkit rule never returns polkit.Result.YES"
 fi
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 (( FAIL == 0 ))

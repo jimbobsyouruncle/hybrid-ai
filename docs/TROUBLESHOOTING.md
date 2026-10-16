@@ -358,6 +358,34 @@ If the whole stack unexpectedly runs as root (`docker compose ... ps` shows
 file, then confirm the stack file's copy after the next `install.sh` run matches
 it.
 
+### `HYBRID_AI_STACK_ENV_FILE` names the root-only secrets file on a deploy
+
+Symptom: a deploy fails and the run log shows
+
+```
+hybrid-ai-env: HYBRID_AI_STACK_ENV_FILE is set to /etc/hybrid-ai/stack.env, but that file exists and cannot be read.
+hybrid-ai-env: refusing to fall back to the built-in defaults.
+```
+
+The forced command runs as `hybrid-ai-deploy`, which cannot read
+`/etc/hybrid-ai/stack.env` (mode `0600`, root-only). A helper that resolves host
+paths fails closed when a named env file exists but this account cannot read it,
+so the deploy stops before the unit starts.
+
+Cause: a deploy-side caller exported or consumed the root-only secrets path
+(`/etc/hybrid-ai/stack.env`) instead of the `0644` LAYOUT file
+(`/etc/hybrid-ai/hybrid-ai.env`). Because `HYBRID_AI_STACK_ENV_FILE` is read from
+the environment before the layout file, an inherited value pointed the helper
+back at the file this account is deliberately not allowed to read.
+
+Fix: the forced command now pins `HYBRID_AI_STACK_ENV_FILE` at the layout file
+unconditionally, so it reads only paths it is allowed to read and never the
+`0600` secrets file. Check that the deploy caller passed
+`HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env` (or nothing, so the default
+applies) and did not export `HYBRID_AI_STACK_ENV_FILE`. Do NOT grant the deploy
+account read access to `stack.env` -- not by mode, group or ACL. The fix belongs
+in the forced command, not in the secrets file's permissions.
+
 ---
 
 ## Manual triage
