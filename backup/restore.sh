@@ -39,8 +39,11 @@
 # RESTORING ONTO A BRAND-NEW PI:
 #   1. Work through the Prerequisites in the main README.
 #   2. git clone the repository.
-#   3. Recreate ~/.config/hybrid-ai-backup/ with your R2 credentials and the
-#      repository password you stored in your password manager.
+#   3. Recreate the credential directory with your R2 credentials and the
+#      repository password you stored in your password manager. In user mode
+#      that is ~/.config/hybrid-ai-backup/; in system mode the units read them
+#      from the root-owned credstore, /etc/credstore/hybrid-ai-backup/ (see
+#      backup/README.md). Both resolve to HYBRID_AI_BACKUP_CRED_DIR.
 #   4. Run this script. It restores .env too, so you do not need to re-enter
 #      your RunPod details.
 #   5. Run ./install.sh
@@ -55,17 +58,21 @@ HYBRID_AI_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/lib" &&
 source "${HYBRID_AI_LIB_DIR}/hybrid-ai-env.sh"
 cd "$HYBRID_AI_APP_DIR" || exit 1
 
-R2_ENV_FILE="${BACKUP_CONF_DIR}/r2.env"
-RESTIC_PW_FILE="${BACKUP_CONF_DIR}/repo-password"
+# Credentials come from HYBRID_AI_BACKUP_CRED_DIR: the ONE setting that resolves
+# to the root-owned credstore in system mode and to BACKUP_CONF_DIR in user mode,
+# so a manual system-mode restore finds them where the units keep them.
+R2_ENV_FILE="${HYBRID_AI_BACKUP_CRED_DIR}/r2.env"
+RESTIC_PW_FILE="${HYBRID_AI_BACKUP_CRED_DIR}/repo-password"
 RESTORE_WORK="$HYBRID_AI_RESTORE_WORK_DIR"
 
 # --- THE CONTROL: credentials must not sit inside the app/data/work trees ---
 # Same boundary as backup.sh: the credential directory must not be swept up by
-# a git operation or by the very data this script restores.
+# a git operation or by the very data this script restores. Restore ALWAYS reads
+# a credential file, so unlike a capture there is no phase to exempt.
 path_within() { [[ "$1" == "$2" || "$1" == "$2"/* ]]; }
 for _tree in "$HYBRID_AI_APP_DIR" "$HYBRID_AI_DATA_DIR" "$HYBRID_AI_WORK_DIR"; do
-  if path_within "${BACKUP_CONF_DIR%/}" "${_tree%/}"; then
-    printf '[ X ] BACKUP_CONF_DIR is inside %s.\n' "$_tree" >&2
+  if path_within "${HYBRID_AI_BACKUP_CRED_DIR%/}" "${_tree%/}"; then
+    printf '[ X ] HYBRID_AI_BACKUP_CRED_DIR is inside %s.\n' "$_tree" >&2
     printf '     Backup credentials must live OUTSIDE the app, data and work directories.\n' >&2
     exit 1
   fi
@@ -88,7 +95,7 @@ while [[ $# -gt 0 ]]; do
     --latest)   SNAPSHOT_ID="latest"; MODE="direct"; shift ;;
     --list)     MODE="list"; shift ;;
     --test)     MODE="test"; shift ;;
-    -h|--help)  sed -n '2,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done

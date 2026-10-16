@@ -191,10 +191,24 @@ restic has no recovery mechanism. If the drive dies and the password dies with i
 **Deliberately outside the git repository.** No `git add`, no stray `tar czf` of the project folder, and no CI checkout can sweep them up. They are also kept separate from `.env`, so a compromise of the application stack does not automatically hand over the ability to destroy your backup history.
 
 Both scripts **refuse to run** if either file is not mode 0600. They also
-**refuse to run** when `BACKUP_CONF_DIR` is, or is inside, `HYBRID_AI_APP_DIR`,
-`HYBRID_AI_DATA_DIR` or `HYBRID_AI_WORK_DIR`: a credential directory inside one
-of those trees would be swept up by a git operation or by the very data a
-restore writes.
+**refuse to run** when `HYBRID_AI_BACKUP_CRED_DIR` is, or is inside,
+`HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR` or `HYBRID_AI_WORK_DIR`: a credential
+directory inside one of those trees would be swept up by a git operation or by
+the very data a restore writes. In user mode `HYBRID_AI_BACKUP_CRED_DIR` is
+`BACKUP_CONF_DIR`, so the boundary is the same one as before.
+
+`backup.sh` runs that check only on the phases that actually read a credential
+file. A `--stage-only` capture (the system-mode capture unit) loads no
+credential and uses no network, so it is exempt; every other phase, including
+`--dry-run`, still refuses a misplaced credential directory. `restore.sh` always
+reads a credential file, so its check always applies.
+
+In system mode the units read the credentials from the root-owned credstore
+`/etc/credstore/hybrid-ai-backup/` via `LoadCredential=`; when that is set, the
+systemd-provided `$CREDENTIALS_DIRECTORY` takes precedence and the location
+check does not apply (systemd chose a private tmpfs it owns). A manual
+system-mode `backup.sh` or `restore.sh` run reads them from
+`HYBRID_AI_BACKUP_CRED_DIR`, which resolves to that same credstore.
 
 ---
 
@@ -213,7 +227,8 @@ relocation restores into the split layout.
 | `HYBRID_AI_LOG_DIR` | `backup.log` | the repo directory |
 | `HYBRID_AI_WORK_DIR` | `.backup-staging`, `.restore-work`, `.restore-test-*` | the repo directory |
 | `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env` |
-| `BACKUP_CONF_DIR` | the credentials above | `~/.config/hybrid-ai-backup` |
+| `BACKUP_CONF_DIR` | the user-mode credential directory | `~/.config/hybrid-ai-backup` |
+| `HYBRID_AI_BACKUP_CRED_DIR` | the directory the scripts read credentials from (default follows the mode: `BACKUP_CONF_DIR` in user mode, `/etc/credstore/hybrid-ai-backup` in system mode) | mode-dependent |
 | `RESTIC_CACHE_DIR` | the restic cache | `~/.cache/restic` |
 
 Pre-restore safety copies (`webui_data.pre-restore-*`,
@@ -359,6 +374,11 @@ ONLY manual step; everything after it runs from the units. Card F must create:
    `0700`), holding:
    - `/etc/credstore/hybrid-ai-backup/r2.env` (root, mode `0600`)
    - `/etc/credstore/hybrid-ai-backup/repo-password` (root, mode `0600`)
+
+   Every phase that reads a credential file looks here, because
+   `HYBRID_AI_BACKUP_CRED_DIR` resolves to this directory in system mode: the
+   upload unit via `LoadCredential=` (which sets `$CREDENTIALS_DIRECTORY`), and
+   any manual `backup.sh` / `restore.sh` run directly from here.
 4. **The layout env file** — `/etc/hybrid-ai/hybrid-ai.env`, root-owned, mode
    `0644`, with these settings (names and paths only, never a secret):
    - `HYBRID_AI_APP_DIR=/opt/hybrid-ai`

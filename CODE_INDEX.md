@@ -362,6 +362,7 @@
 - sqlite_log_lacks()
 - docker_log_has()
 - docker_log_lacks()
+- run_restore_env()
 
 ## scripts/test-bootstrap.sh
 - ok()

@@ -172,8 +172,11 @@ Two properties keep this safe:
   lives in, or `BACKUP_CONF_DIR`. The read-only mount therefore cannot expose the env file,
   the log files, or the backup credentials. `scripts/sync-agent-repos.sh` applies the same
   guard to `AGENT_REPOS_DIR`, and `backup/backup.sh` / `backup/restore.sh` refuse a
-  `BACKUP_CONF_DIR` inside `HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR` or
-  `HYBRID_AI_WORK_DIR`.
+  `HYBRID_AI_BACKUP_CRED_DIR` (the directory they read credentials from: `BACKUP_CONF_DIR`
+  in user mode, the root-owned credstore in system mode) inside `HYBRID_AI_APP_DIR`,
+  `HYBRID_AI_DATA_DIR` or `HYBRID_AI_WORK_DIR`. `backup.sh` applies that check only on the
+  phases that read a credential file, so a `--stage-only` capture — which reads none — is
+  exempt; every other phase, and every `restore.sh` run, is still guarded.
 
 With the default layout every guarded path is the deployment directory, so the guard is the
 same boundary as before; a split layout widens it to each relocated tree.

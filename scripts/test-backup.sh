@@ -575,6 +575,106 @@ assert "case r: host facts copied into staging/host" bash -c "[[ -f '$STAGE/host
 assert "case r: docker version came from the helper file" bash -c "grep -qx 'docker=27.0.0' '$STAGE/host/platform.txt'"
 
 # ---------------------------------------------------------------------------
+# Cases s1-s3: the capture guard regression. On a bootstrapped host the
+# hybrid-ai-backup account's HOME is its work directory, so with
+# CREDENTIALS_DIRECTORY and both credential-dir settings unset the default
+# HYBRID_AI_BACKUP_CRED_DIR lands INSIDE HYBRID_AI_WORK_DIR. The capture
+# (--stage-only) reads no credential, so it must run clean; every phase that
+# DOES read a credential must still refuse that placement.
+# ---------------------------------------------------------------------------
+# Case s1: --stage-only with HOME inside the work tree exits 0, writes
+# status=complete, and never prints the guard message. This is the exact shape
+# of the live failure; it FAILS on unpatched main with "BACKUP_CONF_DIR is
+# inside". BACKUP_CONF_DIR and HYBRID_AI_BACKUP_CRED_DIR are unset, so the
+# credential dir defaults to $HOME/.config/hybrid-ai-backup, inside WORK_DIR.
+rm -rf "$REPO/hermes_data" "$STAGE"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env -u BACKUP_CONF_DIR -u HYBRID_AI_BACKUP_CRED_DIR HOME="$STAGE_WORK" HYBRID_AI_WORK_DIR="$STAGE_WORK" BACKUP_NO_PAUSE=1 -- --non-interactive --stage-only
+check "case s1: capture on a bootstrapped host exit code" 0 "$RUN_RC"
+assert "case s1: STATUS is complete"         bash -c "grep -qx 'status=complete' '$STAGE/STATUS'"
+assert "case s1: guard message NOT printed"  bash -c "! grep -q 'is inside' '$TMPROOT/out'"
+
+# Case s2: the SAME placement still REFUSES (exit 1, guard message) for every
+# phase that reads a credential: --upload-only, no phase flag, and --dry-run.
+for _phase_args in "--upload-only" "" "--dry-run"; do
+  rm -rf "$STAGE"; mkdir -p "$STAGE"
+  # shellcheck disable=SC2086  # word-splitting the phase args is intended
+  run_backup_env -u BACKUP_CONF_DIR -u HYBRID_AI_BACKUP_CRED_DIR HOME="$STAGE_WORK" HYBRID_AI_WORK_DIR="$STAGE_WORK" -- --non-interactive $_phase_args
+  check "case s2: guard fires for '${_phase_args:-<none>}'" 1 "$RUN_RC"
+  assert "case s2: guard message for '${_phase_args:-<none>}'" \
+    bash -c "grep -q 'HYBRID_AI_BACKUP_CRED_DIR is inside' '$TMPROOT/out'"
+done
+unset _phase_args
+
+# ---------------------------------------------------------------------------
+# Cases s3-s6: defect 4 -- a manual SYSTEM-mode run must read credentials from
+# HYBRID_AI_BACKUP_CRED_DIR, not BACKUP_CONF_DIR. Fixtures are ordinary 0600
+# files with dummy values (not permission tests), so these pass as root or as an
+# unprivileged uid.
+# ---------------------------------------------------------------------------
+SYSCONF="$TMPROOT/sysconf"; mkdir -p "$SYSCONF"
+SYSCRED="$TMPROOT/syscred"; mkdir -p "$SYSCRED"
+printf 'RESTIC_REPOSITORY=s3:https://example.invalid/bucket\nAWS_ACCESS_KEY_ID=test\nAWS_SECRET_ACCESS_KEY=test\n' > "$SYSCRED/r2.env"
+printf 'test-password\n' > "$SYSCRED/repo-password"
+chmod 600 "$SYSCRED/r2.env" "$SYSCRED/repo-password"
+
+# Case s3: backup.sh full run reads ${HYBRID_AI_BACKUP_CRED_DIR} and logs
+# backup_success, with the files ONLY there (BACKUP_CONF_DIR is empty).
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSCRED" BACKUP_CONF_DIR="$SYSCONF" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case s3: system-mode backup exit code" 0 "$RUN_RC"
+assert "case s3: backup_success logged" log_has 'backup_success'
+
+# Case s4: with the files ONLY in BACKUP_CONF_DIR (empty cred dir), backup.sh
+# dies naming the HYBRID_AI_BACKUP_CRED_DIR path.
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+run_backup_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSCONF" BACKUP_CONF_DIR="$SYSCRED" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case s4: backup refuses without cred-dir files" 1 "$RUN_RC"
+assert "case s4: refusal names the cred-dir path" \
+  bash -c "grep -qF 'No credentials at ${SYSCONF}/r2.env' '$TMPROOT/out'"
+
+# Case s5: restore.sh gets PAST its credential checks when the files are in
+# HYBRID_AI_BACKUP_CRED_DIR. The restic stub reports snapshots successfully, so
+# an EMPTY snapshot list is the earliest observable point the harness reaches;
+# the credential checks must not have killed it.
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+run_restore_env() {  # run_restore_env <env K=V...> -- <restore args...>
+  local -a envs=() args=()
+  local seen_sep=0
+  for a in "$@"; do
+    if [[ "$a" == "--" ]]; then seen_sep=1; continue; fi
+    if (( seen_sep )); then args+=("$a"); else envs+=("$a"); fi
+  done
+  RUN_RC=0
+  env "${envs[@]}" bash "$REPO/backup/restore.sh" "${args[@]}" > "$TMPROOT/out" 2>&1 || RUN_RC=$?
+}
+run_restore_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSCRED" BACKUP_CONF_DIR="$SYSCONF" -- --list
+assert "case s5: restore did not die with 'No credentials'" bash -c "! grep -q 'No credentials' '$TMPROOT/out'"
+assert "case s5: restore did not die with 'No repository password'" bash -c "! grep -q 'No repository password' '$TMPROOT/out'"
+
+# Case s6: with the files ONLY in BACKUP_CONF_DIR, restore.sh dies naming the
+# HYBRID_AI_BACKUP_CRED_DIR path.
+run_restore_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSCONF" BACKUP_CONF_DIR="$SYSCRED" -- --list
+check "case s6: restore refuses without cred-dir files" 1 "$RUN_RC"
+assert "case s6: refusal names the cred-dir path" \
+  bash -c "grep -qF 'No credentials at ${SYSCONF}/r2.env' '$TMPROOT/out'"
+
+# Case s7: a HYBRID_AI_BACKUP_CRED_DIR inside HYBRID_AI_DATA_DIR is refused by
+# BOTH scripts (backup.sh non-stage, restore.sh) with exit 1.
+INSIDE_CRED="$DATA2/cred-inside"; mkdir -p "$INSIDE_CRED"
+cp "$SYSCRED/r2.env" "$INSIDE_CRED/r2.env"; chmod 600 "$INSIDE_CRED/r2.env"
+cp "$SYSCRED/repo-password" "$INSIDE_CRED/repo-password"; chmod 600 "$INSIDE_CRED/repo-password"
+run_backup_env HYBRID_AI_APP_DIR="$APP2" HYBRID_AI_DATA_DIR="$DATA2" HYBRID_AI_WORK_DIR="$WORK2" HYBRID_AI_BACKUP_CRED_DIR="$INSIDE_CRED" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case s7: backup refuses a cred dir inside DATA_DIR" 1 "$RUN_RC"
+assert "case s7: backup guard names the setting" \
+  bash -c "grep -q 'HYBRID_AI_BACKUP_CRED_DIR is inside' '$TMPROOT/out'"
+run_restore_env HYBRID_AI_APP_DIR="$APP2" HYBRID_AI_DATA_DIR="$DATA2" HYBRID_AI_WORK_DIR="$WORK2" HYBRID_AI_BACKUP_CRED_DIR="$INSIDE_CRED" -- --list
+check "case s7: restore refuses a cred dir inside DATA_DIR" 1 "$RUN_RC"
+assert "case s7: restore guard names the setting" \
+  bash -c "grep -q 'HYBRID_AI_BACKUP_CRED_DIR is inside' '$TMPROOT/out'"
+
+# ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then
   echo "FAILURES: $FAILURES" >&2
   exit 1

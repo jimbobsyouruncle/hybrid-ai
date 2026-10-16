@@ -326,7 +326,7 @@ environment or the env file), a mistake shows up as one of these:
 | `hybrid-ai-env: ... exists and cannot be read. refusing to fall back to the built-in defaults` | `HYBRID_AI_ENV_FILE` or `HYBRID_AI_STACK_ENV_FILE` names a file that exists but this user cannot read | Fix the file's permissions, or run as a user that can read it. The helper fails closed rather than silently using the wrong paths |
 | `doctor.sh` prints `<NAME> = <path>` then warns it does not exist | The setting is named but the directory was never created | Create the directory, or unset the setting to fall back to the default |
 | Compose cannot find the env file | The stack file moved, or `HYBRID_AI_STACK_ENV_FILE` is unset while compose reads a different file | Point `HYBRID_AI_STACK_ENV_FILE` at the file compose and the installer share. With it unset it defaults to `HYBRID_AI_ENV_FILE` |
-| `BACKUP_CONF_DIR is inside ...` | Backup credentials were placed inside the app, data or work tree | Move `BACKUP_CONF_DIR` outside every relocated tree |
+| `HYBRID_AI_BACKUP_CRED_DIR is inside ...` | Backup credentials were placed inside the app, data or work tree | Move `HYBRID_AI_BACKUP_CRED_DIR` (in user mode, `BACKUP_CONF_DIR`) outside every relocated tree |
 | `OPENHANDS_WORKSPACE is ... a protected directory` | The workspace is, is inside, or contains a relocated tree | Use a sibling path outside every tree that holds credentials or state |
 
 `./doctor.sh` is the quick check: it prints each resolved path (never a value from the env
