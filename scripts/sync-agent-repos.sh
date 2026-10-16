@@ -234,12 +234,14 @@ CRED_CHECK="${HYBRID_AI_APP_DIR}/scripts/check-git-remotes.sh"
 if [[ "$MODE" != "check" ]]; then
   WORKSPACE_REAL="$(readlink -f "$OPENHANDS_WORKSPACE" 2>/dev/null || echo "$OPENHANDS_WORKSPACE")"
   ENV_DIR_REAL="$(dirname "$(readlink -f "$HYBRID_AI_ENV_FILE" 2>/dev/null || echo "$HYBRID_AI_ENV_FILE")")"
+  STACK_ENV_DIR_REAL="$(dirname "$(readlink -f "$HYBRID_AI_STACK_ENV_FILE" 2>/dev/null || echo "$HYBRID_AI_STACK_ENV_FILE")")"
   GUARDED_REAL=(
     "$(readlink -f "$HYBRID_AI_APP_DIR" 2>/dev/null || echo "$HYBRID_AI_APP_DIR")"
     "$(readlink -f "$HYBRID_AI_DATA_DIR" 2>/dev/null || echo "$HYBRID_AI_DATA_DIR")"
     "$(readlink -f "$HYBRID_AI_LOG_DIR" 2>/dev/null || echo "$HYBRID_AI_LOG_DIR")"
     "$(readlink -f "$HYBRID_AI_WORK_DIR" 2>/dev/null || echo "$HYBRID_AI_WORK_DIR")"
     "$ENV_DIR_REAL"
+    "$STACK_ENV_DIR_REAL"
     "$WORKSPACE_REAL"
     "$(readlink -f "$BACKUP_CONF_DIR" 2>/dev/null || echo "$BACKUP_CONF_DIR")"
   )

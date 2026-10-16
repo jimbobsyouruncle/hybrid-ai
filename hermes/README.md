@@ -312,6 +312,7 @@ Referenced by name only; values live in `.env`, which is gitignored.
 
 | Name | Read by | Purpose |
 |---|---|---|
+| `HYBRID_AI_HERMES_HOME_DIR` | `backup/backup.sh`, `backup/restore.sh`, `scripts/lib/hybrid-ai-env.sh` | The per-user Hermes home the system-mode backup captures. Default `$HOME/.hermes`; the host bootstrap sets it to `/var/lib/hybrid-ai/hermes-home`, created empty and owned by the `hybrid-ai` account. |
 | `OPENHANDS_WORKSPACE` | `docker-compose.hermes.yml` | Host path mounted at `/workspace` and `/agent-repo`. Required. |
 | `AGENT_REPOS_DIR` | `docker-compose.hermes.yml`, `scripts/sync-agent-repos.sh` | Host path of the agent repo reference tree, mounted at `/agent-repos` read-only. Defaults to `${HOME}/hybrid-ai-repos` when unset. |
 | `AGENT_REPOS_OWNER` | `scripts/sync-agent-repos.sh` | Account whose owned, non-fork repos are inventoried. Blank means: derive it from the owner in this clone's git origin URL. |

@@ -542,7 +542,7 @@ if [[ -d "$HOST_SRC" ]]; then
         # Existing container first; compose fallback covers a brand-new Pi.
         # Ollama is defined in the main file, so that file alone is enough.
         docker start ollama >/dev/null 2>&1 || \
-          docker compose -p hybrid-ai --env-file "${HYBRID_AI_ENV_FILE}" \
+          docker compose -p hybrid-ai --env-file "${HYBRID_AI_STACK_ENV_FILE}" \
             --project-directory "${HYBRID_AI_APP_DIR}" \
             -f "${HYBRID_AI_APP_DIR}/docker-compose.yml" up -d ollama >/dev/null 2>&1 || true
         sleep 10

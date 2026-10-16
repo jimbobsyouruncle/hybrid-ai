@@ -382,6 +382,84 @@ Not enabled by default because it requires manual retention management. Document
 
 ---
 
+## Host bootstrap: accounts, layout and file modes
+
+`scripts/bootstrap.sh` is the ONE privileged, one-time command run per device.
+It is idempotent and it never generates, rotates or prints a key, token or
+credential. It is where privilege is concentrated, so the whole host setup is
+reviewable in one file instead of being spread across manual steps.
+
+### The three system accounts
+
+Each account has its own group and a uid below `UID_MIN`. None is a member of
+`docker`, `sudo` or `systemd-journal`.
+
+| Account | Shell | Purpose | Password |
+|---|---|---|---|
+| `hybrid-ai` | nologin | The stack's runtime uid. Owns `hermes_data` and the agent data trees | locked |
+| `hybrid-ai-backup` | nologin | The system-mode backup units (card D) | locked |
+| `hybrid-ai-deploy` | `/bin/sh` | The headless deploy SSH identity (card E) | **locked** |
+
+`hybrid-ai-deploy` needs `/bin/sh` and a locked password because sshd runs the
+forced command through the account's login shell; a nologin shell would refuse
+the forced command. The account still has no interactive login (the password is
+locked), and the forced command runs for every connection regardless of the
+requested command. The bootstrap never creates an account that already exists;
+it verifies it.
+
+### The layout and the file modes
+
+Everything below is root-owned unless noted.
+
+| Path | Mode | Holds |
+|---|---|---|
+| `/opt/hybrid-ai` | 0755 | A clone of the public https remote at `origin/main`, fetched with hooks disabled and credential helpers cleared |
+| `/var/lib/hybrid-ai/` | 0755 | Durable data: `hermes_data`, `webui_data`, `ollama_data`, `agent-workspace`, `agent-repos`, `openhands`, `hermes-home` |
+| `/var/log/hybrid-ai` | 0755 | `install.log`, `backup.log`, migration manifests |
+| `/etc/hybrid-ai` | 0755 | The layout env file and the stack env file |
+| `/etc/hybrid-ai/hybrid-ai.env` | **0644** | The LAYOUT file: names and paths only, no secret. Readable by `hybrid-ai-backup` and `hybrid-ai-deploy` |
+| `/etc/hybrid-ai/stack.env` | 0600 | The STACK secrets, written only by `install.sh` |
+| `/etc/credstore/hybrid-ai-backup` | 0700 | `r2.env` and `repo-password`, mode 0600 |
+
+The bootstrap refuses an existing `/opt/hybrid-ai` that is not a clone of the
+public remote, or whose origin carries a credential.
+
+### The deploy key moves off the login account
+
+The bootstrap writes exactly one line
+`restrict,command="/opt/hybrid-ai/scripts/deploy-forced-command.sh" <type> <base64>`
+to `~hybrid-ai-deploy/.ssh/authorized_keys` (dir 0700, file 0600, owned by the
+account). In migration mode, after `install.sh` and `doctor.sh` succeed, it
+removes the deploy key line — matching the exact key blob — from the login
+account's `authorized_keys`, and disables and stops the login account's
+`hybrid-ai-backup.timer` and `hybrid-ai-check.timer` (leaving the unit files in
+place). The old `deploy.yml` path then fails closed at SSH auth, with nothing run
+on the host.
+
+### The login account leaves the `docker` group
+
+Migration removes the login account from the `docker` group as its last step,
+after the cut-off has already succeeded. From then on no service process runs as
+the login account and the login account cannot reach the Docker socket.
+
+### No secrets in output
+
+The bootstrap never prints, logs or writes into the migration manifest any value
+from `.env`, `stack.env`, `r2.env` or `repo-password`. The manifest records paths
+only, mode 0600.
+
+### Residual risks of the bootstrap
+
+| Risk | Why accepted | Compensating control |
+|---|---|---|
+| The bootstrap is root and moves data | One-time host setup cannot avoid root | It is idempotent, refuses unsafe states, and touches nothing until its preflight checks pass |
+| The layout env file is world-readable (`0644`) | Both the backup and deploy accounts must read it, and a group shared between them would couple their lifecycles | It holds names and paths only; no secret is ever written to it (the tests assert this) |
+| Migration moves data in place | A copy would double the disk use on a Pi | Every move is refused across filesystems, refused onto a non-empty target, and recorded as paths only in a manifest |
+| A partial migration leaves the data moved | Moves cannot be atomic across many trees | The manifest records each completed move, so the operator sees exactly where it stopped |
+| `hybrid-ai-deploy` has `/bin/sh` | sshd needs a login shell for the forced command | Password locked, `restrict,command=` on the key, and polkit grants only one verb on one unit shape |
+
+---
+
 ## Headless deploy security (not active until migration)
 
 The in-repo pieces of a headless deploy live under `deploy/` and
@@ -402,7 +480,7 @@ that can do exactly one thing: start the system unit
 | No sudo | The account is in no `sudoers` rule and needs none |
 | Not in the `docker` group | The account cannot reach the Docker socket |
 | Not in the `systemd-journal` group | The account cannot read journald. The unit writes each run to `$HYBRID_AI_LOG_DIR/deploy/<sha>.log`, mode `0640`, group `hybrid-ai-deploy`, so the account reads its own run log without journal access |
-| Reads the system env file (paths only) | The forced command resolves host paths by parsing `/etc/hybrid-ai/hybrid-ai.env` (never sourcing it), the same file the unit names. Card F makes it readable by the account (e.g. `0640`, group `hybrid-ai-deploy`). It holds paths and names only, no secret values |
+| Reads the layout env file (paths only) | The forced command resolves host paths by parsing `/etc/hybrid-ai/hybrid-ai.env` (never sourcing it), the same file the unit names. The bootstrap makes it mode `0644`, root-owned, so the `hybrid-ai-deploy` AND `hybrid-ai-backup` accounts both read it. It holds paths and names only, no secret values |
 | Public fetch, no credentials | `scripts/deploy-instance.sh` fetches main only from the public https remote, with git hooks disabled and credential helpers cleared, and refuses a credential-bearing origin (userinfo in the URL) |
 | Ancestor check is mandatory | The commit must be `git merge-base --is-ancestor <sha> origin/main` or the deploy is refused (exit 7) |
 | HEAD assert is mandatory | After `git reset --hard <sha>`, `HEAD` must equal `<sha>` or the deploy is refused (exit 8) |

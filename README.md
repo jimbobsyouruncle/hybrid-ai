@@ -398,6 +398,32 @@ Backup credentials sit outside the repository deliberately: no `git add`, no str
 
 ## Installation
 
+### One-time host bootstrap
+
+The host bootstrap is the ONE privileged command you run per device. It creates
+the system accounts, the `/opt`, `/var/lib`, `/var/log` and `/etc` layout, the
+system-mode backup credential store, and the headless deploy account, then hands
+off to `install.sh`. It is idempotent: a second run changes nothing.
+
+**Fresh install** (a brand-new device with no existing data):
+
+```bash
+sudo ./scripts/bootstrap.sh --deploy-pubkey ~/.ssh/hybrid-ai-deploy.pub
+```
+
+**Migration** (the current Pi, moving the existing data into the new layout):
+
+```bash
+sudo ./scripts/bootstrap.sh --deploy-pubkey ~/.ssh/hybrid-ai-deploy.pub --from /home/pi/hybrid-ai
+```
+
+`--from` moves the existing data — it never copies or merges. `--login-user`
+defaults to `SUDO_USER`. The deploy public key is the key the headless deploy
+uses; passing a private key, several keys, or a line that already carries
+options is refused. See [`deploy/README.md`](deploy/README.md) and
+[`SECURITY.md`](SECURITY.md) for what the bootstrap does, and
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for its exit codes.
+
 ### Step 1 — Pi setup
 
 ```bash
@@ -476,6 +502,7 @@ Put that in a password manager. Rehearse a restore before you need one:
 | `REPO_MAP.md` | Agent context map — tracked files by directory | Generated; see [Agent context maps](#agent-context-maps) |
 | `CODE_INDEX.md` | Agent context index — per-file code structure | Generated; see [Agent context maps](#agent-context-maps) |
 | `install.sh` | The one script you run on the Pi | Commented inline |
+| `scripts/bootstrap.sh` | The ONE privileged, one-time host bootstrap (accounts, FHS layout, migration) | Commented inline; see [`deploy/README.md`](deploy/README.md) |
 | `doctor.sh` | One-command health check | Commented inline |
 | `collect-diagnostics.sh` | Bundles logs and status into one redacted file | Commented inline |
 | `docker-compose.yml` | Blueprint for the Pi containers | Commented inline |
@@ -523,7 +550,8 @@ every path is exactly the default above.
 | Setting | Meaning | Default |
 |---|---|---|
 | `HYBRID_AI_APP_DIR` | Program/repository directory | the repo directory |
-| `HYBRID_AI_ENV_FILE` | The env file | `$HYBRID_AI_APP_DIR/.env` |
+| `HYBRID_AI_ENV_FILE` | The layout env file (host paths) | `$HYBRID_AI_APP_DIR/.env` |
+| `HYBRID_AI_STACK_ENV_FILE` | The stack env file handed to `docker compose --env-file` | the resolved `HYBRID_AI_ENV_FILE` |
 | `HYBRID_AI_DATA_DIR` | Durable data (`hermes_data/`, `webui_data/`, `ollama_data/`) | the repo directory |
 | `HYBRID_AI_LOG_DIR` | Logs (`install.log`, `backup.log`) | the repo directory |
 | `HYBRID_AI_WORK_DIR` | Backup/restore scratch (`.backup-staging`, `.restore-work`, `.restore-test-*`) | the repo directory |
@@ -531,6 +559,18 @@ every path is exactly the default above.
 Resolution order is: the process environment, then the env file (parsed line by
 line, **never** sourced), then the default. A set value must be an absolute path
 with no whitespace, control character, `:` or `,`, and it must not be `/`.
+
+`HYBRID_AI_STACK_ENV_FILE` is the split that makes one-time bootstrap possible.
+The layout file (`HYBRID_AI_ENV_FILE`) holds host paths and control settings and
+never a secret; the stack file holds the runtime config and secrets and is what
+`install.sh` writes. With `HYBRID_AI_STACK_ENV_FILE` unset the two are the same
+path, so nothing changes. On a bootstrapped host `scripts/bootstrap.sh` points
+the stack file at `/etc/hybrid-ai/stack.env`, and the layout file is the single
+source of truth for the paths and the `HYBRID_AI_UID`/`HYBRID_AI_GID` identity:
+`install.sh` restores those from the layout file after it reads the stack file,
+so a legacy stack file that still carries empty `HYBRID_AI_UID=` lines cannot
+drop the stack to root. If the layout file exists but cannot be read, the helper
+exits non-zero and names the setting instead of quietly using a default.
 
 The settings that already existed keep their names and defaults:
 `OPENHANDS_WORKSPACE`, `AGENT_REPOS_DIR`, `OPENHANDS_STATE_DIR`,

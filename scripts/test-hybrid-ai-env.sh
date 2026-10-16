@@ -92,6 +92,26 @@ check "BACKUP_CONTAINER_CONTROL default is self" "self" "$(resolve "$EMPTY" BACK
 check "UID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_UID)"
 check "GID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_GID)"
 
+# --- STACK_ENV_FILE defaults to the resolved LAYOUT file --------------------
+# With the setting unset the stack file and the layout file are the SAME path,
+# so every `--env-file` command line stays byte-identical to today's.
+check "STACK_ENV_FILE defaults to the resolved ENV_FILE" "$(resolve "$EMPTY" HYBRID_AI_ENV_FILE)" \
+  "$(resolve "$EMPTY" HYBRID_AI_STACK_ENV_FILE)"
+STACKD="${TMPROOT}/stack-default"
+mkdir -p "$STACKD"
+# The bootstrap layout: the LAYOUT file names itself and the stack file.
+cat > "$STACKD/.env" <<STACKEOF
+HYBRID_AI_ENV_FILE=${STACKD}/.env
+HYBRID_AI_STACK_ENV_FILE=${STACKD}/stack.env
+STACKEOF
+: > "${STACKD}/stack.env"
+check "STACK_ENV_FILE resolves the layout file's own value" "${STACKD}/stack.env" \
+  "$(env HYBRID_AI_ENV_FILE="${STACKD}/.env" bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_STACK_ENV_FILE\"")"
+# An explicit environment value wins over the layout file.
+check "an exported STACK_ENV_FILE wins" "${TMPROOT}/exported-stack.env" \
+  "$(env HYBRID_AI_ENV_FILE="${STACKD}/.env" HYBRID_AI_STACK_ENV_FILE="${TMPROOT}/exported-stack.env" \
+      bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_STACK_ENV_FILE\"")"
+
 # The whole resolved set, byte for byte, with nothing set. This is the strongest
 # form of "with no settings, every path is identical to today": the complete
 # sorted KEY=VALUE dump of the new helper must equal the expected dump.
@@ -105,7 +125,8 @@ DUMP_SCRIPT="${TMPROOT}/dump.sh"
 cat > "$DUMP_SCRIPT" <<'DUMPEOF'
 # shellcheck source=/dev/null
 source "$HYBRID_AI_LIB" >/dev/null 2>&1
-for v in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR \
+for v in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_STACK_ENV_FILE \
+         HYBRID_AI_DATA_DIR \
          HYBRID_AI_LOG_DIR HYBRID_AI_WORK_DIR \
          HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR \
          HYBRID_AI_OLLAMA_DATA_DIR HYBRID_AI_INSTALL_LOG \
@@ -122,6 +143,7 @@ DUMP="$(env -i HOME="$CH" PATH="$PATH" HYBRID_AI_LIB="${CLONE}/scripts/lib/hybri
 EXPECT="$(sort <<EOF
 HYBRID_AI_APP_DIR=${CLONE}
 HYBRID_AI_ENV_FILE=${CLONE}/.env
+HYBRID_AI_STACK_ENV_FILE=${CLONE}/.env
 HYBRID_AI_DATA_DIR=${CLONE}
 HYBRID_AI_LOG_DIR=${CLONE}
 HYBRID_AI_WORK_DIR=${CLONE}
@@ -243,6 +265,56 @@ check "system-mode journal scope"    "--system"                       "$(resolve
 check "system-mode cred dir is the credstore" "/etc/credstore/hybrid-ai-backup" "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_CRED_DIR)"
 
 # ---------------------------------------------------------------------------
+# 3b. Fail closed on an env file that exists but cannot be read
+# ---------------------------------------------------------------------------
+echo "== fail closed on an unreadable env file =="
+# A file that exists with mode 0000 cannot be read by this (non-root) process,
+# so the helper must refuse rather than silently use the built-in defaults.
+# Only meaningful when this test is NOT root: root bypasses the read bit.
+if [[ "$(id -u)" != "0" ]]; then
+  LOCKED_LAYOUT="${TMPROOT}/locked-layout.env"
+  printf 'HYBRID_AI_DATA_DIR=/tmp/x\n' > "$LOCKED_LAYOUT"
+  chmod 000 "$LOCKED_LAYOUT"
+  rc=0; err="$(env HYBRID_AI_ENV_FILE="$LOCKED_LAYOUT" bash -c "source '$HELPER'" 2>&1 >/dev/null)" || rc=$?
+  check "an unreadable layout file exits non-zero" "1" "$rc"
+  if [[ "$err" == *HYBRID_AI_ENV_FILE* ]]; then
+    ok "the message names HYBRID_AI_ENV_FILE"
+  else
+    bad "the message did not name HYBRID_AI_ENV_FILE: $err"
+  fi
+  if [[ "$err" == *locked-layout.env* ]]; then
+    ok "the message names the path"
+  else
+    bad "the message did not name the path: $err"
+  fi
+
+  # The same for the STACK file: it, too, must refuse rather than default.
+  LAYOUTDIR="${TMPROOT}/fc-layout"; mkdir -p "$LAYOUTDIR"
+  LOCKED_STACK="${TMPROOT}/locked-stack.env"
+  printf 'HYBRID_AI_STACK_ENV_FILE=%s\n' "$LOCKED_STACK" > "${LAYOUTDIR}/layout.env"
+  printf 'SECRET=1\n' > "$LOCKED_STACK"
+  chmod 000 "$LOCKED_STACK"
+  rc=0; err="$(env HYBRID_AI_ENV_FILE="${LAYOUTDIR}/layout.env" bash -c "source '$HELPER'" 2>&1 >/dev/null)" || rc=$?
+  check "an unreadable stack file exits non-zero" "1" "$rc"
+  if [[ "$err" == *HYBRID_AI_STACK_ENV_FILE* ]]; then
+    ok "the message names HYBRID_AI_STACK_ENV_FILE"
+  else
+    bad "the message did not name HYBRID_AI_STACK_ENV_FILE: $err"
+  fi
+  chmod 600 "$LOCKED_STACK" "$LOCKED_LAYOUT"
+else
+  printf 'ok   skip unreadable-env-file assertions (running as root)\n'
+fi
+
+# A file that simply does not exist is NOT an error: the defaults apply.
+MISSING_ENV="${TMPROOT}/does-not-exist.env"
+if resolve_rc "$MISSING_ENV"; then
+  ok "a missing env file still resolves to the defaults"
+else
+  bad "a missing env file was refused"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Isolation guards (AC6)
 # ---------------------------------------------------------------------------
 echo "== isolation guards =="
@@ -253,6 +325,7 @@ mkdir -p "${APPD}/scripts/lib" "${APPD}/backup" "${APPD}/openhands" "${APPD}/her
 cp "$HELPER" "${APPD}/scripts/lib/"
 cp "${REPO}/scripts/setup-agent-workspace.sh" "${APPD}/scripts/"
 cp "${REPO}/scripts/sync-agent-repos.sh" "${APPD}/scripts/"
+cp "${REPO}/doctor.sh" "${APPD}/"
 cp "${REPO}/backup/backup.sh" "${APPD}/backup/"
 cp "${REPO}/backup/restore.sh" "${APPD}/backup/"
 : > "${APPD}/docker-compose.yml"
@@ -268,6 +341,44 @@ GUARD_ENV=(HOME="$TMPROOT/home" HYBRID_AI_APP_DIR="$APPD" HYBRID_AI_ENV_FILE="$E
            HYBRID_AI_DATA_DIR="$DATAD" HYBRID_AI_LOG_DIR="$LOGD" HYBRID_AI_WORK_DIR="$WORKD"
            BACKUP_CONF_DIR="$CONFD_GOOD")
 mkdir -p "${TMPROOT}/home"
+
+# --- The STACK file's directory is guarded too -------------------------------
+# With the bootstrap layout the secrets live in HYBRID_AI_STACK_ENV_FILE, so a
+# workspace or repo tree that is, contains, or lives inside ITS directory must be
+# refused exactly like the layout file's directory.
+STACKD="${TMPROOT}/stackdir"
+mkdir -p "$STACKD"
+STACKF="${STACKD}/stack.env"; : > "$STACKF"
+GUARD_ENV_STACK=("${GUARD_ENV[@]}" HYBRID_AI_STACK_ENV_FILE="$STACKF")
+for t in "$STACKD" "${STACKD}/child" "${TMPROOT}" ; do
+  if env "${GUARD_ENV_STACK[@]}" OPENHANDS_WORKSPACE="$t" \
+       bash "${APPD}/scripts/setup-agent-workspace.sh" --non-interactive >/dev/null 2>&1; then
+    bad "setup-agent-workspace refused stack-dir workspace '${t}'"
+  else
+    ok "setup-agent-workspace refused stack-dir workspace '${t}'"
+  fi
+done
+for t in "$STACKD" "${STACKD}/repos" "${TMPROOT}"; do
+  if env "${GUARD_ENV_STACK[@]}" AGENT_REPOS_DIR="$t" \
+       bash "${APPD}/scripts/sync-agent-repos.sh" --dry-run >/dev/null 2>&1; then
+    bad "sync-agent-repos refused stack-dir AGENT_REPOS_DIR '${t}'"
+  else
+    ok "sync-agent-repos refused stack-dir AGENT_REPOS_DIR '${t}'"
+  fi
+done
+# doctor.sh refuses a workspace that IS the stack file's directory. doctor.sh
+# reads OPENHANDS_WORKSPACE from the env FILES (env_get), so seed it there.
+DL="${TMPROOT}/doctor-layout.env"
+printf 'OPENHANDS_WORKSPACE=%s\n' "$STACKD" > "$DL"
+DMSG="$(env HOME="$TMPROOT/home" HYBRID_AI_APP_DIR="$APPD" HYBRID_AI_ENV_FILE="$DL" \
+        HYBRID_AI_STACK_ENV_FILE="$STACKF" HYBRID_AI_DATA_DIR="$DATAD" \
+        HYBRID_AI_LOG_DIR="$LOGD" HYBRID_AI_WORK_DIR="$WORKD" BACKUP_CONF_DIR="$CONFD_GOOD" \
+        bash "${APPD}/doctor.sh" --no-cloud 2>&1 || true)"
+if [[ "$DMSG" == *"env-file directory"* ]]; then
+  ok "doctor.sh refused a workspace at the stack file's directory"
+else
+  bad "doctor.sh did not flag a workspace at the stack file's directory"
+fi
 
 # --- setup-agent-workspace.sh refuses a workspace in a protected tree --------
 guarded_targets=(
@@ -341,6 +452,36 @@ if [[ -z "$HITS" ]]; then
 else
   bad "found paths that bypass the helper:"
   printf '%s\n' "$HITS" >&2
+fi
+
+# --- Every --env-file consumer passes the STACK file --------------------------
+# The split is only real if every compose call hands over HYBRID_AI_STACK_ENV_FILE.
+# A consumer left on HYBRID_AI_ENV_FILE would read the layout file, which holds
+# no secrets. The helper itself and this test are excluded (they define/mention
+# the setting name).
+STACK_CONSUMERS="$(cd "$REPO" && git ls-files '*.sh' | grep -vE '^(scripts/lib/hybrid-ai-env\.sh|scripts/test-hybrid-ai-env\.sh)$')"
+BAD_CONSUMERS="$(cd "$REPO" && printf '%s\n' "$STACK_CONSUMERS" | while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  # Files that pass an env file to docker compose must name the STACK setting.
+  if grep -qE -- '--env-file' "$f" 2>/dev/null; then
+    if ! grep -qE 'HYBRID_AI_STACK_ENV_FILE' "$f" 2>/dev/null; then
+      printf '%s\n' "$f"
+    fi
+  fi
+done)"
+if [[ -z "$BAD_CONSUMERS" ]]; then
+  ok "every --env-file consumer uses HYBRID_AI_STACK_ENV_FILE"
+else
+  bad "these --env-file consumers do not use the stack file:"
+  printf '%s\n' "$BAD_CONSUMERS" >&2
+fi
+
+# install.sh must WRITE the stack file, never the layout file.
+STACK_ASSIGN="ENV_FILE=\"\$HYBRID_AI_STACK_ENV_FILE\""
+if grep -qF "$STACK_ASSIGN" "$REPO/install.sh"; then
+  ok "install.sh writes the stack env file"
+else
+  bad "install.sh does not set ENV_FILE from HYBRID_AI_STACK_ENV_FILE"
 fi
 
 # ---------------------------------------------------------------------------

@@ -50,7 +50,7 @@ cd "$SCRIPT_DIR" || exit 1
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
 APP_DIR="$HYBRID_AI_APP_DIR"
-ENV_FILE="$HYBRID_AI_ENV_FILE"
+ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 
 LOG_LINES=100
 REDACT=1
@@ -276,7 +276,17 @@ note ""
 note "Values are NEVER shown. Each entry reports whether the key is set and"
 note "how long the value is, which is what actually matters for diagnosis."
 
-sub "$ENV_FILE"
+sub "$ENV_FILE (stack)"
+# Note the LAYOUT file too, when it differs: after scripts/bootstrap.sh the
+# secrets live in the stack file (0600) and the host layout lives in
+# /etc/hybrid-ai/hybrid-ai.env (0644). Names, paths and lengths only -- never a
+# value, and the layout file is not read as a stack env file.
+if [[ "$HYBRID_AI_STACK_ENV_FILE" != "$HYBRID_AI_ENV_FILE" ]]; then
+  {
+    printf 'hybrid-ai layout file: %s (mode %s)\n\n' \
+      "$HYBRID_AI_ENV_FILE" "$(stat -c '%a' "$HYBRID_AI_ENV_FILE" 2>/dev/null)"
+  } 2>&1 | redact >> "$OUTFILE"
+fi
 # NOTE: this whole block is wrapped in { ... } >> "$OUTFILE" so that every
 # printf lands in the report. Without the wrapper the output goes to the
 # terminal and this section silently comes out EMPTY -- which is exactly the

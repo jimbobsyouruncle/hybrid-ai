@@ -52,8 +52,11 @@ into the deployment directory when satisfied.
 
 The script refuses to proceed if the workspace is, is inside, or contains any protected tree
 — `HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR`, `HYBRID_AI_LOG_DIR`, `HYBRID_AI_WORK_DIR`, the
-directory the env file lives in, or `BACKUP_CONF_DIR` — and fails if an env file or log file is
-found in the clone.
+directory the env file lives in, the directory the STACK env file
+(`HYBRID_AI_STACK_ENV_FILE`) lives in, or `BACKUP_CONF_DIR` — and fails if an env file or log
+file is found in the clone. On a bootstrapped host the layout file
+(`/etc/hybrid-ai/hybrid-ai.env`) and the stack file (`/etc/hybrid-ai/stack.env`) are two
+different files, and BOTH of their directories are guarded.
 
 On every run it also refreshes the existing clone, so the workspace-root copy of
 `openhands/AGENTS.md` stays current without a manual pull. The refresh fetches, then

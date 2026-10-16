@@ -66,7 +66,7 @@ APP_CONTAINERS=(open-webui hermes-agent)
 
 # Every compose file, so 'config --images' reports the full stack, matching the
 # way backup.sh and doctor.sh render it.
-COMPOSE=(docker compose -p hybrid-ai --env-file "$HYBRID_AI_ENV_FILE"
+COMPOSE=(docker compose -p hybrid-ai --env-file "$HYBRID_AI_STACK_ENV_FILE"
          --project-directory "$HYBRID_AI_APP_DIR"
          -f "$HYBRID_AI_APP_DIR/docker-compose.yml"
          -f "$HYBRID_AI_APP_DIR/openhands/docker-compose.openhands.yml"

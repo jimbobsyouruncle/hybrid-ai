@@ -135,6 +135,16 @@ jobs:
         # Restart= line. git and deploy-remote.sh are stubbed.
         run: bash scripts/test-deploy-instance.sh
 
+      - name: Host bootstrap / migration tests
+        # Offline, with no root, Docker or network. Proves scripts/bootstrap.sh
+        # refuses a non-root caller and every bad input with its own exit code,
+        # creates the three system accounts and the FHS layout idempotently,
+        # writes a secret-free layout env file, installs the (never enabled)
+        # deploy unit and polkit rule, and migrates a legacy fixture with moves
+        # that preserve inodes. useradd, getent, systemctl, docker, git, sshd and
+        # polkit are stubbed; HYBRID_AI_BOOTSTRAP_ROOT points at a scratch tree.
+        run: bash scripts/test-bootstrap.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. The bind sources are

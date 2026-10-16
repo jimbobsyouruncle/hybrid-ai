@@ -29,7 +29,7 @@ cd "$SCRIPT_DIR" || exit 1
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
 APP_DIR="$HYBRID_AI_APP_DIR"
-ENV_FILE="$HYBRID_AI_ENV_FILE"
+ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 
 QUIET=0
 NO_CLOUD=0
@@ -65,12 +65,21 @@ fail() {
   [[ -n "${2:-}" ]] && REMEDIES+=("${C_ERR}✗${C_RST} $2")
 }
 
-# Read one key from the resolved env file, stripping optional surrounding quotes.
+# Read one key from a resolved env file, stripping optional surrounding quotes.
+# On a bootstrapped host the LAYOUT file (HYBRID_AI_ENV_FILE, mode 0644) holds
+# the path and identity settings while the STACK file
+# (HYBRID_AI_STACK_ENV_FILE, mode 0600) holds the secrets, so BOTH are searched
+# and the first non-empty value wins. When the two are the same file (no
+# bootstrap), the search is identical to reading that one file.
 env_get() {
-  local v
-  v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)"
-  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
-  printf '%s' "$v"
+  local file v
+  for file in "$HYBRID_AI_ENV_FILE" "$HYBRID_AI_STACK_ENV_FILE"; do
+    [[ -n "$file" && -f "$file" ]] || continue
+    v="$(grep -E "^$1=" "$file" 2>/dev/null | tail -1 | cut -d= -f2-)"
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+    if [[ -n "$v" ]]; then printf '%s' "$v"; return 0; fi
+  done
+  printf '%s' ""
 }
 
 # Same idea, but for a named file, and it reports the two failure modes
@@ -128,13 +137,14 @@ section "Paths"
 # file) in HYBRID_AI_EXPLICIT_SETTINGS. Only a SET path is warned about when it
 # does not exist -- a default is never noise.
 PATH_IS_EXPLICIT=" ${HYBRID_AI_EXPLICIT_SETTINGS:-} "
-for _name in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR \
+for _name in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_STACK_ENV_FILE \
+             HYBRID_AI_DATA_DIR \
              HYBRID_AI_LOG_DIR HYBRID_AI_WORK_DIR OPENHANDS_WORKSPACE \
              AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR \
              RESTIC_CACHE_DIR BACKUP_LOG; do
   _p="${!_name}"
   pass "${_name} = ${_p}"
-  if [[ "$_name" != "HYBRID_AI_ENV_FILE" && ! -e "$_p" \
+  if [[ "$_name" != "HYBRID_AI_ENV_FILE" && "$_name" != "HYBRID_AI_STACK_ENV_FILE" && ! -e "$_p" \
         && "$PATH_IS_EXPLICIT" == *" ${_name} "* ]]; then
     warn "${_name} is set but does not exist: ${_p}" \
          "Create it, or unset ${_name} to fall back to the default."
@@ -371,10 +381,18 @@ if [[ -f "$ENV_FILE" ]]; then
   if [[ -n "$OH_WS" ]]; then
     OH_WS_REAL="$(readlink -f "$OH_WS" 2>/dev/null || echo "$OH_WS")"
     DEPLOY_REAL="$(readlink -f "$APP_DIR")"
+    # The directory of EACH env file is guarded: the layout file and the stack
+    # file. A workspace that IS either directory, or CONTAINS one, can read a
+    # secret or a deployment setting, so both must be refused.
+    ENV_DIR_REAL="$(dirname "$(readlink -f "$HYBRID_AI_ENV_FILE" 2>/dev/null || echo "$HYBRID_AI_ENV_FILE")")"
+    STACK_ENV_DIR_REAL="$(dirname "$(readlink -f "$HYBRID_AI_STACK_ENV_FILE" 2>/dev/null || echo "$HYBRID_AI_STACK_ENV_FILE")")"
     if [[ "$OH_WS_REAL" == "$DEPLOY_REAL" ]]; then
       fail "OPENHANDS_WORKSPACE is the deployment directory" \
            "The agent sandbox could read the env file and the log files. Fix: ./scripts/setup-agent-workspace.sh"
-    elif [[ -e "${OH_WS}/.env" || -e "$HYBRID_AI_ENV_FILE" && "$(readlink -f "$OH_WS")" == "$(dirname "$(readlink -f "$HYBRID_AI_ENV_FILE")")" ]]; then
+    elif [[ "$OH_WS_REAL" == "$ENV_DIR_REAL" || "$OH_WS_REAL" == "$STACK_ENV_DIR_REAL" ]]; then
+      fail "OPENHANDS_WORKSPACE is an env-file directory" \
+           "That defeats the isolation. Fix: ./scripts/setup-agent-workspace.sh"
+    elif [[ -e "${OH_WS}/.env" || -e "$HYBRID_AI_ENV_FILE" && "$OH_WS_REAL" == "$ENV_DIR_REAL" || -e "$HYBRID_AI_STACK_ENV_FILE" && "$OH_WS_REAL" == "$STACK_ENV_DIR_REAL" ]]; then
       fail "An env file exists inside the agent workspace" \
            "That defeats the isolation. Remove it: rm ${OH_WS}/.env"
     elif [[ -d "${OH_WS}/.git" ]]; then

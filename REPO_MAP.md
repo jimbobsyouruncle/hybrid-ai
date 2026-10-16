@@ -89,6 +89,7 @@
 - runpod/README.md - runpod/ — Cloud Inference Plane
 ## scripts
 
+- scripts/bootstrap.sh
 - scripts/check-agent-context.sh - Check that the checked-in agent context maps are fresh.
 - scripts/check-git-remotes.sh - FILE: scripts/check-git-remotes.sh
 - scripts/check-hermes-nonroot.sh - FILE: scripts/check-hermes-nonroot.sh
@@ -101,6 +102,7 @@
 - scripts/test-backup-mode-timers.sh - FILE: scripts/test-backup-mode-timers.sh
 - scripts/test-backup-system-units.sh - FILE: scripts/test-backup-system-units.sh
 - scripts/test-backup.sh - shellcheck disable=SC2317,SC2329 # helpers and the EXIT trap are called indirectly
+- scripts/test-bootstrap.sh - FILE: scripts/test-bootstrap.sh
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
 - scripts/test-deploy-forced-command.sh

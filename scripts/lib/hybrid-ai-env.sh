@@ -14,6 +14,15 @@
 #     HYBRID_AI_LOG_DIR   logs                    (default: repo dir)
 #     HYBRID_AI_WORK_DIR  scratch/work            (default: repo dir)
 #
+#   HYBRID_AI_ENV_FILE is the LAYOUT file: it holds paths and names only, never
+#   a secret. HYBRID_AI_STACK_ENV_FILE is the file every --env-file consumer
+#   hands to `docker compose`; it holds the stack's secrets. On a host with no
+#   bootstrap, the two are the same file, so every resolved path and command
+#   line is unchanged. After scripts/bootstrap.sh they differ:
+#   HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env (0644) and
+#   HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/stack.env (0600). install.sh writes
+#   ONLY the stack file, so a deploy can never erase the layout.
+#
 #   It also resolves the settings that already existed, with the SAME names and
 #   the SAME defaults as before, so a host that sets none of them keeps exactly
 #   the paths it has today:
@@ -73,9 +82,27 @@ _hybrid_ai_expand_tilde() {
 
 # Read ONE key from a file, line by line, never sourcing. Returns the LAST
 # match (last wins), matching install.sh's loader. Quotes are stripped.
+#
+# FAIL CLOSED: when the file EXISTS but this process cannot read it, the helper
+# must not silently fall back to the built-in defaults -- a non-root unit that
+# cannot read the env file would then act on the wrong paths. It names the
+# CALLER-SUPPLIED setting (never a value) and returns 1. A file that simply does
+# not exist is not an error: the defaults are the correct answer there.
+_hybrid_ai_file_unreadable() {
+  local name="$1" file="$2"
+  printf 'hybrid-ai-env: %s is set to %s, but that file exists and cannot be read.\n' \
+    "$name" "$file" >&2
+  printf 'hybrid-ai-env: refusing to fall back to the built-in defaults.\n' >&2
+}
+# Read ONE key from a file, line by line, never sourcing. Returns the LAST
+# match (last wins), matching install.sh's loader. Quotes are stripped.
 _hybrid_ai_file_get() {
   local file="$1" key="$2" line candidate
   [[ -f "$file" ]] || return 0
+  [[ -r "$file" ]] || {
+    _hybrid_ai_file_unreadable "${_HYBRID_AI_FILE_SETTING:-HYBRID_AI_ENV_FILE}" "$file"
+    return 1
+  }
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*${key}=(.*)$ ]] || continue
     candidate="${BASH_REMATCH[1]}"
@@ -83,6 +110,16 @@ _hybrid_ai_file_get() {
     candidate="${candidate%\'}"; candidate="${candidate#\'}"
     printf '%s' "$candidate"
   done < "$file"
+}
+
+# Fail closed on an env file that exists but this process cannot read. Names the
+# CALLER-SUPPLIED setting and the path -- never a value. A file that does not
+# exist is not an error: the built-in defaults are then the right answer.
+_hybrid_ai_file_require_readable() {
+  local name="$1" file="$2"
+  [[ -f "$file" ]] || return 0
+  [[ -r "$file" ]] || { _hybrid_ai_file_unreadable "$name" "$file"; return 1; }
+  return 0
 }
 
 # Refuse a value that is not a usable absolute path. Prints a clear message and
@@ -127,7 +164,7 @@ _hybrid_ai_resolve_path() {
   if [[ -n "$val" ]]; then
     origin="environment"
   else
-    val="$(_hybrid_ai_file_get "$envfile" "$name")"
+    val="$(_hybrid_ai_file_get "$envfile" "$name")" || return 1
     if [[ -n "$val" ]]; then origin="env file"; else origin="default"; fi
   fi
   if [[ "$origin" == "default" ]]; then
@@ -158,7 +195,7 @@ _hybrid_ai_resolve_enum() {
   if [[ -n "$val" ]]; then
     origin="environment"
   else
-    val="$(_hybrid_ai_file_get "$envfile" "$name")"
+    val="$(_hybrid_ai_file_get "$envfile" "$name")" || return 1
     if [[ -n "$val" ]]; then origin="env file"; else origin="default"; fi
   fi
   if [[ "$origin" == "default" ]]; then
@@ -183,12 +220,27 @@ _hybrid_ai_resolve_scalar() {
   local name="$1" default="$2" envfile="$3" val
   val="${!name:-}"
   if [[ -z "$val" ]]; then
-    val="$(_hybrid_ai_file_get "$envfile" "$name")"
+    val="$(_hybrid_ai_file_get "$envfile" "$name")" || return 1
   fi
   if [[ -z "$val" ]]; then val="$default"; fi
   printf -v "$name" '%s' "$val"
   export "${name?}"
   return 0
+}
+
+# --- Isolation helper shared by every guard --------------------------------
+# Print the directory of each env file, one realpath per line: the LAYOUT file
+# (HYBRID_AI_ENV_FILE) and the STACK file (HYBRID_AI_STACK_ENV_FILE). A workspace
+# or a repo tree that is, contains, or lives inside either directory can read a
+# secret or a deployment setting, so both are guarded. Callers do the
+# containment test; this only prints paths.
+hybrid_ai_env_dirs() {
+  local f d
+  for f in "$HYBRID_AI_ENV_FILE" "$HYBRID_AI_STACK_ENV_FILE"; do
+    [[ -n "$f" ]] || continue
+    d="$(dirname "$(readlink -f "$f" 2>/dev/null || echo "$f")")"
+    printf '%s\n' "$d"
+  done
 }
 
 # --- Resolve everything -----------------------------------------------------
@@ -223,9 +275,28 @@ hybrid_ai_env_load() {
   fi
   _hybrid_ai_resolve_path HYBRID_AI_ENV_FILE "$env_default" "$boot_env" || return 1
 
-  # From here on, read values from the RESOLVED env file.
+  # Fail closed on an unreadable layout file BEFORE deciding anything from it.
+  # The setting name is printed, never a value from the file.
+  _hybrid_ai_file_require_readable HYBRID_AI_ENV_FILE "$HYBRID_AI_ENV_FILE" || return 1
+
+  # From here on, read LAYOUT settings from the resolved layout file. Any later
+  # read of that file therefore names HYBRID_AI_ENV_FILE when it fails closed.
   local ef="$HYBRID_AI_ENV_FILE"
   local repo_default="$HYBRID_AI_DEFAULT_REPO_DIR"
+  _HYBRID_AI_FILE_SETTING="HYBRID_AI_ENV_FILE"
+
+  # STACK_ENV_FILE is the file every --env-file consumer hands to compose. It
+  # DEFAULTS to the resolved layout file, so with nothing set the stack file and
+  # the layout file are the same path and every command line is byte-identical
+  # to before this setting existed. scripts/bootstrap.sh points it elsewhere
+  # (/etc/hybrid-ai/stack.env) so the secrets and the layout can move apart.
+  #
+  # STACK_ENV_FILE may itself be named by the layout file, so it is read with
+  # the stack setting's name as the fail-closed label.
+  _HYBRID_AI_FILE_SETTING="HYBRID_AI_STACK_ENV_FILE"
+  _hybrid_ai_resolve_path HYBRID_AI_STACK_ENV_FILE "$HYBRID_AI_ENV_FILE" "$ef" || return 1
+  _HYBRID_AI_FILE_SETTING="HYBRID_AI_ENV_FILE"
+  _hybrid_ai_file_require_readable HYBRID_AI_STACK_ENV_FILE "$HYBRID_AI_STACK_ENV_FILE" || return 1
 
   _hybrid_ai_resolve_path HYBRID_AI_DATA_DIR "$repo_default" "$ef" || return 1
   _hybrid_ai_resolve_path HYBRID_AI_LOG_DIR  "$repo_default" "$ef" || return 1
@@ -297,6 +368,23 @@ hybrid_ai_env_load() {
   export HYBRID_AI_BACKUP_CRED_DIR HYBRID_AI_BACKUP_TIMER_UNIT
   export HYBRID_AI_BACKUP_SERVICE_UNIT HYBRID_AI_BACKUP_CHECK_TIMER_UNIT
   export HYBRID_AI_BACKUP_SYSTEMCTL_SCOPE HYBRID_AI_BACKUP_JOURNAL_SCOPE
+
+  # Snapshot the LAYOUT-resolved value of every setting that install.sh REWRITES
+  # into the stack file. On a bootstrapped host the stack file differs from the
+  # layout file, and a legacy stack file still carries the OLD values (empty
+  # HYBRID_AI_UID=, login-home OPENHANDS_WORKSPACE, ...). install.sh loads the
+  # stack file after this helper runs; it then restores these snapshots so the
+  # layout file stays authoritative for paths and identity, while the stack file
+  # supplies runtime config and secrets only. With HYBRID_AI_STACK_ENV_FILE
+  # unset both files are the same path, so every restore is a no-op.
+  HYBRID_AI_LAYOUT_UID="$HYBRID_AI_UID"
+  HYBRID_AI_LAYOUT_GID="$HYBRID_AI_GID"
+  HYBRID_AI_LAYOUT_OPENHANDS_WORKSPACE="$OPENHANDS_WORKSPACE"
+  HYBRID_AI_LAYOUT_AGENT_REPOS_DIR="$AGENT_REPOS_DIR"
+  HYBRID_AI_LAYOUT_OPENHANDS_STATE_DIR="$OPENHANDS_STATE_DIR"
+  export HYBRID_AI_LAYOUT_UID HYBRID_AI_LAYOUT_GID \
+         HYBRID_AI_LAYOUT_OPENHANDS_WORKSPACE HYBRID_AI_LAYOUT_AGENT_REPOS_DIR \
+         HYBRID_AI_LAYOUT_OPENHANDS_STATE_DIR
 
   return 0
 }

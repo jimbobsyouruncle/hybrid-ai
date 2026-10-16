@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
 APP_DIR="$HYBRID_AI_APP_DIR"
-ENV_FILE="$HYBRID_AI_ENV_FILE"
+ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 COMPOSE=(docker compose -p hybrid-ai --env-file "$ENV_FILE" --project-directory "$APP_DIR"
          -f "$APP_DIR/docker-compose.yml"
          -f "$APP_DIR/openhands/docker-compose.openhands.yml"

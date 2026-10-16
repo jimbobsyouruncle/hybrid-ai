@@ -21,15 +21,26 @@ Nothing here is active on its own. Today's deploy path
 
 ## What card F installs (one bootstrap, on the host)
 
-Installing the account, the files and the SSH key line on a host is card F's
-job. It is the manual bootstrap; everything after it runs from the forced
-command and the unit.
+Card F is one idempotent, root-run script, `scripts/bootstrap.sh`. It installs
+the account, the files and the SSH key line on a host in a single command, and
+migrates the current Pi to the same layout:
 
-1. **The account** — a no-login system account `hybrid-ai-deploy`
-   (`systemd` runs the unit as root, so the account is only the SSH identity).
+```sh
+sudo ./scripts/bootstrap.sh --deploy-pubkey <key.pub> [--from <legacy-dir>]
+```
+
+Everything after the bootstrap runs from the forced command and the unit. The
+bootstrap is the manual, one-time step; `install.sh` never runs it and never
+calls `sudo`.
+
+1. **The account** — a system account `hybrid-ai-deploy` (uid below `UID_MIN`).
+   It has `/bin/sh` and a locked password, because sshd runs the forced command
+   through the account's login shell; a nologin shell would refuse it.
+   (`systemd` runs the unit as root, so the account is only the SSH identity.)
 2. **The forced-command script** — `/opt/hybrid-ai/scripts/deploy-forced-command.sh`
    and its helpers under `/opt/hybrid-ai/scripts/`, readable and executable by
-   the account.
+   the account. `/opt/hybrid-ai` is a root-owned clone of the public https
+   remote at `origin/main`.
 3. **The unit** — `deploy/hybrid-ai-deploy@.service`, copied to
    `/etc/systemd/system/hybrid-ai-deploy@.service` (root-owned), then
    `systemctl daemon-reload`. It is an instantiated unit started explicitly; it
@@ -38,12 +49,16 @@ command and the unit.
    `/etc/polkit-1/rules.d/50-hybrid-ai-deploy.rules` (or the distro's polkit
    rules directory, e.g. `/usr/share/polkit-1/rules.d/`), root-owned, then
    reload polkit. It grants the account `start` of a matching unit and nothing
-   else.
-5. **The env file** — `/etc/hybrid-ai/hybrid-ai.env` (root-owned), the same
-   system env file the system-mode backup units read. The unit passes its path
-   by name only: `Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`.
-6. **The SSH key line** — in the account's `~/.ssh/authorized_keys`, restricted
-   to the forced command (see below).
+   else. The bootstrap refuses to run when polkitd is absent or predates
+   `.rules` (JavaScript) support.
+5. **The env file** — `/etc/hybrid-ai/hybrid-ai.env`, root-owned, mode `0644`.
+   It is the LAYOUT file: it holds path and identity settings only, never a
+   secret, so both `hybrid-ai-deploy` and `hybrid-ai-backup` can read it. (The
+   stack's secrets live in `/etc/hybrid-ai/stack.env`, mode `0600`.) The unit
+   passes its path by name only:
+   `Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`.
+6. **The SSH key line** — one line in the account's `~/.ssh/authorized_keys`,
+   restricted to the forced command (see below).
 
 ### The authorized_keys line
 
@@ -75,12 +90,13 @@ The `hybrid-ai-deploy` account holds:
   unit writes each run's log to `$HYBRID_AI_LOG_DIR/deploy/<sha>.log` with mode
   `0640` and group `hybrid-ai-deploy`, so the account reads the log for its own
   run without any journal access.
-- **Read access to the system env file.** The forced command resolves the host
+- **Read access to the layout env file.** The forced command resolves the host
   paths the same way the unit does, by reading
-  `/etc/hybrid-ai/hybrid-ai.env` (parsed, never sourced). Card F should make
-  that file readable by the account (e.g. mode `0640`, group
-  `hybrid-ai-deploy`) so both sides agree on `$HYBRID_AI_LOG_DIR`. The file
-  holds paths and names only.
+  `/etc/hybrid-ai/hybrid-ai.env` (parsed, never sourced). That file is mode
+  `0644`, owned by root, so the `hybrid-ai-deploy` account AND the
+  `hybrid-ai-backup` account both read it. It holds paths and names only. (An
+  earlier draft used mode `0640` group `hybrid-ai-deploy`; that would have
+  locked the backup account out, so it is `0644`.)
 - **One polkit action, one verb, one unit shape.** The polkit rule returns
   `polkit.Result.YES` only for `subject.user == "hybrid-ai-deploy"`,
   `action.id == "org.freedesktop.systemd1.manage-units"`, `verb == "start"`, and
@@ -159,4 +175,6 @@ running stack. A failed deploy stays failed and is diagnosed from its log.
 cover both halves offline — `systemctl`, `git` and `deploy-remote.sh` are stubbed
 on `PATH`, so no Docker, no network and no root are needed. They also check the
 unit has no `Restart=` line and that the polkit rule contains the exact user,
-action, verb and unit regex.
+action, verb and unit regex. `scripts/test-bootstrap.sh` covers the host
+bootstrap that installs the account, the unit, the polkit rule and the SSH key
+line, entirely offline.
