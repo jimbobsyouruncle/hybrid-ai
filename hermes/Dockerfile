@@ -88,6 +88,35 @@ RUN set -eu; \
  && test -x "${HERMES_INSTALL_DIR}/.hermes/venv/bin/python" \
  && test "$(stat -Lc '%u' "${HERMES_INSTALL_DIR}/.hermes/venv")" = "0"
 
+# --- Redirect dependency leases onto the data volume -------------------------
+# The runtime writes a lease file into the .leases directory BESIDE the venv
+# generation it pins (installs/<key>/environments/<uuid>/.leases and
+# installs/<key>/pm-runtime/generations/<uuid>/.leases). Those directories live
+# in the root-owned /opt tree, so the runtime uid got
+#   [Errno 13] Permission denied: '/opt/hermes-agent/installs/.../.leases/...'
+# and crash-looped. ENV HERMES_HOME (below) does NOT reroute these: the lease
+# path follows the venv's location, not HERMES_HOME.
+#
+# Fix without making /opt writable: replace each (empty) .leases directory with a
+# root-owned symlink into the data volume, mirroring its relative path under
+# ${HERMES_LEASE_ROOT}. The symlinks dangle in the image (the volume is not
+# mounted at build time); CMD creates their targets at start. /opt stays
+# immutable, so lease writes land on the volume and `docker diff` stays clean.
+# The build FAILS if no lease dirs are found or any of them is non-empty.
+ARG HERMES_LEASE_ROOT=/root/.hermes/opt-leases
+RUN set -eu; \
+    find "${HERMES_INSTALL_DIR}/installs" -type d -name .leases -prune -print > /tmp/leases.txt; \
+    test -s /tmp/leases.txt; \
+    while read -r d; do \
+        test -z "$(ls -A "$d")"; \
+        rel="${d#${HERMES_INSTALL_DIR}/installs/}"; \
+        rmdir "$d"; \
+        ln -s "${HERMES_LEASE_ROOT}/${rel}" "$d"; \
+        test "$(stat -c '%u' "$d")" = "0"; \
+    done < /tmp/leases.txt; \
+    rm -f /tmp/leases.txt; \
+    ! find "${HERMES_INSTALL_DIR}/installs" -type d -name .leases -print -quit | grep -q .
+
 # Root-owned launcher under /usr/local/bin. The image ENV already prepends the
 # install's own .hermes/bin, but a LOGIN shell rebuilds PATH from /etc/profile
 # (where the old /root/.local/bin lives), so `bash -lc 'command -v hermes'` would
@@ -123,6 +152,7 @@ RUN groupadd --gid "${HYBRID_AI_GID}" hermes && \
     useradd --uid "${HYBRID_AI_UID}" --gid "${HYBRID_AI_GID}" \
         --home-dir /root --no-create-home --shell /usr/sbin/nologin hermes && \
     chown -R "${HYBRID_AI_UID}:${HYBRID_AI_GID}" /root
+
 # Only /root (the data-volume mount point) becomes writable by the runtime uid.
 # /app (the WebUI) and /opt/hermes-agent (the agent) are LEFT ROOT-OWNED, so the
 # process that runs them cannot edit them. Byte-compile /app here, as root, with
@@ -132,16 +162,19 @@ RUN groupadd --gid "${HYBRID_AI_GID}" hermes && \
 # the root-owned /usr/local/bin/hermes symlink. /opt is never chowned.
 RUN "${HERMES_INSTALL_DIR}/.hermes/venv/bin/python" -m compileall -q /app \
  && test "$(stat -c '%u' /app)" = "0" \
- && ! find /app -user "${HYBRID_AI_UID}" -print -quit | grep -q .
+ && ! find /app -user "${HYBRID_AI_UID}" -print -quit | grep -q . \
+ && ! find "${HERMES_INSTALL_DIR}" -user "${HYBRID_AI_UID}" -print -quit | grep -q .
 
 # HOME stays /root. Saved state under hermes_data/ holds absolute /root/...
 # paths and the compose volume paths are unchanged, so this must not move.
 ENV HOME=/root
+
 # Put the root-owned launcher on PATH from the image environment so CMD needs no
 # shell init, and `hermes` resolves outside /root/.hermes. /usr/local/bin (the
 # root-owned symlink above) is already on the default PATH, so a login shell
 # resolves `hermes` too.
 ENV PATH="${HERMES_INSTALL_DIR}/.hermes/bin:${PATH}"
+
 # The image precompiles both trees and ships no .git, so the runtime uid never
 # needs to write bytecode or a checkout fingerprint under the immutable install.
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -162,31 +195,15 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV HERMES_WEBUI_AGENT_DIR="${HERMES_INSTALL_DIR}"
 ENV HERMES_WEBUI_PYTHON="${HERMES_INSTALL_DIR}/.hermes/venv/bin/python"
 ENV HERMES_WEBUI_SERVER_CWD="/root/.hermes/webui"
-# HERMES_HOME is pinned to the DATA VOLUME, never the install dir.
-#
-# Runtime dependency state -- pm/environments.py::install_state_dir(project) ->
-# dependency_home_root()/installs/<install_key> -- resolves under
-# get_default_hermes_root(), i.e. $HERMES_HOME when set, else $HOME/.hermes. The
-# dependency lease that pins the selected venv generation is written at runtime
-# as <install_state_dir>/environments/<uuid>/.leases by
-# hermes_cli/runtime_state.py::lease_directory (called from
-# pm/environments.py::activate_dependencies and pm/runtime.py
-# ::lease_current_runtime). It MUST land on the writable volume.
-#
-# This ENV is load-bearing, not a default. The launchers Hermes publishes honour
-# an explicit HERMES_HOME first and only fall back to a baked default:
-# hermes_cli/_launchers.py::_launcher_script does
-#   os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or <baked home>
-# The build's path rewrite (the /tmp/hermes-home -> ${HERMES_INSTALL_DIR} sed
-# above) can bake that default as /opt/hermes-agent, which would then resolve
-# installs_root under the READ-ONLY install tree -- exactly the
-# /opt/hermes-agent/installs/ffad.../environments/..../.leases write seen in the
-# live container. Setting HERMES_HOME here makes the runtime path win over any
-# baked default. The supported setting for this routing is HERMES_HOME; the smoke
-# job asserts it is the data volume, alongside the `docker diff` check that the
-# runtime never writes under /opt. install_state_dir('/opt/hermes-agent') is then
-# /root/.hermes/installs/ffad2f5543956651 -- the data volume.
+
+# HERMES_HOME is pinned to the DATA VOLUME, never the install dir. The launchers
+# Hermes publishes honour an explicit HERMES_HOME before any baked default, and
+# the build's /tmp/hermes-home -> ${HERMES_INSTALL_DIR} rewrite can bake that
+# default as /opt/hermes-agent. Setting it here keeps profiles, sessions and
+# other runtime state on the volume. NOTE: this does NOT move the dependency
+# leases (they follow the venv location); the .leases symlinks above do that.
 ENV HERMES_HOME="/root/.hermes"
+
 # Fail closed if the pinned interpreter cannot run both the WebUI and the Agent.
 # bootstrap.py::ensure_python_has_webui_deps would otherwise create /app/.venv at
 # RUNTIME, which is a write into the read-only /app tree (and would trip the smoke
@@ -212,9 +229,10 @@ USER ${HYBRID_AI_UID}:${HYBRID_AI_GID}
 # The WebUI interpreter is passed explicitly (the pinned /opt venv symlink) rather
 # than resolved by `python3` from PATH, so a login shell's PATH cannot change it.
 #
-# The server cwd is created here, at start, because bootstrap.py `os.chdir`s to it
-# but never creates it, and the image cannot pre-create it: HERMES_WEBUI_SERVER_CWD
-# lives under /root/.hermes, the data-volume mount point, so anything the image
-# wrote there would be hidden by the volume. `;` (not `&&`) keeps the mkdir ahead
-# of the backgrounded gateway and the foregrounded bootstrap.
-CMD ["bash", "-c", "mkdir -p \"${HERMES_WEBUI_SERVER_CWD:-/root/.hermes/webui}\"; hermes -p default gateway run --replace & exec \"${HERMES_WEBUI_PYTHON}\" bootstrap.py --host 0.0.0.0 --foreground --no-browser --skip-agent-install 8501"]
+# Start-time directory creation, all on the data volume (anything the image wrote
+# under /root/.hermes would be hidden by the mount):
+#   - the server cwd, because bootstrap.py `os.chdir`s to it but never creates it;
+#   - the target of every .leases symlink, so lease writes resolve.
+# `;` (not `&&`) keeps these ahead of the backgrounded gateway and the
+# foregrounded bootstrap.
+CMD ["bash", "-c", "mkdir -p \"${HERMES_WEBUI_SERVER_CWD:-/root/.hermes/webui}\"; for l in $(find /opt/hermes-agent/installs -type l -name .leases); do mkdir -p \"$(readlink \"$l\")\"; done; hermes -p default gateway run --replace & exec \"${HERMES_WEBUI_PYTHON}\" bootstrap.py --host 0.0.0.0 --foreground --no-browser --skip-agent-install 8501"]
