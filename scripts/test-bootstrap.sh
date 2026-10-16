@@ -1170,8 +1170,8 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
     docker-compose.yml hermes/docker-compose.hermes.yml \
     openhands/docker-compose.openhands.yml doctor.sh status/Caddyfile backup/ \
-    .github/workflows/deploy.yml scripts/deploy-forced-command.sh \
-    scripts/deploy-instance.sh deploy/ 2>/dev/null)"
+    .github/workflows/deploy.yml scripts/deploy-instance.sh \
+    deploy/hybrid-ai-deploy@.service deploy/50-hybrid-ai-deploy.rules 2>/dev/null)"
   check "the out-of-scope files are byte-identical to origin/main" "" "$diff_out"
 else
   printf 'skip: origin/main is not available; the byte-identical check is a no-op here\n'
