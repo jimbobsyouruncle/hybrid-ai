@@ -234,7 +234,7 @@ relocation restores into the split layout.
 | `HYBRID_AI_LOG_DIR` | the default location of `backup.log` in user mode | the repo directory |
 | `BACKUP_LOG` | the backup log file; in system mode it defaults to the units' `LogsDirectory=` (`/var/log/hybrid-ai-backup/backup.log`), in user mode to `$HYBRID_AI_LOG_DIR/backup.log` | mode-dependent |
 | `HYBRID_AI_WORK_DIR` | `.backup-staging`, `.restore-work`, `.restore-test-*` | the repo directory |
-| `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env` |
+| `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env`; if absent, `HYBRID_AI_ENV_FILE_FALLBACK` (default `/etc/hybrid-ai/hybrid-ai.env`) when it exists |
 | `BACKUP_CONF_DIR` | the user-mode credential directory | `~/.config/hybrid-ai-backup` |
 | `HYBRID_AI_BACKUP_CRED_DIR` | the directory the scripts read credentials from (default follows the mode: `BACKUP_CONF_DIR` in user mode, `/etc/credstore/hybrid-ai-backup` in system mode) | mode-dependent |
 | `RESTIC_CACHE_DIR` | the restic cache | `~/.cache/restic` |
@@ -488,7 +488,7 @@ was captured.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `No credentials at ~/.config/...` | Backups never configured | Run `./install.sh` |
-| `No credentials at /root/.config/hybrid-ai-backup/r2.env` on a system-mode host | A bare `sudo ./backup/...` resolves USER-mode paths; the credentials live in `/etc/credstore/hybrid-ai-backup` | Run it as `sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/backup.sh ...`, or start the unit: `sudo systemctl start hybrid-ai-backup-capture.service` |
+| `No credentials at /root/.config/hybrid-ai-backup/r2.env` on a system-mode host | The run resolved USER-mode paths because the layout file was not found; the credentials live in `/etc/credstore/hybrid-ai-backup` | Run it as `sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/backup.sh ...`, or start the unit: `sudo systemctl start hybrid-ai-backup-capture.service`. A bare `sudo ./backup/...` picks up the layout fallback (`/etc/hybrid-ai/hybrid-ai.env`) when `$HYBRID_AI_APP_DIR/.env` is absent, so it resolves system-mode paths too |
 | `tee: /var/log/hybrid-ai-backup/backup.log: Read-only file system` | A system-mode unit writing its log outside its `LogsDirectory=` (an old unit file without `LogsDirectory=hybrid-ai-backup`) | Update the units: re-run `./install.sh` as root, then `sudo systemctl daemon-reload` |
 | `unable to open cache: ... permission denied` | The restic cache (or a per-repo subdirectory) is owned by another uid, usually after an earlier manual `sudo` run | Self-healing: `backup.sh` detects the unwritable cache and falls back to a writable one (`restic_cache_unwritable` / `restic_cache_fallback` in the log). To restore the intended cache, `sudo chown -R hybrid-ai-backup:hybrid-ai-backup /var/cache/hybrid-ai-backup` |
 | `has permissions 644; expected 600` | Permissions drifted on a `HYBRID_AI_BACKUP_CRED_DIR` file | `chmod 600 ~/.config/hybrid-ai-backup/*` |

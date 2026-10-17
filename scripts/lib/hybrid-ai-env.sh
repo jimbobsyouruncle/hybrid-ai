@@ -14,6 +14,20 @@
 #     HYBRID_AI_LOG_DIR   logs                    (default: repo dir)
 #     HYBRID_AI_WORK_DIR  scratch/work            (default: repo dir)
 #
+#   HYBRID_AI_ENV_FILE resolution has ONE bootstrap fallback. When the setting
+#   is UNSET and the primary candidate ($HYBRID_AI_APP_DIR/.env) does NOT exist,
+#   but a fallback layout file DOES exist, the fallback is used. The fallback
+#   location is a NAMED environment variable:
+#
+#     HYBRID_AI_ENV_FILE_FALLBACK   (default: /etc/hybrid-ai/hybrid-ai.env)
+#
+#   The default is the LAYOUT file scripts/bootstrap.sh writes on a bootstrapped
+#   host (mode 0644, paths and names only). The fallback is the LAYOUT file and
+#   never the 0600 stack file. An explicit HYBRID_AI_ENV_FILE always wins and the
+#   fallback is then never consulted; an existing $HYBRID_AI_APP_DIR/.env always
+#   wins over the fallback. Set HYBRID_AI_ENV_FILE_FALLBACK to relocate the probe
+#   (tests use a fixture, so they never touch /etc).
+#
 #   HYBRID_AI_ENV_FILE is the LAYOUT file: it holds paths and names only, never
 #   a secret. HYBRID_AI_STACK_ENV_FILE is the file every --env-file consumer
 #   hands to `docker compose`; it holds the stack's secrets. On a host with no
@@ -243,12 +257,16 @@ hybrid_ai_env_dirs() {
   done
 }
 
+# The LAYOUT file a bootstrapped host uses when $HYBRID_AI_APP_DIR/.env is
+# absent. Overridable so tests (and unusual hosts) can relocate the probe.
+HYBRID_AI_ENV_FILE_FALLBACK_DEFAULT="/etc/hybrid-ai/hybrid-ai.env"
+
 # --- Resolve everything -----------------------------------------------------
 hybrid_ai_env_load() {
   # Bootstrap: find the env file we will read values from. Prefer an explicit
   # HYBRID_AI_ENV_FILE, then an explicit HYBRID_AI_APP_DIR, then the default
   # repository directory.
-  local boot_env
+  local boot_env boot_env_fallback=""
   if [[ -n "${HYBRID_AI_ENV_FILE:-}" ]]; then
     boot_env="${HYBRID_AI_ENV_FILE}"
   elif [[ -n "${HYBRID_AI_APP_DIR:-}" ]]; then
@@ -257,11 +275,31 @@ hybrid_ai_env_load() {
     boot_env="${HYBRID_AI_DEFAULT_REPO_DIR}/.env"
   fi
 
+  # Bootstrap FALLBACK (D10): on a bootstrapped host the layout moved to
+  # /etc/hybrid-ai/hybrid-ai.env, so $APP_DIR/.env legitimately does not exist.
+  # When HYBRID_AI_ENV_FILE is UNSET and the primary candidate is absent, but a
+  # fallback LAYOUT file exists, probe it. An explicit HYBRID_AI_ENV_FILE always
+  # wins and is never overridden; an existing $APP_DIR/.env is never replaced.
+  # Only the LAYOUT file is probed here -- never the 0600 stack secrets file.
+  if [[ -z "${HYBRID_AI_ENV_FILE:-}" && ! -e "$boot_env" ]]; then
+    local fallback="${HYBRID_AI_ENV_FILE_FALLBACK:-$HYBRID_AI_ENV_FILE_FALLBACK_DEFAULT}"
+    if [[ -n "$fallback" && -e "$fallback" ]]; then
+      boot_env_fallback="$(_hybrid_ai_canon "$fallback")"
+      boot_env="$boot_env_fallback"
+    fi
+  fi
+
   # APP_DIR: environment, then the bootstrap env file, then the repo dir.
   _hybrid_ai_resolve_path HYBRID_AI_APP_DIR "$HYBRID_AI_DEFAULT_REPO_DIR" "$boot_env" || return 1
 
   # ENV_FILE: environment, then the bootstrap env file, then $APP_DIR/.env.
   local env_default="${HYBRID_AI_APP_DIR}/.env"
+  # When the fallback is active it IS the layout file, so it is the default the
+  # ENV_FILE resolution lands on when neither the environment nor the file names
+  # a different path.
+  if [[ -n "$boot_env_fallback" ]]; then
+    env_default="$boot_env_fallback"
+  fi
   if [[ -n "${HYBRID_AI_ENV_FILE:-}" ]]; then
     boot_env="${HYBRID_AI_ENV_FILE}"
   else

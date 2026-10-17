@@ -60,7 +60,11 @@ calls `sudo`.
    secret, so both `hybrid-ai-deploy` and `hybrid-ai-backup` can read it. (The
    stack's secrets live in `/etc/hybrid-ai/stack.env`, mode `0600`.) The unit
    passes its path by name only:
-   `Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`.
+   `Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`. A bare
+   invocation that does not name the layout file still finds it: when
+   `HYBRID_AI_ENV_FILE` is unset and `$HYBRID_AI_APP_DIR/.env` is absent, the
+   helper falls back to `HYBRID_AI_ENV_FILE_FALLBACK` (default
+   `/etc/hybrid-ai/hybrid-ai.env`) when that file exists.
 6. **The SSH key line** — one line in the account's `~/.ssh/authorized_keys`,
    restricted to the forced command (see below).
 

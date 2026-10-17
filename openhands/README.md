@@ -56,7 +56,10 @@ directory the env file lives in, the directory the STACK env file
 (`HYBRID_AI_STACK_ENV_FILE`) lives in, or `BACKUP_CONF_DIR` — and fails if an env file or log
 file is found in the clone. On a bootstrapped host the layout file
 (`/etc/hybrid-ai/hybrid-ai.env`) and the stack file (`/etc/hybrid-ai/stack.env`) are two
-different files, and BOTH of their directories are guarded.
+different files, and BOTH of their directories are guarded. A bare invocation that does not
+name the layout file still finds it: when `HYBRID_AI_ENV_FILE` is unset and
+`$HYBRID_AI_APP_DIR/.env` is absent, the helper falls back to
+`HYBRID_AI_ENV_FILE_FALLBACK` (default `/etc/hybrid-ai/hybrid-ai.env`) when it exists.
 
 On a bootstrapped host the workspace and the repo tree are SIBLINGS of the data dir, never
 children of it: `scripts/bootstrap.sh` renders `OPENHANDS_WORKSPACE=/var/lib/hybrid-ai-agent`

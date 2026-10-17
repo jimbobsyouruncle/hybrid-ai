@@ -332,6 +332,34 @@ environment or the env file), a mistake shows up as one of these:
 `./doctor.sh` is the quick check: it prints each resolved path (never a value from the env
 file) and warns about any set path that does not exist.
 
+### The layout fallback on a bootstrapped host
+
+When `HYBRID_AI_ENV_FILE` is unset and `$HYBRID_AI_APP_DIR/.env` does not
+exist, the helper falls back to the host LAYOUT file
+`/etc/hybrid-ai/hybrid-ai.env` if that file exists. This is what makes a bare
+`sudo /opt/hybrid-ai/doctor.sh --no-cloud` report the paths the units actually
+use: the layout file is read, so `HYBRID_AI_BACKUP_MODE=system` takes effect,
+`BACKUP_LOG` resolves to `/var/log/hybrid-ai-backup/backup.log`, and
+`HYBRID_AI_BACKUP_CRED_DIR` resolves to `/etc/credstore/hybrid-ai-backup`.
+
+The fallback location is a named environment variable,
+`HYBRID_AI_ENV_FILE_FALLBACK` (default `/etc/hybrid-ai/hybrid-ai.env`). An
+explicit `HYBRID_AI_ENV_FILE` always wins and the fallback is then never
+consulted; an existing `$HYBRID_AI_APP_DIR/.env` is never replaced. Only the
+`0644` layout file is probed -- never the `0600` secrets file.
+
+Bare invocations on a bootstrapped host need root or an explicit
+`HYBRID_AI_ENV_FILE`. As root, `sudo ./doctor.sh --no-cloud` reads the layout
+file and reports the system-mode paths. As a non-root account that cannot read
+the layout file, the helper fails closed with the setting name and path (no
+value) instead of silently using user-mode defaults. Pass the layout file
+explicitly when you are not root:
+
+```bash
+HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./doctor.sh --no-cloud
+```
+
+
 ### The layout file and the stack file
 
 Two files matter here. `HYBRID_AI_ENV_FILE` is the LAYOUT file: it holds path
@@ -381,10 +409,12 @@ back at the file this account is deliberately not allowed to read.
 Fix: the forced command now pins `HYBRID_AI_STACK_ENV_FILE` at the layout file
 unconditionally, so it reads only paths it is allowed to read and never the
 `0600` secrets file. Check that the deploy caller passed
-`HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env` (or nothing, so the default
-applies) and did not export `HYBRID_AI_STACK_ENV_FILE`. Do NOT grant the deploy
-account read access to `stack.env` -- not by mode, group or ACL. The fix belongs
-in the forced command, not in the secrets file's permissions.
+`HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env` (or nothing, in which case the
+helper falls back to the default layout file `/etc/hybrid-ai/hybrid-ai.env` when
+`$HYBRID_AI_APP_DIR/.env` does not exist) and did not export
+`HYBRID_AI_STACK_ENV_FILE`. Do NOT grant the deploy account read access to
+`stack.env` -- not by mode, group or ACL. The fix belongs in the forced command,
+not in the secrets file's permissions.
 
 ---
 

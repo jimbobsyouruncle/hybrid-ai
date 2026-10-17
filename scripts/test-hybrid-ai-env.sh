@@ -18,7 +18,8 @@ set -uo pipefail
 # Ambient settings must never leak into the "defaults" assertions. Clear every
 # setting the helper resolves so the test is deterministic on any host (a CI
 # runner, a developer shell with OPENHANDS_WORKSPACE exported, and so on).
-unset HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_DATA_DIR HYBRID_AI_LOG_DIR \
+unset HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_ENV_FILE_FALLBACK \
+      HYBRID_AI_DATA_DIR HYBRID_AI_LOG_DIR \
       HYBRID_AI_WORK_DIR HYBRID_AI_UID HYBRID_AI_GID OPENHANDS_WORKSPACE \
       AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR RESTIC_CACHE_DIR \
       BACKUP_LOG HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
@@ -320,6 +321,115 @@ if [[ "$(id -u)" != "0" ]]; then
   chmod 600 "$LOCKED_STACK" "$LOCKED_LAYOUT"
 else
   printf 'ok   skip unreadable-env-file assertions (running as root)\n'
+fi
+
+# ---------------------------------------------------------------------------
+# 3c. Bootstrap LAYOUT fallback (D10)
+# ---------------------------------------------------------------------------
+# On a bootstrapped host $HYBRID_AI_APP_DIR/.env does not exist: the layout
+# moved to /etc/hybrid-ai/hybrid-ai.env. When HYBRID_AI_ENV_FILE is UNSET the
+# helper must probe the fallback layout file. The fallback location is the NAMED
+# variable HYBRID_AI_ENV_FILE_FALLBACK, so these fixtures live in the temp dir
+# and NOTHING here reads or writes /etc.
+echo "== bootstrap layout fallback (D10) =="
+FBDIR="${TMPROOT}/fb"; mkdir -p "${FBDIR}/app"
+FBDIR_APP="${FBDIR}/app"            # has NO .env
+LAYOUT="${FBDIR}/hybrid-ai.env"     # the fallback LAYOUT file
+STACK_FB="${FBDIR}/stack.env"       # the secrets file the layout names
+: > "$STACK_FB"
+cat > "$LAYOUT" <<FBEOF
+HYBRID_AI_ENV_FILE=${LAYOUT}
+HYBRID_AI_STACK_ENV_FILE=${STACK_FB}
+HYBRID_AI_BACKUP_MODE=system
+FBEOF
+
+# A resolver that runs the helper with NO explicit HYBRID_AI_ENV_FILE and an
+# explicit fallback location, printing one resolved variable.
+fb_resolve() { # var [extra K=V ...]
+  local var="$1"; shift
+  env "$@" HYBRID_AI_ENV_FILE_FALLBACK="$LAYOUT" \
+      HYBRID_AI_APP_DIR="$FBDIR_APP" \
+      bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$$var\""
+}
+fb_rc() { # [extra K=V ...]
+  env "$@" HYBRID_AI_ENV_FILE_FALLBACK="$LAYOUT" HYBRID_AI_APP_DIR="$FBDIR_APP" \
+      bash -c "source '$HELPER'" >/dev/null 2>&1
+  return $?
+}
+
+# Criterion 1 + 3: with $APP_DIR/.env absent, the fallback resolves and the
+# WHOLE chain follows the layout file.
+check "fallback: HYBRID_AI_ENV_FILE resolves to the fallback layout" "$LAYOUT" \
+  "$(fb_resolve HYBRID_AI_ENV_FILE)"
+check "fallback: mode is read from the layout (system)" "system" \
+  "$(fb_resolve HYBRID_AI_BACKUP_MODE)"
+check "fallback: BACKUP_LOG follows the mode" "/var/log/hybrid-ai-backup/backup.log" \
+  "$(fb_resolve BACKUP_LOG)"
+check "fallback: HYBRID_AI_BACKUP_CRED_DIR is the credstore default" \
+  "/etc/credstore/hybrid-ai-backup" "$(fb_resolve HYBRID_AI_BACKUP_CRED_DIR)"
+check "fallback: STACK_ENV_FILE is the file the layout names" "$STACK_FB" \
+  "$(fb_resolve HYBRID_AI_STACK_ENV_FILE)"
+check "fallback: APP_DIR keeps its explicit value" "$FBDIR_APP" \
+  "$(fb_resolve HYBRID_AI_APP_DIR)"
+
+# Criterion 2 (b): when $APP_DIR/.env EXISTS the fallback is never consulted.
+PRESENT_DIR="${FBDIR}/present"; mkdir -p "$PRESENT_DIR"
+PRESENT_LAYOUT="${FBDIR}/present-layout.env"
+printf 'HYBRID_AI_DATA_DIR=/tmp/from-present-layout\n' > "$PRESENT_LAYOUT"
+cat > "${PRESENT_DIR}/.env" <<PEOF
+HYBRID_AI_DATA_DIR=/tmp/from-app-dotenv
+PEOF
+check "fallback not used when \$APP_DIR/.env exists" "/tmp/from-app-dotenv" \
+  "$(env HYBRID_AI_ENV_FILE_FALLBACK="$PRESENT_LAYOUT" HYBRID_AI_APP_DIR="$PRESENT_DIR" \
+      bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_DATA_DIR\"")"
+
+# Criterion 2 (a): an explicit HYBRID_AI_ENV_FILE always wins; the fallback is
+# never consulted even when it exists and $APP_DIR/.env does not.
+check "explicit HYBRID_AI_ENV_FILE wins over the fallback" "/tmp/from-explicit" \
+  "$(env HYBRID_AI_ENV_FILE="$LAYOUT" HYBRID_AI_ENV_FILE_FALLBACK="$PRESENT_LAYOUT" \
+      HYBRID_AI_APP_DIR="$FBDIR_APP" HYBRID_AI_DATA_DIR=/tmp/from-explicit \
+      bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_DATA_DIR\"")"
+check "explicit HYBRID_AI_ENV_FILE is not replaced by the fallback" "$LAYOUT" \
+  "$(env HYBRID_AI_ENV_FILE="$LAYOUT" HYBRID_AI_ENV_FILE_FALLBACK="$PRESENT_LAYOUT" \
+      HYBRID_AI_APP_DIR="$FBDIR_APP" \
+      bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_ENV_FILE\"")"
+
+# The fallback override variable is honoured: point it at a DIFFERENT layout and
+# that layout's value is the one that applies.
+OVERRIDE_LAYOUT="${FBDIR}/override.env"
+printf 'HYBRID_AI_DATA_DIR=/tmp/from-override\n' > "$OVERRIDE_LAYOUT"
+check "the fallback override variable is honoured" "/tmp/from-override" \
+  "$(env HYBRID_AI_ENV_FILE_FALLBACK="$OVERRIDE_LAYOUT" HYBRID_AI_APP_DIR="$FBDIR_APP" \
+      bash -c "source '$HELPER' >/dev/null 2>&1; printf '%s' \"\$HYBRID_AI_DATA_DIR\"")"
+
+# Criterion 4: fail closed. With the fallback active and the resolved stack file
+# PRESENT but unreadable to this uid, the helper exits non-zero and names the
+# setting and path -- never a value. Only meaningful when NOT root.
+if [[ "$(id -u)" != "0" ]]; then
+  LOCKED_FB_STACK="${FBDIR}/locked-stack.env"
+  printf 'SECRET=1\n' > "$LOCKED_FB_STACK"
+  chmod 000 "$LOCKED_FB_STACK"
+  LOCKED_LAYOUT="${FBDIR}/locked-layout.env"
+  cat > "$LOCKED_LAYOUT" <<LFBEOF
+HYBRID_AI_ENV_FILE=${LOCKED_LAYOUT}
+HYBRID_AI_STACK_ENV_FILE=${LOCKED_FB_STACK}
+LFBEOF
+  rc=0; err="$(env HYBRID_AI_ENV_FILE_FALLBACK="$LOCKED_LAYOUT" HYBRID_AI_APP_DIR="$FBDIR_APP" \
+               bash -c "source '$HELPER'" 2>&1 >/dev/null)" || rc=$?
+  check "fallback: an unreadable stack file exits non-zero" "1" "$rc"
+  if [[ "$err" == *HYBRID_AI_STACK_ENV_FILE* && "$err" == *locked-stack.env* ]]; then
+    ok "fallback: the message names the setting and the path"
+  else
+    bad "fallback: the message did not name the setting and path: $err"
+  fi
+  if [[ "$err" == *"SECRET"* || "$err" == *"=1"* ]]; then
+    bad "fallback: the message leaked a value from the file"
+  else
+    ok "fallback: the message leaks no value"
+  fi
+  chmod 600 "$LOCKED_FB_STACK"
+else
+  printf 'ok   skip fallback unreadable-stack assertion (running as root)\n'
 fi
 
 # A file that simply does not exist is NOT an error: the defaults apply.
