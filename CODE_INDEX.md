@@ -61,6 +61,7 @@
 - readable_path()
 - write_status()
 - read_status()
+- _cred_file_mode_ok()
 - stage_backup()
 - hermes_rsync_excludes()
 - hermes_prune_names()
@@ -343,10 +344,13 @@
 - run_backup()
 
 ## scripts/test-backup-system-units.sh
+- cleanup_tmp()
 - ok()
 - bad()
+- skip()
 - has_line()
 - hasnt_regex()
+- run_env_probe()
 - run_verify()
 
 ## scripts/test-backup.sh
@@ -453,7 +457,9 @@
 ## scripts/test-read-probe.sh
 - ok()
 - bad()
+- skip()
 - check()
+- run_find_unreadable()
 
 ## scripts/test-sync-agent-repos.sh
 - pass()

@@ -339,7 +339,7 @@ The gate is fail-closed. It depends on all five jobs with `if: always()`, prints
 |---|---|
 | Client-side encryption | restic encrypts on the Pi; R2 never sees plaintext |
 | Credential separation | Backup keys live in `~/.config/hybrid-ai-backup/` (0700), outside the git repo and separate from `.env` |
-| Permission enforcement | Both scripts refuse to run if credential files are not mode 0600 |
+| Permission enforcement | Both scripts refuse to run if a `HYBRID_AI_BACKUP_CRED_DIR` credential file is not mode 0600. A systemd `LoadCredential=` copy under `$CREDENTIALS_DIRECTORY` is accepted at 0400/0440 instead, because systemd materialises that tmpfs copy each start and it can never be `chmod 600` |
 | Least-privilege token | R2 token scoped to **Object Read & Write** on **one bucket** — cannot create, delete, or reach other buckets |
 | Passphrase not in environment | `RESTIC_PASSWORD_FILE` is used rather than `RESTIC_PASSWORD`, keeping it out of `/proc/<pid>/environ` |
 | Safe config parsing | `r2.env` is parsed line by line, never `source`d, so a crafted value cannot execute |
@@ -348,7 +348,7 @@ The gate is fail-closed. It depends on all five jobs with `if: always()`, prints
 | Untrusted-path handling | File names under `hermes_data` come from the Hermes container and are treated as attacker-controlled. A discovered path must pass an allow-list (each component matches `[A-Za-z0-9._@+-]+`, is not `.` or `..`, does not start with `-`) before any copy or `sqlite3` call. Rejected names are counted only and never logged |
 | No SQL text from names | `VACUUM INTO` (which splices the destination into SQL text) is not used. Capture is a sidecar copy with a staged checkpoint, or SQLite's online `.backup` |
 | Capture is verified | A captured database must pass `PRAGMA quick_check` on the staged copy. Classification is by the 16-byte SQLite header, not the file extension |
-| Incomplete status | A run that missed durable state still uploads, but is tagged `complete:false`, logs `backup_incomplete`, and exits 3 so no retry loop hides it |
+| Incomplete status | A run that missed durable state still uploads, but is tagged `complete:false`, logs `backup_incomplete`, and exits 3. Every unit lists exit 3 in both `SuccessExitStatus=` (so systemd does not report an INCOMPLETE run as a failed unit) and `RestartPreventExitStatus=` (so no retry loop hides it) |
 | Working directories gitignored | `.backup-staging/`, `.restore-work/`, `.restore-test-*/`, `webui_data.pre-restore-*/`, `backup.log` |
 | Metadata-only logging | Backup events record sizes, counts, and durations — never document names or chat content |
 
@@ -368,6 +368,7 @@ network or the credentials.
 | Upload has no read privilege | `hybrid-ai-backup-upload.service` sets `CapabilityBoundingSet=` (empty). It cannot read data it does not own, and does not need to: the capture already staged a copy it can read |
 | Credentials outside data trees | The upload unit reads them through `LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env` and `LoadCredential=repo-password:...`, so systemd copies them into a private tmpfs — never a copy inside a data tree |
 | Credentials root-only | `/etc/credstore/hybrid-ai-backup/` is root-owned; `r2.env` and `repo-password` are mode 0600. `install.sh` writes them there in system mode |
+| Layout file only, never the secrets file | Every system-mode unit pins `HYBRID_AI_STACK_ENV_FILE` at the 0644 layout file (`/etc/hybrid-ai/hybrid-ai.env`), so the env helper never reads the 0600 root-only `stack.env` as `hybrid-ai-backup`. The account needs no access to `stack.env`; the layout file holds only names and paths |
 | No account in the docker group | Neither unit joins `docker`. The one root-owned helper that talks to Docker (`backup/backup-containers.sh`) is run with the leading `+` on fixed Exec lines, so privilege is bounded to one fixed command |
 | Docker socket unreachable | Both units set `InaccessiblePaths=-/run/docker.sock` and `-/var/run/docker.sock` |
 | No container ever stopped | The helper only ever pauses and unpauses the fixed container set (incident B1: a retry loop once stopped `hermes-agent`). A killed capture is unpaused by `ExecStopPost=` |
