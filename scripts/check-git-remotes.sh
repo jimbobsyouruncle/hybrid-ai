@@ -5,9 +5,9 @@
 #   Report any agent clone whose git config embeds a credential in a remote
 #   URL. OpenHands' app-server clones with `https://<token>@github.com/...`
 #   and git stores that URL in project/<repo>/.git/config. The token is
-#   therefore written to disk in plain text. Until the agent-server upgrade
-#   (>= 1.37.0, tracked separately) stops doing this, detecting it is the
-#   control.
+#   therefore written to disk in plain text. The agent-server pin that stops
+#   this (>= 1.37.0) has shipped (1.37.1-python); a legacy clone can still
+#   carry an embedded credential, so detecting it is the control.
 #
 #   This script is DETECTION ONLY. It never rewrites, strips or re-clones a
 #   remote, and it never modifies a file.

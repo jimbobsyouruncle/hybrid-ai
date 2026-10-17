@@ -766,9 +766,10 @@ control until the upgrade.
 **The real fix: upgrade the agent-server.** An OpenHands agent-server at
 **`1.37.0` or newer** stops embedding credentials in the clone URL and uses a
 credential helper instead, so nothing sensitive lands in `.git/config`. That
-upgrade is tracked separately. Until it ships, expect the warning on every
-deploy and after every new clone, and re-check after rotating the token to
-confirm the old value is gone.
+pin has now shipped: the stack defaults to agent-server **`1.37.1-python`** and
+app-server **`:1.10`**. A clone made before the upgrade can still carry a stale
+embedded credential, so rotate the token and re-check to confirm the old value
+is gone.
 
 ---
 

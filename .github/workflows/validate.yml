@@ -162,6 +162,14 @@ jobs:
         # stubbed on PATH; the Hermes wait window is asserted at 300 s.
         run: bash scripts/test-install-health.sh
 
+      - name: Env pin migration tests
+        # Offline. Proves install.sh's STEP 2b migration moves a stale
+        # :1.8 / 1.26.0-python pin in an existing .env to the current defaults,
+        # preserves an owner-chosen pin untouched, writes the new defaults when
+        # no .env exists, and is idempotent on a second run. Docker and friends
+        # are stubbed on PATH; the run uses --no-start.
+        run: bash scripts/test-env-pin-migration.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. The bind sources are
