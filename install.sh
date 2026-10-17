@@ -537,6 +537,20 @@ fi
 log "Ensuring persistent host mounts..."
 
 for f in "$HYBRID_AI_INSTALL_LOG" "$BACKUP_LOG"; do
+  if [[ "$HYBRID_AI_BACKUP_MODE" == "system" && "$f" == "$BACKUP_LOG" ]]; then
+    # In system mode the backup log lives in the units' LogsDirectory=
+    # (/var/log/hybrid-ai-backup) and is written by the hybrid-ai-backup account.
+    # install.sh must not leave a root:root 0600 file the account cannot append
+    # to: as root it repairs the ownership of an existing file; otherwise it
+    # leaves the path to LogsDirectory=, which systemd creates and owns on the
+    # first unit start. User mode is unchanged (the log is created 0600 by the
+    # invoking account, below).
+    if [[ -e "$f" && "$(id -u)" == "0" ]]; then
+      chown hybrid-ai-backup:hybrid-ai-backup "$f" 2>/dev/null || true
+      chmod 600 "$f" 2>/dev/null || true
+    fi
+    continue
+  fi
   [[ -e "$f" ]] || { : > "$f"; chmod 600 "$f"; }
   if [[ -d "$f" ]]; then
     warn "$(basename "$f") is a directory (created by an earlier Docker run). Replacing it."

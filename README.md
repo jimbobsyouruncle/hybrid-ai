@@ -581,7 +581,10 @@ exits non-zero and names the setting instead of quietly using a default.
 The settings that already existed keep their names and defaults:
 `OPENHANDS_WORKSPACE`, `AGENT_REPOS_DIR`, `OPENHANDS_STATE_DIR`,
 `BACKUP_CONF_DIR`, `RESTIC_CACHE_DIR`, `BACKUP_LOG`, and `HYBRID_AI_UID` /
-`HYBRID_AI_GID`.
+`HYBRID_AI_GID`. One exception is mode-derived: `BACKUP_LOG` keeps its
+user-mode default (`$HYBRID_AI_LOG_DIR/backup.log`), but in system mode it
+resolves to the units' `LogsDirectory=` path,
+`/var/log/hybrid-ai-backup/backup.log`, the same file `doctor.sh` reads.
 
 A split layout for a dedicated system account looks like this (commented example
 in `.env.example`):

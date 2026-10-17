@@ -63,16 +63,19 @@ LoadCredential=repo-password:/etc/credstore/hybrid-ai-backup/repo-password
 # The staged capture and the restic cache are the only places this unit reads
 # or writes. StateDirectory= is the staging root (the capture unit writes it,
 # this unit reads it and later removes the whole tree); CacheDirectory= is
-# RESTIC_CACHE_DIR. Names and paths only.
+# RESTIC_CACHE_DIR; LogsDirectory= is the directory systemd grants write access
+# to under ProtectSystem=strict, and it is where the backup log lives (the
+# shared helper resolves BACKUP_LOG to /var/log/hybrid-ai-backup/backup.log in
+# system mode, the SAME path doctor.sh reads). Names and paths only.
 StateDirectory=hybrid-ai-backup
 RuntimeDirectory=hybrid-ai-backup
 CacheDirectory=hybrid-ai-backup
+LogsDirectory=hybrid-ai-backup
 Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 Environment=HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 Environment=HYBRID_AI_BACKUP_MODE=system
 Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
 Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup
-Environment=BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log
 
 # Give up rather than run forever. A hung upload holding the staging directory
 # open is worse than a missed night.

@@ -336,9 +336,20 @@ hybrid_ai_env_load() {
   export HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR HYBRID_AI_OLLAMA_DATA_DIR
   export HYBRID_AI_INSTALL_LOG HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR
 
-  # BACKUP_LOG keeps its name and default: $LOG_DIR/backup.log. The resolved
-  # value is exported so backup.sh/restore.sh/doctor.sh share one path.
-  _hybrid_ai_resolve_path BACKUP_LOG "${HYBRID_AI_LOG_DIR}/backup.log" "$ef" || return 1
+  # BACKUP_LOG keeps its name. In user mode its default is unchanged:
+  # $LOG_DIR/backup.log. In SYSTEM mode the backup runs as a systemd unit and
+  # its log lives in the unit's LogsDirectory= (/var/log/hybrid-ai-backup), the
+  # one directory systemd grants write access to under ProtectSystem= strict.
+  # Resolving the SAME path here means the units, doctor.sh and install.sh all
+  # watch ONE file; the defect was two paths, so doctor.sh watched a file the
+  # units never wrote and reported "no successful backup recorded yet" forever.
+  # A SET value (environment or env file) still wins in both modes.
+  local backup_log_default="${HYBRID_AI_LOG_DIR}/backup.log"
+  if [[ "$HYBRID_AI_BACKUP_MODE" == "system" ]]; then
+    backup_log_default="/var/log/hybrid-ai-backup/backup.log"
+  fi
+  _hybrid_ai_resolve_path BACKUP_LOG "$backup_log_default" "$ef" || return 1
+  unset backup_log_default
 
   # --- Mode-derived unit names and credential directory ---------------------
   # ONE place resolves which backup units a mode uses, so install.sh, doctor.sh,
