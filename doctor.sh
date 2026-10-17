@@ -918,10 +918,10 @@ fi
 # OpenHands' app-server clones with `https://<token>@github.com/...`, and git
 # stores that URL verbatim in project/<repo>/.git/config. The token is then on
 # disk in plain text. Hand-stripping the URL does not hold: the next clone
-# rewrites it. Until the agent-server upgrade (>= 1.37.0, tracked separately)
-# stops doing this, detecting it is the only control. This is a WARNING, never
-# a failure -- one live clone trips it today, and a red deploy must not be the
-# result.
+# rewrites it. The agent-server pin that stops this (>= 1.37.0) has shipped
+# (1.37.1-python); detection stays the control here regardless. This is a
+# WARNING, never a failure -- one legacy clone can still trip it, and a red
+# deploy must not be the result.
 # ---------------------------------------------------------------------------
 section "Agent clones"
 
@@ -953,7 +953,7 @@ else
     while IFS= read -r cline; do
       [[ -n "$cline" ]] || continue
       warn "Credential embedded in a git remote: ${cline}" \
-           "Rotate that token in GitHub, then re-run ./doctor.sh. Do not hand-strip the URL: the next clone rewrites it. See docs/TROUBLESHOOTING.md for why, and for the agent-server upgrade that fixes it."
+           "Rotate that token in GitHub, then re-run ./doctor.sh. Do not hand-strip the URL: the next clone rewrites it. See docs/TROUBLESHOOTING.md for why."
     done <<<"$CRED_OUT"
   else
     warn "An agent clone git config could not be read" \

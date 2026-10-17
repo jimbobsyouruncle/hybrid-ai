@@ -41,7 +41,7 @@
 # ---------------------------------------------------------------------------
 services:
   openhands:
-    image: ${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.8}
+    image: ${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.10}
     container_name: hybrid-ai-openhands
     restart: unless-stopped
 
@@ -54,15 +54,17 @@ services:
 
     environment:
       AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
-      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.26.0-python}
+      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}
 
       # Off by default: event logs are verbose and can echo file contents from
       # the workspace. Turn on temporarily when debugging, then turn it back off.
       LOG_ALL_EVENTS: ${OPENHANDS_LOG_ALL_EVENTS:-false}
 
       OH_PERSISTENCE_DIR: /.openhands
-      # NOTE: agent-server 1.26.0 ignores this and runs as 'openhands' (UID 10001).
-      # install.sh grants that UID access to the workspace via ACLs instead.
+      # NOTE: whether agent-server 1.37.1 honours SANDBOX_USER_ID is unverified
+      # offline. install.sh does not assume either way: it pulls the image and
+      # derives the sandbox uid dynamically (docker run --entrypoint id ... -u
+      # openhands), then grants that uid access to the workspace via ACLs.
       SANDBOX_USER_ID: ${HYBRID_AI_UID:-${STATUS_UID:-1000}}
 
       # The isolated clone -- NOT this directory. See note 2 above.

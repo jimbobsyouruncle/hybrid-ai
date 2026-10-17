@@ -438,6 +438,13 @@
 - ssh_called()
 - key_left()
 
+## scripts/test-env-pin-migration.sh
+- ok()
+- bad()
+- check()
+- run_install()
+- env_value()
+
 ## scripts/test-hermes-nonroot-preflight.sh
 - run_check()
 - pass()
