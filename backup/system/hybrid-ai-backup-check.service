@@ -30,6 +30,7 @@ ExecStart=/opt/hybrid-ai/backup/backup.sh --check
 # An INCOMPLETE outcome (exit 3) is valid, not a check failure; a real failure
 # (exit 1) stays retryable if a retry policy is ever added.
 RestartPreventExitStatus=3
+SuccessExitStatus=3
 
 # The same credentials the upload unit uses, from the same root-owned store.
 LoadCredential=r2.env:/etc/credstore/hybrid-ai-backup/r2.env
@@ -39,6 +40,7 @@ StateDirectory=hybrid-ai-backup
 RuntimeDirectory=hybrid-ai-backup
 CacheDirectory=hybrid-ai-backup
 Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 Environment=HYBRID_AI_BACKUP_MODE=system
 Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
 Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup

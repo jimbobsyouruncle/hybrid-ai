@@ -574,9 +574,30 @@ if [[ "$RUN_PHASE" != "stage" ]]; then
 [[ -f "$R2_ENV_FILE" ]] || die "No credentials at ${R2_ENV_FILE}. Run ./install.sh to configure backups."
 [[ -f "$RESTIC_PW_FILE" ]] || die "No repository password at ${RESTIC_PW_FILE}."
 
+# Credential file mode. A systemd LoadCredential= copy lands in
+# $CREDENTIALS_DIRECTORY, a root-owned tmpfs systemd materialises fresh on every
+# start; the files arrive mode 0400 (or 0440) and CANNOT be chmod 600 -- this
+# unit does not own that tmpfs and the copy is recreated each run. So accept
+# 0400/0440 ONLY for a file resolved under $CREDENTIALS_DIRECTORY. A file
+# sourced from HYBRID_AI_BACKUP_CRED_DIR (the user-mode path) still has to be
+# exactly 0600, and its failure message keeps the chmod 600 advice.
+_cred_file_mode_ok() {
+  local f="$1" perms="$2"
+  if [[ -n "${CREDENTIALS_DIRECTORY:-}" && "$f" == "${CREDENTIALS_DIRECTORY}/"* ]]; then
+    # 0400/0440 are what systemd materialises; 0600 is accepted too because it is
+    # strictly narrower than 0440 and a manual tmpfs copy may use it.
+    [[ "$perms" == "400" || "$perms" == "440" || "$perms" == "600" ]]
+  else
+    [[ "$perms" == "600" ]]
+  fi
+}
 for f in "$R2_ENV_FILE" "$RESTIC_PW_FILE"; do
   perms="$(stat -c '%a' "$f" 2>/dev/null || echo '???')"
-  [[ "$perms" == "600" ]] || die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600 ${f}"
+  _cred_file_mode_ok "$f" "$perms" && continue
+  if [[ -n "${CREDENTIALS_DIRECTORY:-}" && "$f" == "${CREDENTIALS_DIRECTORY}/"* ]]; then
+    die "${f} has permissions ${perms}; a systemd LoadCredential copy must be 0400 or 0440."
+  fi
+  die "${f} has permissions ${perms}; expected 600. Fix with: chmod 600 ${f}"
 done
 
 # SECURITY: parsed line by line, never sourced. 'source' would execute $(...).

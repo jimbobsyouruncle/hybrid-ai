@@ -18,6 +18,15 @@
 #   missing-host-path form, print a skip and pass; ANY other diagnostic -- alone
 #   or mixed with the host-path line -- is a hard failure. Both directions are
 #   proved with a stub systemd-analyze placed FIRST on PATH.
+#
+#   It also covers the two residual system-mode defects:
+#     * D2 -- the upload and check units must pin HYBRID_AI_STACK_ENV_FILE at the
+#       0644 LAYOUT file, or the env helper fail-closes on the 0600 root-only
+#       stack file before restic runs. A 0644 layout file naming a 0600 root-only
+#       stack file is exercised offline as an unprivileged uid; when run as root
+#       the case drops to an unprivileged uid (setpriv/runuser) and prints SKIP
+#       (never a pass) if it cannot. A SKIP on a non-root runner is a FAILURE.
+#     * D5 -- exit 3 (an INCOMPLETE upload/check) must be a SUCCESS status.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -27,8 +36,13 @@ UNITS="${REPO}/backup/system"
 
 PASS=0
 FAIL=0
-ok()  { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
-bad() { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
+SKIP=0
+D2_TMPDIRS=()
+cleanup_tmp() { local d; for d in "${D2_TMPDIRS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; }
+trap cleanup_tmp EXIT
+ok()   { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
+bad()  { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
+skip() { SKIP=$(( SKIP + 1 )); printf 'SKIP %s\n' "$*"; }
 
 # Assert that a unit FILE contains an exact directive LINE. Matching a whole
 # line (not a substring) so `CapabilityBoundingSet=` cannot be satisfied by
@@ -158,6 +172,136 @@ done < <(grep -E '^Exec(Start|StartPre|StopPost|StartPost|Reload)=' "$CAP" "$UP"
 if (( EXEC_BAD == 0 )); then ok "every Exec line is absolute and has no '-' prefix"; else bad "one or more Exec lines are malformed"; fi
 
 # ---------------------------------------------------------------------------
+# D5: exit 3 (an INCOMPLETE upload/check) must be a SUCCESS for systemd, so the
+# unit is not reported as failed. SuccessExitStatus=3 must sit alongside
+# RestartPreventExitStatus=3 in BOTH units; the capture unit already had both.
+# ---------------------------------------------------------------------------
+echo "== D5: exit 3 is a success status =="
+has_line "$UP"    'SuccessExitStatus=3'        "upload treats exit 3 as success"
+has_line "$CHECK" 'SuccessExitStatus=3'        "check treats exit 3 as success"
+has_line "$UP"    'RestartPreventExitStatus=3' "upload still never retries exit 3"
+has_line "$CHECK" 'RestartPreventExitStatus=3' "check still never retries exit 3"
+
+# ---------------------------------------------------------------------------
+# D2: on a bootstrapped host the upload/check units must resolve their host
+# paths from the 0644 LAYOUT file, not fail closed on the 0600 root-only stack
+# file. Both units pin HYBRID_AI_STACK_ENV_FILE at the layout file, mirroring the
+# capture unit and PR #46. The static check below proves the pin; the dynamic
+# fixture proves the resolution offline: a 0644 layout file names a 0600
+# root-only stack file, and the env helper is sourced as an unprivileged uid.
+# Without the pin the helper fail-closes with its OWN message and the unit exits
+# 1 before restic runs -- the exact defect.
+# ---------------------------------------------------------------------------
+echo "== D2: upload-path env resolution on a bootstrapped host =="
+
+# Static: each unit must pin STACK_ENV_FILE at exactly the file its ENV_FILE
+# names (the layout file).
+for _u in "$UP" "$CHECK"; do
+  _env_val="$(sed -n 's/^Environment=HYBRID_AI_ENV_FILE=//p' "$_u" | head -1)"
+  _stack_val="$(sed -n 's/^Environment=HYBRID_AI_STACK_ENV_FILE=//p' "$_u" | head -1)"
+  if [[ -n "$_env_val" && "$_stack_val" == "$_env_val" ]]; then
+    ok "$(basename -- "$_u") pins STACK_ENV_FILE at its layout file"
+  else
+    bad "$(basename -- "$_u") must pin STACK_ENV_FILE at its layout file (env='${_env_val}' stack='${_stack_val}')"
+  fi
+done
+unset _u _env_val _stack_val
+
+# Dynamic fixture. A 0644 LAYOUT file names a 0600 root-only STACK file; the
+# helper is sourced as an unprivileged uid, so the stack file is unreadable to
+# it exactly as on the bootstrapped host.
+D2DIR="$(mktemp -d)"
+D2_TMPDIRS+=("$D2DIR")
+LAYOUT="$D2DIR/layout.env"
+STACK="$D2DIR/stack.env"
+D2DATA="$D2DIR/data"; D2WORK="$D2DIR/work"; mkdir -p "$D2DATA" "$D2WORK"
+cat > "$LAYOUT" <<EOF
+HYBRID_AI_STACK_ENV_FILE=${STACK}
+HYBRID_AI_DATA_DIR=${D2DATA}
+HYBRID_AI_WORK_DIR=${D2WORK}
+HYBRID_AI_BACKUP_MODE=system
+EOF
+chmod 0644 "$LAYOUT"
+printf 'HYBRID_AI_DATA_DIR=/var/lib/hybrid-ai\n' > "$STACK"
+# Copy the helper so an unprivileged uid can read it without touching the repo.
+HELPER_COPY="$D2DIR/hybrid-ai-env.sh"
+cp "${REPO}/scripts/lib/hybrid-ai-env.sh" "$HELPER_COPY"
+chmod 0644 "$HELPER_COPY"
+
+# Privilege drop. As root the case MUST drop to an unprivileged uid (a 0600 file
+# is readable to root). As a non-root runner it runs as-is; a SKIP there is a
+# FAILURE, so the case is only ever skipped on a root host that cannot drop.
+if (( EUID == 0 )); then
+  D2_NUID="$(id -u nobody 2>/dev/null || echo 65534)"
+  D2_NGID="$(id -g nobody 2>/dev/null || echo 65534)"
+  if command -v setpriv >/dev/null 2>&1; then
+    d2_pre=(setpriv --reuid="$D2_NUID" --regid="$D2_NGID" --clear-groups)
+  elif command -v runuser >/dev/null 2>&1; then
+    d2_pre=(runuser -u nobody --)
+  else
+    d2_pre=()
+  fi
+  chmod 0755 "$D2DIR" "$D2DATA" "$D2WORK"
+  chown 0:0 "$STACK" 2>/dev/null || true
+  chmod 0600 "$STACK"
+else
+  d2_pre=()
+  # No root: a 0600 file owned by this uid would be readable, so make the stack
+  # file unreadable to this uid (the only way without root). The property under
+  # test -- exists but unreadable to the running uid -- is the same.
+  chmod 000 "$STACK"
+fi
+
+if (( ${#d2_pre[@]} > 0 )) && ! "${d2_pre[@]}" true >/dev/null 2>&1; then
+  skip "D2 env-resolution case (running as root and cannot drop privileges)"
+elif (( EUID == 0 )) && (( ${#d2_pre[@]} == 0 )); then
+  skip "D2 env-resolution case (no setpriv/runuser to drop privileges)"
+else
+  # env -i POISONS every inherited variable, and STACK_ENV_FILE is set
+  # explicitly (empty for the no-pin case), so no :- fallback can re-point it.
+  run_env_probe() {  # <stack-env-file-value>; sets D2_RC and D2_OUT
+    local rc=0
+    D2_OUT="$("${d2_pre[@]}" env -i \
+        HOME=/nonexistent \
+        PATH="/usr/bin:/bin" \
+        HYBRID_AI_ENV_FILE="$LAYOUT" \
+        HYBRID_AI_STACK_ENV_FILE="$1" \
+        bash -c "source '$HELPER_COPY'; printf '%s' \"\$HYBRID_AI_STACK_ENV_FILE\"" 2>&1)" || rc=$?
+    D2_RC="$rc"
+  }
+
+  # (a) The upload unit's own pinned value must resolve without fail-closing.
+  #     On the unpatched base commit there is NO pin, so the helper reads the
+  #     0600 stack file and fail-closes with its own message -> this FAILS.
+  UP_STACK_VAL="$(sed -n 's/^Environment=HYBRID_AI_STACK_ENV_FILE=//p' "$UP" | head -1)"
+  run_env_probe "$UP_STACK_VAL"
+  if [[ "$D2_RC" == "0" && "$D2_OUT" != *"cannot be read"* ]]; then
+    ok "D2: the upload unit's pinned STACK_ENV_FILE resolves without fail-closing"
+  else
+    bad "D2: upload-path env resolution fail-closed (rc=$D2_RC): $D2_OUT"
+  fi
+
+  # (b) With the pin pointed at the layout file (the fixed shape) the helper
+  #     resolves STACK_ENV_FILE to the layout file and succeeds.
+  run_env_probe "$LAYOUT"
+  if [[ "$D2_RC" == "0" && "$D2_OUT" == "$LAYOUT" ]]; then
+    ok "D2: pinning STACK_ENV_FILE at the layout file resolves to that file"
+  else
+    bad "D2: pinned layout resolution wrong (rc=$D2_RC out=$D2_OUT)"
+  fi
+
+  # (c) Negative control: NO pin -> the helper reads the unreadable stack file
+  #     and fails closed with its own message. This is the reproduced defect.
+  run_env_probe ""
+  if [[ "$D2_RC" != "0" && "$D2_OUT" == *"HYBRID_AI_STACK_ENV_FILE"* && "$D2_OUT" == *"cannot be read"* ]]; then
+    ok "D2: without the pin the helper fails closed (the reproduced defect)"
+  else
+    bad "D2: expected a fail-closed without the pin (rc=$D2_RC): $D2_OUT"
+  fi
+  unset UP_STACK_VAL
+fi
+
+# ---------------------------------------------------------------------------
 # systemd-analyze verify, with both stub directions
 # ---------------------------------------------------------------------------
 echo "== systemd-analyze verify =="
@@ -236,5 +380,5 @@ STUB
   rm -rf "$STUBDIR"
 fi
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 (( FAIL == 0 ))

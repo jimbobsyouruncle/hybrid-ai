@@ -52,6 +52,7 @@ ExecStart=/opt/hybrid-ai/backup/backup.sh --upload-only
 Restart=on-failure
 RestartSec=15min
 RestartPreventExitStatus=3
+SuccessExitStatus=3
 
 # The R2 credentials. systemd copies these into $CREDENTIALS_DIRECTORY, a
 # private tmpfs, readable only by this unit; backup.sh reads them from there.
@@ -67,6 +68,7 @@ StateDirectory=hybrid-ai-backup
 RuntimeDirectory=hybrid-ai-backup
 CacheDirectory=hybrid-ai-backup
 Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
+Environment=HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 Environment=HYBRID_AI_BACKUP_MODE=system
 Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
 Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup

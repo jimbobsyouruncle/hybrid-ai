@@ -1164,13 +1164,17 @@ fi
 
 # Byte-identical files (AC15), when origin/main is available.
 if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  # Keep this list equal to the out-of-scope paths in the job brief. The card
-  # changes only backup/README.md, backup/backup.sh and backup/restore.sh, so
-  # the rest of backup/ is listed explicitly here rather than as a whole tree.
+  # Keep this list equal to the out-of-scope paths in the job brief. This card
+  # changes only backup/README.md, backup/backup.sh and the two system-mode
+  # .service units it pins (upload/check), so those are listed explicitly here
+  # rather than as a whole tree. The capture unit is frozen and stays listed.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
     docker-compose.yml hermes/docker-compose.hermes.yml \
     openhands/docker-compose.openhands.yml doctor.sh status/Caddyfile \
-    backup/backup-containers.sh backup/system \
+    backup/backup-containers.sh \
+    backup/system/hybrid-ai-backup-capture.service \
+    backup/system/hybrid-ai-backup-capture.timer \
+    backup/system/hybrid-ai-backup-check.timer \
     backup/hybrid-ai-backup.service backup/hybrid-ai-backup.timer \
     backup/hybrid-ai-check.service backup/hybrid-ai-check.timer \
     .github/workflows/deploy.yml scripts/deploy-instance.sh \

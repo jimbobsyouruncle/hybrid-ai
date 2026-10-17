@@ -31,6 +31,11 @@
 #      cold copy still cannot capture the DB, cold_copy_failed, exit 3
 #   j) an uncapturable webui_data DB: only open-webui is stopped, exit 3
 #   k) a cold-copy stop failure: no backup_failed, exit 3
+#   t1/t2) a systemd LoadCredential copy under $CREDENTIALS_DIRECTORY at 0400 or
+#      0440 passes the mode check
+#   t3/t4) a HYBRID_AI_BACKUP_CRED_DIR file at 0644 or 0400 still dies, with the
+#      chmod 600 advice
+#   t5) a systemd-path file at a bad mode dies with NO impossible chmod advice
 #
 # Exit 0 when every case passes, non-zero otherwise. Exit 2 on usage error.
 # ---------------------------------------------------------------------------
@@ -673,6 +678,64 @@ run_restore_env HYBRID_AI_APP_DIR="$APP2" HYBRID_AI_DATA_DIR="$DATA2" HYBRID_AI_
 check "case s7: restore refuses a cred dir inside DATA_DIR" 1 "$RUN_RC"
 assert "case s7: restore guard names the setting" \
   bash -c "grep -q 'HYBRID_AI_BACKUP_CRED_DIR is inside' '$TMPROOT/out'"
+
+# ---------------------------------------------------------------------------
+# Cases t1-t5: defect D4 -- the credential mode check. A systemd
+# LoadCredential= copy under $CREDENTIALS_DIRECTORY is materialised 0400/0440
+# root-owned and recreated each start; it can never be chmod 600. Accept 0400
+# and 0440 there, while a file sourced from HYBRID_AI_BACKUP_CRED_DIR still has
+# to be exactly 0600. The failure message is mode-aware: no impossible chmod
+# advice on the systemd path.
+# ---------------------------------------------------------------------------
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+
+# Case t1: a systemd credential copy at 0400 PASSES (fails on base with
+# "expected 600", exit 1).
+CRED400="$TMPROOT/cred400"; mkdir -p "$CRED400"
+cp "$CONF/r2.env" "$CRED400/r2.env"; chmod 400 "$CRED400/r2.env"
+cp "$CONF/repo-password" "$CRED400/repo-password"; chmod 400 "$CRED400/repo-password"
+run_backup_env CREDENTIALS_DIRECTORY="$CRED400" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case t1: systemd copy at 0400 passes" 0 "$RUN_RC"
+assert "case t1: backup_success logged" log_has 'backup_success'
+
+# Case t2: a systemd credential copy at 0440 PASSES (fails on base, exit 1).
+CRED440="$TMPROOT/cred440"; mkdir -p "$CRED440"
+cp "$CONF/r2.env" "$CRED440/r2.env"; chmod 440 "$CRED440/r2.env"
+cp "$CONF/repo-password" "$CRED440/repo-password"; chmod 440 "$CRED440/repo-password"
+run_backup_env CREDENTIALS_DIRECTORY="$CRED440" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case t2: systemd copy at 0440 passes" 0 "$RUN_RC"
+assert "case t2: backup_success logged" log_has 'backup_success'
+
+# Case t3: a USER-MODE (HYBRID_AI_BACKUP_CRED_DIR) file at 0644 still dies, and
+# the message keeps the chmod advice.
+chmod 644 "$SYSCRED/r2.env"
+run_backup_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSCRED" BACKUP_CONF_DIR="$SYSCONF" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case t3: user-mode file at 0644 refused" 1 "$RUN_RC"
+assert "case t3: refusal keeps the chmod advice" \
+  bash -c "grep -q 'expected 600. Fix with: chmod 600' '$TMPROOT/out'"
+chmod 600 "$SYSCRED/r2.env"
+
+# Case t4: a USER-MODE file at 0400 also dies -- the 0400/0440 relaxation is
+# ONLY for the systemd path.
+chmod 400 "$SYSCRED/r2.env"
+run_backup_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSCRED" BACKUP_CONF_DIR="$SYSCONF" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case t4: user-mode file at 0400 refused" 1 "$RUN_RC"
+assert "case t4: refusal keeps the chmod advice" \
+  bash -c "grep -q 'expected 600. Fix with: chmod 600' '$TMPROOT/out'"
+chmod 600 "$SYSCRED/r2.env"
+
+# Case t5: a systemd-path file whose mode is neither accepted (0644) dies with a
+# message that contains NO impossible chmod advice.
+CRED644="$TMPROOT/cred644"; mkdir -p "$CRED644"
+cp "$CONF/r2.env" "$CRED644/r2.env"; chmod 644 "$CRED644/r2.env"
+cp "$CONF/repo-password" "$CRED644/repo-password"; chmod 644 "$CRED644/repo-password"
+run_backup_env CREDENTIALS_DIRECTORY="$CRED644" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case t5: systemd-path bad mode refused" 1 "$RUN_RC"
+assert "case t5: systemd-path message has no chmod advice" \
+  bash -c "! grep -q 'chmod' '$TMPROOT/out'"
+assert "case t5: systemd-path message names the real rule" \
+  bash -c "grep -q 'must be 0400 or 0440' '$TMPROOT/out'"
 
 # ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then

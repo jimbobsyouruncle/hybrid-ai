@@ -1067,7 +1067,7 @@ journalctl --user -u hybrid-ai-backup.service -n 50
 ./backup/restore.sh --list                        # snapshots that exist
 ```
 
-A healthy run logs `backup_success` followed by `retention_applied`. A run that uploaded but missed durable state logs `backup_incomplete` and exits **3** — it is expected sometimes and is not retried.
+A healthy run logs `backup_success` followed by `retention_applied`. A run that uploaded but missed durable state logs `backup_incomplete` and exits **3** — it is expected sometimes and is not retried. Every unit lists exit 3 in both `SuccessExitStatus=` (so systemd does not report it as a failed unit) and `RestartPreventExitStatus=` (so it is not retried).
 
 ### System mode (two units, one account)
 
@@ -1102,6 +1102,19 @@ The upload unit holds the R2 credentials (from
 `/etc/credstore/hybrid-ai-backup/`) and retries a transient failure, bounded to
 `StartLimitBurst=2` per `StartLimitIntervalSec=1h`. The capture unit holds no
 credentials and has no network.
+
+Every system-mode unit pins `HYBRID_AI_STACK_ENV_FILE` at the 0644 layout file
+(`/etc/hybrid-ai/hybrid-ai.env`), never the 0600 root-only `stack.env`. The
+backup account has no read access to `stack.env` and needs none; the layout file
+holds only names and paths. Without the pin the shared env helper fails closed
+(`HYBRID_AI_STACK_ENV_FILE ... exists and cannot be read`) and the unit exits 1
+before restic runs.
+
+The credential files under `$CREDENTIALS_DIRECTORY` are systemd's
+`LoadCredential=` tmpfs copies, materialised 0400/0440 and recreated each start.
+`backup.sh` accepts 0400 or 0440 there; a file read from
+`HYBRID_AI_BACKUP_CRED_DIR` must still be exactly 0600. On the systemd path a
+mode error names that rule, not an impossible `chmod 600`.
 
 **`skip: <unit> (host paths not installed)`.** The static test
 `scripts/test-backup-system-units.sh` runs `systemd-analyze verify` on the

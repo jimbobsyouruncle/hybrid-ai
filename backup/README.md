@@ -92,7 +92,7 @@ Some runs cannot capture everything. A discovered path fails the allow-list, an 
 
 - it still uploads what it has, tagged `complete:false`;
 - it logs `backup_incomplete` (never `backup_success`);
-- it exits with code **3**, which both backup units list in `RestartPreventExitStatus=` so there is no 15-minute retry loop.
+- it exits with code **3**, which every backup unit lists in **both** `SuccessExitStatus=` (so systemd reports the run as a success, not a failed unit) and `RestartPreventExitStatus=` (so there is no 15-minute retry loop). The capture unit always had both; the upload and check units gained `SuccessExitStatus=3` so a successful-but-INCOMPLETE upload or check is no longer shown as a failed unit.
 
 `backup_failed` (exit 1) stays reserved for a run that aborted. An incomplete run is a distinct, non-retryable outcome. `doctor.sh` counts both `backup_failed` and `backup_incomplete` **since the last `backup_success`**, so a clean run resets the counters.
 
@@ -190,7 +190,14 @@ restic has no recovery mechanism. If the drive dies and the password dies with i
 
 **Deliberately outside the git repository.** No `git add`, no stray `tar czf` of the project folder, and no CI checkout can sweep them up. They are also kept separate from `.env`, so a compromise of the application stack does not automatically hand over the ability to destroy your backup history.
 
-Both scripts **refuse to run** if either file is not mode 0600. They also
+Both scripts **refuse to run** if either file is not mode 0600 — with one
+exception for systemd: a file resolved under `$CREDENTIALS_DIRECTORY` (the
+`LoadCredential=` tmpfs copy, materialised 0400/0440 root-owned and recreated on
+every start) is accepted at mode 0400 or 0440, because it can never be
+`chmod 600`. A file read from `HYBRID_AI_BACKUP_CRED_DIR` — the user-mode path —
+still has to be exactly 0600, and the failure message keeps the `chmod 600`
+advice. On the systemd path the message names the real rule instead (no
+impossible `chmod` advice). They also
 **refuse to run** when `HYBRID_AI_BACKUP_CRED_DIR` is, or is inside,
 `HYBRID_AI_APP_DIR`, `HYBRID_AI_DATA_DIR` or `HYBRID_AI_WORK_DIR`: a credential
 directory inside one of those trees would be swept up by a git operation or by
@@ -397,13 +404,23 @@ ONLY manual step; everything after it runs from the units. Card F must create:
    - `HYBRID_AI_UID` / `HYBRID_AI_GID` (the `hybrid-ai` account's ids)
 
    The units carry their OWN `Environment=` values
-   (`HYBRID_AI_BACKUP_MODE=system`, `BACKUP_CONTAINER_CONTROL=external`,
+   (`HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env` **and**
+   `HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`,
+   `HYBRID_AI_BACKUP_MODE=system`, `BACKUP_CONTAINER_CONTROL=external`,
    `HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup`,
    `RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup`,
    `BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log`). A systemd `Environment=`
    value takes precedence over the env file, so a drifted layout file cannot
    change what a unit does. Only the paths a unit does NOT pin come from
    `/etc/hybrid-ai/hybrid-ai.env`.
+
+   `HYBRID_AI_STACK_ENV_FILE` is pinned at the **0644 layout file**, not the
+   0600 root-only `stack.env`, in every system-mode unit. The units run as
+   `hybrid-ai-backup` with no `CAP_DAC_READ_SEARCH`, and the shared env helper
+   fails closed when a file it is told to read exists but cannot be read; without
+   the pin the unit would exit 1 before restic ran. The layout file holds only
+   names and paths, never a secret, so the backup account needs no access to
+   `stack.env`. This mirrors the forced-command deploy fix.
 5. **The units** — `install.sh`, run as root, installs `backup/system/*` into
    `/etc/systemd/system/`, daemon-reloads, and enables
    `hybrid-ai-backup-capture.timer` and `hybrid-ai-backup-check.timer`.
@@ -435,7 +452,8 @@ was captured.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `No credentials at ~/.config/...` | Backups never configured | Run `./install.sh` |
-| `has permissions 644; expected 600` | Permissions drifted | `chmod 600 ~/.config/hybrid-ai-backup/*` |
+| `has permissions 644; expected 600` | Permissions drifted on a `HYBRID_AI_BACKUP_CRED_DIR` file | `chmod 600 ~/.config/hybrid-ai-backup/*` |
+| `has permissions ...; a systemd LoadCredential copy must be 0400 or 0440` | A `$CREDENTIALS_DIRECTORY` copy has an unexpected mode | None: systemd materialises that tmpfs copy (0400/0440) on every start. If it reports another mode, check the `LoadCredential=` source file's mode |
 | `restic init failed` | Wrong account ID, bucket, or token | Verify the endpoint URL and that the token has Object Read & Write on that bucket |
 | `Could not capture ... via SQLite` | The database could not be captured online (e.g. `sqlite3` missing, or a WAL database in a directory the user cannot write) | `sudo apt-get install -y sqlite3`. The script falls back to a verified cold copy; if that also cannot capture it, the run is marked INCOMPLETE (exit 3), not failed |
 | `backup_incomplete` in the log, exit code 3 | The run uploaded but missed durable state (a rejected path, an unreadable entry, a partial rsync, an unverifiable database) | Check the events around it (`db_path_rejected`, `hermes_data_unreadable`, `rsync_partial`, `backup_data_unreadable`, `cold_copy_failed`). This is not retried automatically, by design |
