@@ -264,6 +264,22 @@ check "system-mode systemctl scope"  "--system"                       "$(resolve
 check "system-mode journal scope"    "--system"                       "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_JOURNAL_SCOPE)"
 check "system-mode cred dir is the credstore" "/etc/credstore/hybrid-ai-backup" "$(resolve "$SYSMODE" HYBRID_AI_BACKUP_CRED_DIR)"
 
+# BACKUP_LOG resolves to ONE path per mode: the units' LogsDirectory= in system
+# mode, $LOG_DIR/backup.log in user mode. doctor.sh reads the same value, so the
+# two can no longer disagree (D9).
+check "user-mode BACKUP_LOG default" "${REPO}/backup.log" "$(resolve "$EMPTY" BACKUP_LOG)"
+check "system-mode BACKUP_LOG default is the units' LogsDirectory path" \
+  "/var/log/hybrid-ai-backup/backup.log" "$(resolve "$SYSMODE" BACKUP_LOG)"
+# A SET value still wins in both modes (no mode may silently ignore it).
+SETLOG="${TMPROOT}/setlog.env"
+printf 'HYBRID_AI_BACKUP_MODE=system\nBACKUP_LOG=/tmp/explicit/backup.log\n' > "$SETLOG"
+check "an explicit BACKUP_LOG wins in system mode" \
+  "/tmp/explicit/backup.log" "$(resolve "$SETLOG" BACKUP_LOG)"
+SETLOG_U="${TMPROOT}/setlog-user.env"
+printf 'BACKUP_LOG=/tmp/explicit-user/backup.log\n' > "$SETLOG_U"
+check "an explicit BACKUP_LOG wins in user mode" \
+  "/tmp/explicit-user/backup.log" "$(resolve "$SETLOG_U" BACKUP_LOG)"
+
 # ---------------------------------------------------------------------------
 # 3b. Fail closed on an env file that exists but cannot be read
 # ---------------------------------------------------------------------------

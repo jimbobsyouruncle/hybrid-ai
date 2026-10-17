@@ -1116,6 +1116,48 @@ The credential files under `$CREDENTIALS_DIRECTORY` are systemd's
 `HYBRID_AI_BACKUP_CRED_DIR` must still be exactly 0600. On the systemd path a
 mode error names that rule, not an impossible `chmod 600`.
 
+**The backup log: one path, in the units' `LogsDirectory=`.** In system mode the
+units run under `ProtectSystem=strict`, so the only directory they can write is
+the one systemd grants by name. `backup.sh` resolves `BACKUP_LOG` from the mode:
+system mode gives `/var/log/hybrid-ai-backup/backup.log` (the units'
+`LogsDirectory=hybrid-ai-backup`), user mode keeps `$HYBRID_AI_LOG_DIR/backup.log`.
+`doctor.sh` reads the SAME resolved path, so "no successful backup recorded yet"
+now means a genuinely missing event, not a path mismatch.
+
+**`tee: /var/log/hybrid-ai-backup/backup.log: Read-only file system`.** The unit
+has no write access to its log path — almost always an old unit file that predates
+`LogsDirectory=hybrid-ai-backup`. Re-run `./install.sh` as root to refresh the
+units, then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart hybrid-ai-backup-capture.timer
+```
+
+If the unit is in a failed state from an earlier run, clear it first:
+`sudo systemctl reset-failed hybrid-ai-backup-upload.service`. A `systemd-analyze
+verify` on a stale file may also need the daemon-reload before the new
+directives take effect.
+
+**`unable to open cache: ... permission denied`.** The restic cache directory
+(or a per-repo subdirectory under it) is owned by another uid, usually after an
+earlier manual `sudo` run. This is non-fatal: `backup.sh` probes the cache and,
+when it is not writable, logs `restic_cache_unwritable` and falls back to a
+writable cache under the unit's runtime directory (`restic_cache_fallback`), so
+the backup still succeeds with no manual `chown`. To restore the intended cache:
+
+```bash
+sudo chown -R hybrid-ai-backup:hybrid-ai-backup /var/cache/hybrid-ai-backup
+```
+
+**A bare `sudo ./backup/backup.sh` says `No credentials at /root/.config/...`.**
+A manual `sudo` run resolves USER-mode paths, even on a system-mode host. Name
+the layout file so the script reads the system-mode settings:
+
+```bash
+sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/backup.sh --check
+```
+
 **`skip: <unit> (host paths not installed)`.** The static test
 `scripts/test-backup-system-units.sh` runs `systemd-analyze verify` on the
 system units. On a host that has no `/opt/hybrid-ai` (the builder host,
@@ -1135,6 +1177,9 @@ OTHER diagnostic is a real failure, alone or mixed with the host-path line.
 | `non_sqlite_db_skipped` | A file matched `*.db` but is not SQLite | None; the file is intentionally skipped |
 | `cold_copy_fallback` | Online capture failed; containers stopped briefly for a verified cold copy | Install `sqlite3` to avoid the outage |
 | `backup_failed` | Run aborted (exit 1) | See `detail` and `backup.log` |
+| `backup_log_write_failed` | The run succeeded, but the log could not be written (restic's status, not tee's, decides success) | Check the log path's permissions; the backup itself is safe |
+| `restic_cache_unwritable` | The configured restic cache is not writable by this uid | Informational; `backup.sh` selects a fallback cache |
+| `restic_cache_fallback` | A writable fallback cache was selected | To restore the intended cache, `chown -R hybrid-ai-backup:hybrid-ai-backup` it |
 | `retention_failed` | Pruning failed — backup itself is safe | Check R2 permissions |
 | `check_failed` | **Repository integrity failure** | **Do not prune.** See below |
 | `restore_test_success` | Rehearsal passed; backups are restorable | — |

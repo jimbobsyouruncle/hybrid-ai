@@ -62,6 +62,8 @@
 - write_status()
 - read_status()
 - _cred_file_mode_ok()
+- _hybrid_ai_cache_writable()
+- prepare_restic_cache()
 - stage_backup()
 - hermes_rsync_excludes()
 - hermes_prune_names()
@@ -351,6 +353,7 @@
 - has_line()
 - hasnt_regex()
 - run_env_probe()
+- unit_backup_log()
 - run_verify()
 
 ## scripts/test-backup.sh

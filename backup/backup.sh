@@ -645,6 +645,62 @@ if [[ "$RUN_PHASE" == "upload" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# D7: self-healing restic cache.
+# systemd's CacheDirectory= chowns only the TOP directory. A per-repo cache
+# subdirectory left behind by an earlier manual `sudo` run stays root-owned, so
+# restic reports "unable to open cache: ... permission denied". That is
+# non-fatal, but it silently disables the cache and needs a manual chown. Probe
+# writability (top dir AND every existing subdir, with open(2) so it is correct
+# even under a capability) and, when the configured cache is unusable, fall back
+# to a directory this uid CAN write: the unit's RuntimeDirectory, then the work
+# directory, then restic's own default (unset RESTIC_CACHE_DIR). Never fatal.
+_hybrid_ai_cache_writable() { # <dir>
+  local dir="$1" probe sub
+  [[ -d "$dir" ]] || return 1
+  probe="${dir}/.hybrid-ai-write-probe.$$"
+  ( : > "$probe" ) 2>/dev/null || return 1
+  rm -f "$probe" 2>/dev/null || true
+  for sub in "$dir"/*/; do
+    [[ -d "$sub" ]] || continue
+    probe="${sub%/}/.hybrid-ai-write-probe.$$"
+    ( : > "$probe" ) 2>/dev/null || return 1
+    rm -f "$probe" 2>/dev/null || true
+  done
+  return 0
+}
+prepare_restic_cache() {
+  local dir="${RESTIC_CACHE_DIR:-}" fallback
+  [[ -n "$dir" ]] || return 0
+  # A cache directory that does not exist yet is left alone: restic creates it
+  # on first use, which is the normal fresh-install path and must stay
+  # byte-identical in user mode. Only a PRE-EXISTING directory this uid cannot
+  # write (the root-owned subdir left by an earlier manual sudo run) is healed.
+  [[ -e "$dir" ]] || return 0
+  _hybrid_ai_cache_writable "$dir" && return 0
+  warn "restic cache ${dir} is not writable by uid $(id -u); selecting a writable cache."
+  event "restic_cache_unwritable" "severity=low" "configured=${dir}"
+  for fallback in \
+      "${RUNTIME_DIRECTORY%%:*}/restic-cache" \
+      "${HYBRID_AI_WORK_DIR:-}/.restic-cache" \
+      "${TMPDIR:-/tmp}/hybrid-ai-restic-cache-$(id -u)"; do
+    [[ -n "$fallback" && "$fallback" != "/restic-cache" && "$fallback" != "/.restic-cache" ]] || continue
+    if mkdir -p "$fallback" 2>/dev/null && _hybrid_ai_cache_writable "$fallback"; then
+      RESTIC_CACHE_DIR="$fallback"
+      export RESTIC_CACHE_DIR
+      warn "Using fallback restic cache ${fallback}."
+      event "restic_cache_fallback" "severity=low" "path=${fallback}"
+      return 0
+    fi
+  done
+  unset RESTIC_CACHE_DIR
+  warn "Using restic's default cache location for uid $(id -u)."
+  event "restic_cache_default" "severity=low"
+  return 0
+}
+# The capture phase calls no restic command, so it needs no cache.
+[[ "$RUN_PHASE" == "stage" ]] || prepare_restic_cache
+
+# ---------------------------------------------------------------------------
 # STEP 2. --init : create the repository
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "init" ]]; then
@@ -1357,6 +1413,12 @@ fi
 log "Uploading to R2 (${STAGED_MB} MB staged, deduplicated against previous runs)..."
 BACKUP_START=$SECONDS
 
+# D6b: decide on RESTIC's exit status, not tee's. `set -o pipefail` makes the
+# pipeline non-zero when tee cannot write the log, which would otherwise make a
+# SAVED snapshot look like a failed backup (and log event=backup_failed). The
+# `if` reads the pipeline's aggregate status (so a restic failure still fails);
+# PIPESTATUS is captured into an array IMMEDIATELY (the first simple command
+# after a pipeline resets it), then [0] is restic's own status and [1] tee's.
 if restic backup "$STAGING_DIR" \
       --host "$BACKUP_HOST" \
       --tag hybrid-ai \
@@ -1364,6 +1426,16 @@ if restic backup "$STAGING_DIR" \
       --tag "$COMPLETE_TAG" \
       --exclude-caches \
       --one-file-system 2>&1 | tee -a "$BACKUP_LOG"; then
+  _pipe_status=(0 0)
+else
+  _pipe_status=("${PIPESTATUS[@]}")
+fi
+_restic_rc="${_pipe_status[0]}"; _tee_rc="${_pipe_status[1]}"
+if (( _restic_rc == 0 )); then
+  if (( _tee_rc != 0 )); then
+    warn "Backup succeeded, but the log ${BACKUP_LOG} could not be written; the run is still successful."
+    event "backup_log_write_failed" "severity=low" "detail=tee_exit_${_tee_rc}"
+  fi
   BACKUP_SECONDS=$(( SECONDS - BACKUP_START ))
   if (( INCOMPLETE_COUNT > 0 )); then
     event "backup_incomplete" "host=${BACKUP_HOST}" "staged_mb=${STAGED_MB}" \
@@ -1391,6 +1463,16 @@ if restic forget \
       --keep-weekly "$KEEP_WEEKLY" \
       --keep-monthly "$KEEP_MONTHLY" \
       --prune 2>&1 | tee -a "$BACKUP_LOG"; then
+  _pipe_status=(0 0)
+else
+  _pipe_status=("${PIPESTATUS[@]}")
+fi
+_restic_rc="${_pipe_status[0]}"; _tee_rc="${_pipe_status[1]}"
+if (( _restic_rc == 0 )); then
+  if (( _tee_rc != 0 )); then
+    warn "Retention succeeded, but the log ${BACKUP_LOG} could not be written."
+    event "backup_log_write_failed" "severity=low" "detail=tee_exit_${_tee_rc}"
+  fi
   event "retention_applied" "daily=${KEEP_DAILY}" "weekly=${KEEP_WEEKLY}" "monthly=${KEEP_MONTHLY}"
   ok "Retention applied."
 else

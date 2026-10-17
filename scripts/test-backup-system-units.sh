@@ -38,7 +38,16 @@ PASS=0
 FAIL=0
 SKIP=0
 D2_TMPDIRS=()
-cleanup_tmp() { local d; for d in "${D2_TMPDIRS[@]:-}"; do [[ -n "$d" ]] && rm -rf "$d"; done; }
+cleanup_tmp() {
+  local d
+  for d in "${D2_TMPDIRS[@]:-}"; do
+    [[ -n "$d" ]] || continue
+    # A fixture may leave a 0555 directory behind (the D6b/D7 unwritable
+    # fixtures). Restore write permission before removal so the trap is quiet.
+    chmod -R u+rwX "$d" 2>/dev/null || true
+    rm -rf "$d" 2>/dev/null || true
+  done
+}
 trap cleanup_tmp EXIT
 ok()   { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
 bad()  { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
@@ -299,6 +308,264 @@ else
     bad "D2: expected a fail-closed without the pin (rc=$D2_RC): $D2_OUT"
   fi
   unset UP_STACK_VAL
+fi
+
+# ---------------------------------------------------------------------------
+# D6a / D9: one resolved BACKUP_LOG path for the units, doctor.sh and
+# install.sh. The units must grant write access to the log directory
+# (LogsDirectory=) so they can create/append it under ProtectSystem=strict, and
+# the path the helper resolves in system mode must equal the units' log path.
+# ---------------------------------------------------------------------------
+echo "== D6a/D9: the units grant the log path and agree on BACKUP_LOG =="
+has_line "$UP"    'LogsDirectory=hybrid-ai-backup' "upload has a logs directory for the backup log"
+has_line "$CHECK" 'LogsDirectory=hybrid-ai-backup' "check has a logs directory for the backup log"
+# Neither unit hardcodes a BACKUP_LOG that could diverge from the helper's
+# system-mode resolution. The helper owns the path; the units grant the dir.
+hasnt_regex "$UP"    '^Environment=BACKUP_LOG=' "upload does not pin a divergent BACKUP_LOG"
+hasnt_regex "$CHECK" '^Environment=BACKUP_LOG=' "check does not pin a divergent BACKUP_LOG"
+
+# Resolve BACKUP_LOG the way a system-mode unit does: HYBRID_AI_BACKUP_MODE is
+# the ONLY setting that steers it (no inherited BACKUP_LOG). Poison the ambient
+# environment so a stray exported BACKUP_LOG from the root deploy path cannot
+# mask the unit-path resolution. `env -i` strips the ambient environment (there
+# is no `:-` fallback in the helper that could re-read an inherited value), and
+# a decoy BACKUP_LOG is exported here to prove the poisoning is effective.
+HELPER_SRC="${REPO}/scripts/lib/hybrid-ai-env.sh"
+export BACKUP_LOG="/decoy/should/never/be/read/backup.log"
+unit_backup_log() { # <mode> <envfile>
+  env -i HOME=/nonexistent PATH="/usr/bin:/bin" \
+      HYBRID_AI_ENV_FILE="$2" HYBRID_AI_BACKUP_MODE="$1" \
+      bash -c "source '$HELPER_SRC' >/dev/null 2>&1; printf '%s' \"\$BACKUP_LOG\""
+}
+SYSMODE_ENV="$(mktemp)"
+D2_TMPDIRS+=("$SYSMODE_ENV")
+printf 'HYBRID_AI_BACKUP_MODE=system\n' > "$SYSMODE_ENV"
+UNIT_LOG="$(unit_backup_log system "$SYSMODE_ENV")"
+if [[ "$UNIT_LOG" == "/var/log/hybrid-ai-backup/backup.log" ]]; then
+  ok "the helper resolves the system-mode BACKUP_LOG to the units' LogsDirectory path"
+else
+  bad "system-mode BACKUP_LOG resolved to '${UNIT_LOG}', expected /var/log/hybrid-ai-backup/backup.log"
+fi
+# The decoy exported above must NOT have leaked through: the unit identity and a
+# bare user-mode identity each resolve their OWN path, never /decoy/...
+if [[ "$UNIT_LOG" != "/decoy/should/never/be/read/backup.log" ]]; then
+  ok "an inherited BACKUP_LOG does not mask the unit-path resolution"
+else
+  bad "an inherited BACKUP_LOG leaked into the unit-path resolution"
+fi
+# The capture unit's hardcoded BACKUP_LOG (it predates this card and stays
+# byte-identical) must equal the helper-resolved system-mode path.
+CAP_LOG="$(sed -n 's/^Environment=BACKUP_LOG=//p' "$CAP" | head -1)"
+if [[ -n "$CAP_LOG" && "$CAP_LOG" == "$UNIT_LOG" ]]; then
+  ok "the capture unit's BACKUP_LOG equals the helper-resolved system-mode path"
+else
+  bad "capture BACKUP_LOG '${CAP_LOG}' != helper system-mode path '${UNIT_LOG}'"
+fi
+# And a bare-shell USER-mode identity resolves the user-mode path, separately.
+# With no settings the log dir defaults to the repo directory, exactly as today.
+USER_LOG="$(unit_backup_log user "$SYSMODE_ENV")"
+if [[ "$USER_LOG" == "${REPO}/backup.log" ]]; then
+  ok "a bare user-mode identity still resolves the user-mode BACKUP_LOG"
+else
+  bad "user-mode BACKUP_LOG resolved to '${USER_LOG}', expected ${REPO}/backup.log"
+fi
+unset CAP_LOG UNIT_LOG USER_LOG SYSMODE_ENV BACKUP_LOG
+
+# ---------------------------------------------------------------------------
+# D6b: the tee-failure fixture. Point BACKUP_LOG at a path that genuinely
+# cannot be written and run the real backup.sh. On unpatched main the pipeline's
+# exit is tee's, so restic success is mislabelled a failure; the patched script
+# decides on restic's status and records a non-fatal warning.
+# ---------------------------------------------------------------------------
+echo "== D6b: a failed log write must not fail a successful backup =="
+
+# Build an offline fixture: a scratch repo with the real backup.sh, the shared
+# helper, and stubs for restic/docker/sqlite3. restic SUCCEEDS; BACKUP_LOG is a
+# path under a directory this uid cannot write.
+D6B="$(mktemp -d)"
+D2_TMPDIRS+=("$D6B")
+D6B_APP="$D6B/app"; mkdir -p "$D6B_APP/scripts/lib" "$D6B_APP/backup" \
+  "$D6B_APP/webui_data" "$D6B_APP/hermes_data"
+cp "${REPO}/scripts/lib/hybrid-ai-env.sh" "$D6B_APP/scripts/lib/"
+cp "${REPO}/scripts/lib/read-probe.sh" "$D6B_APP/scripts/lib/"
+cp "${REPO}/backup/backup.sh" "$D6B_APP/backup/"
+: > "$D6B_APP/docker-compose.yml"
+chmod +x "$D6B_APP/backup/backup.sh"
+
+D6B_BIN="$D6B/bin"; mkdir -p "$D6B_BIN"
+cat > "$D6B_BIN/restic" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  snapshots) exit 0 ;;
+  backup)    printf 'restic: snapshot saved\n'; exit 0 ;;
+  forget)    printf 'restic: retention applied\n'; exit 0 ;;
+  version)   echo "restic 0.0.0 (test stub)"; exit 0 ;;
+  *)         exit 0 ;;
+esac
+STUB
+cat > "$D6B_BIN/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$D6B_BIN/sqlite3" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$D6B_BIN/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$D6B_BIN"/*
+
+D6B_CONF="$D6B/conf"; mkdir -p "$D6B_CONF"; chmod 700 "$D6B_CONF"
+printf 'RESTIC_REPOSITORY=s3:https://example.invalid/bucket\nAWS_ACCESS_KEY_ID=t\nAWS_SECRET_ACCESS_KEY=t\n' > "$D6B_CONF/r2.env"
+printf 'pw\n' > "$D6B_CONF/repo-password"
+chmod 600 "$D6B_CONF/r2.env" "$D6B_CONF/repo-password"
+D6B_WORK="$D6B/work"; mkdir -p "$D6B_WORK"
+D6B_LOG="$D6B/ro/backup.log"
+D6B_LOG_ALT="$D6B/logs/backup.log"
+
+# Choose a genuinely unwritable BACKUP_LOG. When root, drop to an unprivileged
+# uid (setpriv/runuser) so the read-only directory really refuses the write; if
+# we cannot drop privileges, print SKIP (never pass) and name the runner.
+D6B_PRE=()
+D6B_SKIP_REASON=""
+if (( EUID == 0 )); then
+  D6B_NUID="$(id -u nobody 2>/dev/null || echo 65534)"
+  D6B_NGID="$(id -g nobody 2>/dev/null || echo 65534)"
+  if command -v setpriv >/dev/null 2>&1; then
+    D6B_PRE=(setpriv --reuid="$D6B_NUID" --regid="$D6B_NGID" --clear-groups)
+  elif command -v runuser >/dev/null 2>&1; then
+    D6B_PRE=(runuser -u nobody --)
+  else
+    D6B_SKIP_REASON="running as root (uid 0) with no setpriv/runuser to drop privileges"
+  fi
+  if (( ${#D6B_PRE[@]} > 0 )) && ! "${D6B_PRE[@]}" true >/dev/null 2>&1; then
+    D6B_SKIP_REASON="running as root (uid 0) and setpriv/runuser cannot drop privileges"
+    D6B_PRE=()
+  fi
+  if (( ${#D6B_PRE[@]} > 0 )); then
+    # The dropped uid must be able to read the fixture's 0600 credential files,
+    # so hand it the whole tree; the read-only log dir is then re-secured below.
+    chown -R "$D6B_NUID:$D6B_NGID" "$D6B" 2>/dev/null || true
+  fi
+fi
+
+if [[ -n "$D6B_SKIP_REASON" ]]; then
+  # A SKIP is honest only on a local host that genuinely cannot drop privileges.
+  # On CI it must be a FAILURE: the runner's identity is printed either way, so a
+  # green build can never hide an unrun tee-failure case.
+  if [[ "${GITHUB_ACTIONS:-}" == "true" || -n "${CI:-}" ]]; then
+    bad "D6b tee-failure case SKIPPED in CI (${D6B_SKIP_REASON}; runner=$(id -un) uid=$(id -u))"
+  else
+    skip "D6b tee-failure case (${D6B_SKIP_REASON}; runner=$(id -un) uid=$(id -u))"
+  fi
+else
+  # A read-only directory holding the log path, and a writable one for the
+  # negative control. The read-only directory is chmod 0555 (no write for its
+  # owner), so even the uid that owns it cannot write; root would bypass that,
+  # which is why root drops privileges above.
+  mkdir -p "$(dirname "$D6B_LOG")" "$(dirname "$D6B_LOG_ALT")"
+  chmod 0755 "$D6B" 2>/dev/null || true
+  chmod 0555 "$(dirname "$D6B_LOG")"
+  chmod 0777 "$(dirname "$D6B_LOG_ALT")"
+
+  # Prove the fixture is unwritable BEFORE running: the assertion the brief
+  # requires, so a broken fixture cannot silently turn into a pass.
+  if "${D6B_PRE[@]}" bash -c "[[ ! -w '$D6B_LOG' ]] && [[ ! -w '$(dirname "$D6B_LOG")' ]]"; then
+    D6B_RC=0
+    "${D6B_PRE[@]}" env \
+        HOME="$D6B_WORK" PATH="$D6B_BIN:/usr/bin:/bin" \
+        HYBRID_AI_APP_DIR="$D6B_APP" HYBRID_AI_DATA_DIR="$D6B_APP" \
+        HYBRID_AI_WORK_DIR="$D6B_WORK" HYBRID_AI_LOG_DIR="$D6B_WORK" \
+        HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$D6B_CONF" \
+        BACKUP_LOG="$D6B_LOG" BACKUP_NO_PAUSE=1 \
+        bash "$D6B_APP/backup/backup.sh" --non-interactive \
+        > "$D6B/out" 2>&1 || D6B_RC=$?
+    # restic succeeded, so the run must succeed even though tee could not write.
+    if (( D6B_RC == 0 )); then
+      ok "D6b: a successful restic backup exits 0 despite an unwritable log"
+    else
+      bad "D6b: a successful restic backup exited ${D6B_RC} because the log could not be written"
+    fi
+    if grep -q 'backup_success' "$D6B/out"; then
+      ok "D6b: the run reports backup_success"
+    else
+      bad "D6b: the run did not report backup_success"
+    fi
+    if grep -qiE 'could not be written|log .*not writable' "$D6B/out"; then
+      ok "D6b: a non-fatal log-write warning is printed"
+    else
+      bad "D6b: no non-fatal log-write warning was printed"
+    fi
+    # Negative control: a FAILING restic must still abort with backup_failed.
+    cat > "$D6B_BIN/restic" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  snapshots) exit 0 ;;
+  backup)    printf 'restic: boom\n' >&2; exit 1 ;;
+  *)         exit 0 ;;
+esac
+STUB
+    chmod +x "$D6B_BIN/restic"
+    D6B_RC2=0
+    "${D6B_PRE[@]}" env \
+        HOME="$D6B_WORK" PATH="$D6B_BIN:/usr/bin:/bin" \
+        HYBRID_AI_APP_DIR="$D6B_APP" HYBRID_AI_DATA_DIR="$D6B_APP" \
+        HYBRID_AI_WORK_DIR="$D6B_WORK" HYBRID_AI_LOG_DIR="$D6B_WORK" \
+        HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$D6B_CONF" \
+        BACKUP_LOG="$D6B_LOG_ALT" BACKUP_NO_PAUSE=1 \
+        bash "$D6B_APP/backup/backup.sh" --non-interactive \
+        > "$D6B/out2" 2>&1 || D6B_RC2=$?
+    if (( D6B_RC2 != 0 )) && grep -q 'restic backup failed' "$D6B/out2"; then
+      ok "D6b: a failing restic still dies with 'restic backup failed'"
+    else
+      bad "D6b: a failing restic did not abort as expected (rc=${D6B_RC2})"
+    fi
+
+    # D7: an unwritable restic cache must self-heal, not fail. Reuse the fixture
+    # with a pre-existing, unwritable cache and a writable runtime directory.
+    cat > "$D6B_BIN/restic" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  snapshots) exit 0 ;;
+  backup)    printf 'restic-cache=%s\n' "${RESTIC_CACHE_DIR:-unset}"; exit 0 ;;
+  forget)    exit 0 ;;
+  *)         exit 0 ;;
+esac
+STUB
+    chmod +x "$D6B_BIN/restic"
+    D7_CACHE="$D6B/cache"; D7_RUNTIME="$D6B/run"
+    mkdir -p "$D7_CACHE/repoX" "$D7_RUNTIME"
+    chmod 0555 "$D7_CACHE/repoX" "$D7_CACHE"
+    D7_RC=0
+    "${D6B_PRE[@]}" env \
+        HOME="$D6B_WORK" PATH="$D6B_BIN:/usr/bin:/bin" \
+        HYBRID_AI_APP_DIR="$D6B_APP" HYBRID_AI_DATA_DIR="$D6B_APP" \
+        HYBRID_AI_WORK_DIR="$D6B_WORK" HYBRID_AI_LOG_DIR="$D6B_WORK" \
+        HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$D6B_CONF" \
+        BACKUP_LOG="$D6B_LOG_ALT" RESTIC_CACHE_DIR="$D7_CACHE" \
+        RUNTIME_DIRECTORY="$D7_RUNTIME" BACKUP_NO_PAUSE=1 \
+        bash "$D6B_APP/backup/backup.sh" --non-interactive \
+        > "$D6B/out3" 2>&1 || D7_RC=$?
+    if (( D7_RC == 0 )); then
+      ok "D7: an unwritable restic cache does not fail the run"
+    else
+      bad "D7: an unwritable restic cache failed the run (rc=${D7_RC})"
+    fi
+    if grep -q 'restic_cache_fallback' "$D6B/out3"; then
+      ok "D7: a writable fallback cache was selected"
+    else
+      bad "D7: no fallback cache was selected"
+    fi
+    if grep -q "restic-cache=${D7_RUNTIME}/restic-cache" "$D6B/out3"; then
+      ok "D7: restic ran against the fallback cache under the runtime directory"
+    else
+      bad "D7: restic did not use the runtime fallback cache"
+    fi
+  else
+    bad "D6b fixture is not actually unwritable; the case cannot run"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

@@ -39,12 +39,16 @@ LoadCredential=repo-password:/etc/credstore/hybrid-ai-backup/repo-password
 StateDirectory=hybrid-ai-backup
 RuntimeDirectory=hybrid-ai-backup
 CacheDirectory=hybrid-ai-backup
+# LogsDirectory= grants this unit write access to the backup log under
+# ProtectSystem=strict; the shared helper resolves BACKUP_LOG to the SAME path
+# (/var/log/hybrid-ai-backup/backup.log) in system mode, so doctor.sh watches
+# the file this unit writes.
+LogsDirectory=hybrid-ai-backup
 Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 Environment=HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 Environment=HYBRID_AI_BACKUP_MODE=system
 Environment=HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup
 Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup
-Environment=BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log
 
 TimeoutStartSec=6h
 

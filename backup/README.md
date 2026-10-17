@@ -231,7 +231,8 @@ relocation restores into the split layout.
 | Setting | Used for | Default |
 |---|---|---|
 | `HYBRID_AI_DATA_DIR` | the data being backed up (`webui_data/`, `hermes_data/`, `ollama_data/`) | the repo directory |
-| `HYBRID_AI_LOG_DIR` | `backup.log` | the repo directory |
+| `HYBRID_AI_LOG_DIR` | the default location of `backup.log` in user mode | the repo directory |
+| `BACKUP_LOG` | the backup log file; in system mode it defaults to the units' `LogsDirectory=` (`/var/log/hybrid-ai-backup/backup.log`), in user mode to `$HYBRID_AI_LOG_DIR/backup.log` | mode-dependent |
 | `HYBRID_AI_WORK_DIR` | `.backup-staging`, `.restore-work`, `.restore-test-*` | the repo directory |
 | `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env` |
 | `BACKUP_CONF_DIR` | the user-mode credential directory | `~/.config/hybrid-ai-backup` |
@@ -261,6 +262,34 @@ systemctl --user list-timers 'hybrid-ai-*'
 journalctl --user -u hybrid-ai-backup.service -n 50
 grep '^EVENT' backup.log | tail -20
 ```
+
+### Manual runs on a system-mode host
+
+The commands above assume **user mode** (the default): they run as your login
+account and resolve the user-mode paths. On a host migrated to system mode
+(`HYBRID_AI_BACKUP_MODE=system`, layout at `/etc/hybrid-ai/hybrid-ai.env`), a
+bare `sudo ./backup/backup.sh` (or `restore.sh`) runs as root and resolves
+**user-mode** paths, so it looks for credentials in `/root/.config/hybrid-ai-backup`
+and dies with `No credentials at /root/.config/hybrid-ai-backup/r2.env`.
+
+Run the script with the layout file named explicitly instead. That is what the
+units do, and it resolves the system-mode credential directory and log path:
+
+```bash
+sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/backup.sh --check
+sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/restore.sh --test
+```
+
+Prefer the units for a normal run — they carry the sandbox and the credentials
+themselves:
+
+```bash
+sudo systemctl start hybrid-ai-backup-capture.service    # capture, then upload
+sudo systemctl start hybrid-ai-backup-check.service      # monthly integrity check
+```
+
+In system mode the log is `/var/log/hybrid-ai-backup/backup.log` (the same file
+`doctor.sh` reads), so watch it with `sudo grep '^EVENT' /var/log/hybrid-ai-backup/backup.log`.
 
 ### Retention
 
@@ -408,11 +437,18 @@ ONLY manual step; everything after it runs from the units. Card F must create:
    `HYBRID_AI_STACK_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env`,
    `HYBRID_AI_BACKUP_MODE=system`, `BACKUP_CONTAINER_CONTROL=external`,
    `HYBRID_AI_WORK_DIR=/var/lib/hybrid-ai-backup`,
-   `RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup`,
-   `BACKUP_LOG=/var/log/hybrid-ai-backup/backup.log`). A systemd `Environment=`
+   `RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup`). A systemd `Environment=`
    value takes precedence over the env file, so a drifted layout file cannot
    change what a unit does. Only the paths a unit does NOT pin come from
    `/etc/hybrid-ai/hybrid-ai.env`.
+
+   `BACKUP_LOG` is **not** pinned by the units. The shared helper resolves it
+   from the mode: in system mode it is `/var/log/hybrid-ai-backup/backup.log`,
+   the units' `LogsDirectory=` (the one directory systemd grants write access to
+   under `ProtectSystem=strict`); in user mode it stays
+   `$HYBRID_AI_LOG_DIR/backup.log`. `doctor.sh` reads the SAME resolved path, so
+   it watches the file the units actually write. The upload and check units each
+   carry `LogsDirectory=hybrid-ai-backup`; the capture unit already did.
 
    `HYBRID_AI_STACK_ENV_FILE` is pinned at the **0644 layout file**, not the
    0600 root-only `stack.env`, in every system-mode unit. The units run as
@@ -452,6 +488,9 @@ was captured.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `No credentials at ~/.config/...` | Backups never configured | Run `./install.sh` |
+| `No credentials at /root/.config/hybrid-ai-backup/r2.env` on a system-mode host | A bare `sudo ./backup/...` resolves USER-mode paths; the credentials live in `/etc/credstore/hybrid-ai-backup` | Run it as `sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/backup.sh ...`, or start the unit: `sudo systemctl start hybrid-ai-backup-capture.service` |
+| `tee: /var/log/hybrid-ai-backup/backup.log: Read-only file system` | A system-mode unit writing its log outside its `LogsDirectory=` (an old unit file without `LogsDirectory=hybrid-ai-backup`) | Update the units: re-run `./install.sh` as root, then `sudo systemctl daemon-reload` |
+| `unable to open cache: ... permission denied` | The restic cache (or a per-repo subdirectory) is owned by another uid, usually after an earlier manual `sudo` run | Self-healing: `backup.sh` detects the unwritable cache and falls back to a writable one (`restic_cache_unwritable` / `restic_cache_fallback` in the log). To restore the intended cache, `sudo chown -R hybrid-ai-backup:hybrid-ai-backup /var/cache/hybrid-ai-backup` |
 | `has permissions 644; expected 600` | Permissions drifted on a `HYBRID_AI_BACKUP_CRED_DIR` file | `chmod 600 ~/.config/hybrid-ai-backup/*` |
 | `has permissions ...; a systemd LoadCredential copy must be 0400 or 0440` | A `$CREDENTIALS_DIRECTORY` copy has an unexpected mode | None: systemd materialises that tmpfs copy (0400/0440) on every start. If it reports another mode, check the `LoadCredential=` source file's mode |
 | `restic init failed` | Wrong account ID, bucket, or token | Verify the endpoint URL and that the token has Object Read & Write on that bucket |
