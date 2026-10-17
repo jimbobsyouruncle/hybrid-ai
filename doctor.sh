@@ -141,16 +141,27 @@ for _name in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_STACK_ENV_FILE \
              HYBRID_AI_DATA_DIR \
              HYBRID_AI_LOG_DIR HYBRID_AI_WORK_DIR OPENHANDS_WORKSPACE \
              AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR \
+             HYBRID_AI_BACKUP_CRED_DIR \
              RESTIC_CACHE_DIR BACKUP_LOG; do
   _p="${!_name}"
-  pass "${_name} = ${_p}"
+  # HYBRID_AI_BACKUP_CRED_DIR is the directory the Backups section actually
+  # checks (mode-aware: the root-owned credstore in system mode, BACKUP_CONF_DIR
+  # in user mode). BACKUP_CONF_DIR stays printed but is labelled as the
+  # user-mode config setting, so the two paths cannot be confused (D11). Paths
+  # only -- never a credential value.
+  case "$_name" in
+    BACKUP_CONF_DIR)        _label="BACKUP_CONF_DIR (user-mode config setting)" ;;
+    HYBRID_AI_BACKUP_CRED_DIR) _label="HYBRID_AI_BACKUP_CRED_DIR (checked by the Backups section)" ;;
+    *)                      _label="$_name" ;;
+  esac
+  pass "${_label} = ${_p}"
   if [[ "$_name" != "HYBRID_AI_ENV_FILE" && "$_name" != "HYBRID_AI_STACK_ENV_FILE" && ! -e "$_p" \
         && "$PATH_IS_EXPLICIT" == *" ${_name} "* ]]; then
     warn "${_name} is set but does not exist: ${_p}" \
          "Create it, or unset ${_name} to fall back to the default."
   fi
 done
-unset _name _p PATH_IS_EXPLICIT
+unset _name _p _label PATH_IS_EXPLICIT
 
 # ---------------------------------------------------------------------------
 # 1. Host prerequisites

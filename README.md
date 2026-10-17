@@ -556,7 +556,7 @@ every path is exactly the default above.
 | Setting | Meaning | Default |
 |---|---|---|
 | `HYBRID_AI_APP_DIR` | Program/repository directory | the repo directory |
-| `HYBRID_AI_ENV_FILE` | The layout env file (host paths) | `$HYBRID_AI_APP_DIR/.env` |
+| `HYBRID_AI_ENV_FILE` | The layout env file (host paths) | `$HYBRID_AI_APP_DIR/.env`; if absent, the fallback `HYBRID_AI_ENV_FILE_FALLBACK` (default `/etc/hybrid-ai/hybrid-ai.env`) when it exists |
 | `HYBRID_AI_STACK_ENV_FILE` | The stack env file handed to `docker compose --env-file` | the resolved `HYBRID_AI_ENV_FILE` |
 | `HYBRID_AI_DATA_DIR` | Durable data (`hermes_data/`, `webui_data/`, `ollama_data/`) | the repo directory |
 | `HYBRID_AI_LOG_DIR` | Logs (`install.log`, `backup.log`) | the repo directory |
@@ -577,6 +577,17 @@ source of truth for the paths and the `HYBRID_AI_UID`/`HYBRID_AI_GID` identity:
 so a legacy stack file that still carries empty `HYBRID_AI_UID=` lines cannot
 drop the stack to root. If the layout file exists but cannot be read, the helper
 exits non-zero and names the setting instead of quietly using a default.
+
+On a bootstrapped host `$HYBRID_AI_APP_DIR/.env` does not exist, because the
+layout moved to `/etc/hybrid-ai/hybrid-ai.env`. When `HYBRID_AI_ENV_FILE` is
+unset and `$HYBRID_AI_APP_DIR/.env` is absent, the helper falls back to that
+layout file if it exists, so a bare `doctor.sh` reports the paths the units
+actually use. The fallback location is the named variable
+`HYBRID_AI_ENV_FILE_FALLBACK` (default `/etc/hybrid-ai/hybrid-ai.env`). An
+explicit `HYBRID_AI_ENV_FILE` always wins and the fallback is then never
+consulted; only the `0644` layout file is probed, never the `0600` secrets file.
+Bare invocations on a bootstrapped host therefore need root or an explicit
+`HYBRID_AI_ENV_FILE`.
 
 The settings that already existed keep their names and defaults:
 `OPENHANDS_WORKSPACE`, `AGENT_REPOS_DIR`, `OPENHANDS_STATE_DIR`,

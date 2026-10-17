@@ -450,6 +450,8 @@
 - assert()
 - resolve()
 - resolve_rc()
+- fb_resolve()
+- fb_rc()
 
 ## scripts/test-install-health.sh
 - ok()
