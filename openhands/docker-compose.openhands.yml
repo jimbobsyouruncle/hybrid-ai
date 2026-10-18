@@ -53,7 +53,13 @@ services:
       - "172.17.0.1:${OPENHANDS_PORT:-3001}:3000"
 
     environment:
-      AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
+      # The app server treats ghcr.io/openhands/agent-server as its own reserved
+      # repository. When that exact string is set, it silently re-pins
+      # AGENT_SERVER_IMAGE_TAG to the SDK version bundled in the app-server image,
+      # so the tag below would be ignored. The CDN alias
+      # docker.openhands.dev/openhands/agent-server serves the identical image but
+      # is not the canonical string, so the pinned tag is honoured.
+      AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-docker.openhands.dev/openhands/agent-server}
       AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}
 
       # Off by default: event logs are verbose and can echo file contents from

@@ -170,6 +170,15 @@ jobs:
         # are stubbed on PATH; the run uses --no-start.
         run: bash scripts/test-env-pin-migration.sh
 
+      - name: Agent-server image repository tests
+        # Offline. Proves install.sh's STEP 2b migration moves the canonical
+        # ghcr.io/openhands/agent-server repository in an existing .env to the
+        # CDN default that does not trigger the app server's silent re-pin,
+        # preserves an owner-chosen repository untouched, writes the new default
+        # when no .env exists, and is idempotent on a second run. Docker and
+        # friends are stubbed on PATH; the run uses --no-start.
+        run: bash scripts/test-agent-image-repo-migration.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. The bind sources are

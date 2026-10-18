@@ -220,12 +220,16 @@ fi
 # ---------------------------------------------------------------------------
 # Older installs pinned the app-server at :1.8 and the agent-server at
 # 1.26.0-python. Those images embed credentials in git clone URLs and reach
-# model context, which 1.10 / 1.37.1-python fix. STEP 8 rewrites the .env as
-# ${VAR:-default}, so a stale pin loaded above would survive every deploy and
-# the new default would never take effect. Unset the EXACT stale values here so
-# the ${VAR:-default} in STEP 8 then writes the new pin. Any other value is an
-# owner-chosen pin and is preserved untouched. Idempotent: after one run the
-# loaded value no longer matches, so a second run migrates nothing.
+# model context, which 1.10 / 1.37.1-python fix. Older installs also set
+# OPENHANDS_AGENT_IMAGE_REPOSITORY to the canonical ghcr.io/openhands/agent-server,
+# which the app server reserves for its own bundled SDK version: with that exact
+# repository set it silently re-pins AGENT_SERVER_IMAGE_TAG, so the 1.37.1-python
+# tag never takes effect. STEP 8 rewrites the .env as ${VAR:-default}, so a stale
+# value loaded above would survive every deploy and the new default would never
+# take effect. Unset the EXACT stale values here so the ${VAR:-default} in STEP 8
+# then writes the new pin. Any other value is an owner-chosen pin and is preserved
+# untouched. Idempotent: after one run the loaded value no longer matches, so a
+# second run migrates nothing.
 if [[ "${OPENHANDS_IMAGE:-}" == "docker.openhands.dev/openhands/openhands:1.8" ]]; then
   log "Migrating OPENHANDS_IMAGE off the stale :1.8 pin to the current default."
   unset OPENHANDS_IMAGE
@@ -233,6 +237,10 @@ fi
 if [[ "${OPENHANDS_AGENT_IMAGE_TAG:-}" == "1.26.0-python" ]]; then
   log "Migrating OPENHANDS_AGENT_IMAGE_TAG off the stale 1.26.0-python pin to the current default."
   unset OPENHANDS_AGENT_IMAGE_TAG
+fi
+if [[ "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" == "ghcr.io/openhands/agent-server" ]]; then
+  log "Migrating OPENHANDS_AGENT_IMAGE_REPOSITORY off the canonical ghcr.io/openhands/agent-server repository to the current default."
+  unset OPENHANDS_AGENT_IMAGE_REPOSITORY
 fi
 
 # The shared helper above already resolved every LAYOUT-managed setting from
@@ -687,7 +695,7 @@ AGENT_REPOS_DIR=${AGENT_REPOS_DIR}
 OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.10}
-OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
+OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-docker.openhands.dev/openhands/agent-server}
 OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}
 OPENHANDS_LOG_ALL_EVENTS=${OPENHANDS_LOG_ALL_EVENTS:-false}
 OPENHANDS_MEM_LIMIT=${OPENHANDS_MEM_LIMIT:-3g}
@@ -724,7 +732,7 @@ prepare_openhands_workspace() {
   if ! command -v setfacl >/dev/null 2>&1; then
     "${SUDO[@]}" apt-get install -y acl || return 1
   fi
-  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}"
+  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-docker.openhands.dev/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}"
   docker pull -q "$img" >/dev/null || return 1
   local uid
   uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1

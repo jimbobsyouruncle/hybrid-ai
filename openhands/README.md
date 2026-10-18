@@ -177,6 +177,30 @@ surprise is worth avoiding.
 
 ---
 
+## Sandbox image repository and tag
+
+The sandbox runs the agent-server image named by two settings in `.env`:
+`OPENHANDS_AGENT_IMAGE_REPOSITORY` and `OPENHANDS_AGENT_IMAGE_TAG`. The overlay passes
+them to the app server as `AGENT_SERVER_IMAGE_REPOSITORY` and `AGENT_SERVER_IMAGE_TAG`.
+
+The repository value matters because the app server reserves the canonical string
+`ghcr.io/openhands/agent-server` for the SDK version bundled inside the app-server
+image. When that exact string is set, the app server silently rewrites the tag to its
+bundled SDK version and logs a warning. A newer tag such as `1.37.1-python` is then
+ignored, so the sandbox keeps running the old SDK. No app-server release bundles an SDK
+at or above 1.37, so pinning a newer tag on the canonical repository can never take
+effect.
+
+The default here is `docker.openhands.dev/openhands/agent-server`. It serves the same
+image (the manifest is identical to the ghcr.io one, same sha256) but the string is not
+the canonical one, so the app server honours `AGENT_SERVER_IMAGE_TAG`. That is what makes
+the `1.37.1-python` pin work.
+
+If you set your own repository, `install.sh` leaves it untouched. Only the exact stale
+canonical value is migrated on upgrade.
+
+---
+
 ## Git workflow
 
 ```text
