@@ -111,6 +111,7 @@
 - scripts/test-deploy-instance.sh
 - scripts/test-deploy-remote.sh
 - scripts/test-deploy-trigger.sh
+- scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
 - scripts/test-env-pin-migration.sh - FILE: scripts/test-env-pin-migration.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh

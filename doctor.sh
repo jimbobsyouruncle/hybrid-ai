@@ -1123,14 +1123,33 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
   fi
 
   if (( ! NO_CLOUD )); then
+    # RESTIC_PASSWORD_FILE is resolved here with backup.sh's precedence (a
+    # CREDENTIALS_DIRECTORY from systemd wins, else ${BACKUP_CONF}) so all three
+    # backup scripts share one canonical order. doctor.sh is a manual read-only
+    # tool, never a systemd unit, so the CREDENTIALS_DIRECTORY branch is
+    # defensive only: the ${BACKUP_CONF} fallback is what actually runs.
     # shellcheck disable=SC2016
-    if timeout 30 bash -c '
+    PW_FILE="$(
+      timeout 30 bash -c '
         set -a; while IFS= read -r l; do
           [[ "$l" =~ ^[[:space:]]*[#] ]] && continue
           [[ "$l" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] && printf -v "${BASH_REMATCH[1]}" "%s" "${BASH_REMATCH[2]}" && export "${BASH_REMATCH[1]}"
         done < "$1"; set +a
-        restic snapshots --last >/dev/null 2>&1' _ "${BACKUP_CONF}/r2.env"; then
+        if [[ -n "${CREDENTIALS_DIRECTORY:-}" ]]; then
+          RESTIC_PW_FILE="${CREDENTIALS_DIRECTORY}/repo-password"
+        else
+          RESTIC_PW_FILE="$2/repo-password"
+        fi
+        [[ -r "$RESTIC_PW_FILE" ]] || { printf "%s" "$RESTIC_PW_FILE"; exit 3; }
+        export RESTIC_PASSWORD_FILE="$RESTIC_PW_FILE"
+        restic snapshots --last >/dev/null 2>&1' _ "${BACKUP_CONF}/r2.env" "${BACKUP_CONF}"
+    )"
+    PROBE_RC=$?
+    if (( PROBE_RC == 0 )); then
       pass "Backup repository reachable"
+    elif (( PROBE_RC == 3 )); then
+      warn "Backup repository password file is missing or unreadable: ${PW_FILE}" \
+           "Fix: check ${BACKUP_CONF}/repo-password permissions"
     else
       warn "Could not reach the backup repository" \
            "Check network and R2 credentials: ./backup/backup.sh --dry-run"

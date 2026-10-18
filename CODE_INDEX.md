@@ -446,6 +446,10 @@
 - ssh_called()
 - key_left()
 
+## scripts/test-doctor-backup-probe.sh
+- pass()
+- fail()
+
 ## scripts/test-env-pin-migration.sh
 - ok()
 - bad()

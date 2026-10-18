@@ -114,6 +114,14 @@ jobs:
         # on unpause and never starts or stops a container.
         run: bash scripts/test-backup-containers.sh
 
+      - name: Doctor backup-probe tests
+        # Offline, grep-level. Proves doctor.sh's repository probe exports
+        # RESTIC_PASSWORD_FILE, resolves repo-password with backup.sh's
+        # CREDENTIALS_DIRECTORY precedence, and never invokes restic before the
+        # export, so the probe no longer warns "Could not reach the backup
+        # repository" on a host whose repository opens fine.
+        run: bash scripts/test-doctor-backup-probe.sh
+
       - name: Deploy-remote tests
         # Offline. Proves scripts/deploy-remote.sh refuses a wrong revision
         # before running install.sh, and maps doctor.sh's exit code correctly.
