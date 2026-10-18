@@ -566,6 +566,13 @@ Resolution order is: the process environment, then the env file (parsed line by
 line, **never** sourced), then the default. A set value must be an absolute path
 with no whitespace, control character, `:` or `,`, and it must not be `/`.
 
+The helper default for `HYBRID_AI_DATA_DIR` and `HYBRID_AI_LOG_DIR` is still the
+repo directory, so scripts that source the helper behave as before. Compose is
+stricter: the bind sources for those two settings are fail-closed (`:?`), so a
+compose parse with them unset is refused with a `run ./install.sh` message
+instead of silently binding the project directory. `install.sh` exports both, so
+a normal install is unaffected.
+
 `HYBRID_AI_STACK_ENV_FILE` is the split that makes one-time bootstrap possible.
 The layout file (`HYBRID_AI_ENV_FILE`) holds host paths and control settings and
 never a secret; the stack file holds the runtime config and secrets and is what

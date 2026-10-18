@@ -1351,13 +1351,15 @@ Both the installer and the pod emit structured, greppable records of what happen
 
 | Log | Location | Contents |
 |---|---|---|
-| Installer | `${HYBRID_AI_LOG_DIR:-.}/install.log` on the Pi (gitignored, mode 0600) | One entry per `install.sh` run |
-| Backup | `${HYBRID_AI_LOG_DIR:-.}/backup.log` on the Pi | One entry per backup/restore run |
+| Installer | `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/install.log` on the Pi (gitignored, mode 0600) | One entry per `install.sh` run |
+| Backup | `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/backup.log` on the Pi | One entry per backup/restore run |
 | Pod | `/var/log/hybrid-ai-events.log` and the RunPod console | Pod lifecycle, watchdog, vLLM health |
 | Pipe | `docker compose logs open-webui` | Per-request outcomes |
 
 Each path is resolved by `scripts/lib/hybrid-ai-env.sh`. With no settings the
-default is the deployment directory.
+helper default is the deployment directory. The compose bind sources are
+fail-closed (`:?`), so a compose parse with no settings is refused with a
+`run ./install.sh` message rather than silently falling back.
 
 ### Pod events
 
