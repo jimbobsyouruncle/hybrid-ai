@@ -916,6 +916,92 @@ if (( OH_RUNNING )); then
 fi
 
 # ---------------------------------------------------------------------------
+# 5a. OpenHands sandbox startup grace (WARNING-ONLY)
+#
+# Placed OUTSIDE the container-inspect gate above on purpose: the only thing
+# that decides whether this check runs is whether the app-server answers, so a
+# warning still surfaces when the container is not detected. It never calls
+# fail(), so it adds no path to exit 2.
+# ---------------------------------------------------------------------------
+# --- Startup grace: starts marked terminally ERROR ------------------------
+# The app-server gives a new sandbox only its built-in grace to answer
+# /health (15s in the 1.10 build). This Pi's agent-server answers at ~21s, so
+# a start that loses the race is set to ERROR with "Sandbox entered error
+# state" and never recovers. The circuit is OPENHANDS_STARTUP_GRACE_SECONDS in
+# openhands/docker-compose.openhands.yml.
+#
+# WARNING-ONLY: a read-only inspection must never turn a deploy red, so this
+# check never calls fail(). The search endpoint paginates and page 1 alone
+# hides the older rows, so every page is followed until a row falls outside
+# the window. Only a count and the remedy are printed -- no task text, no
+# credential. The window is overridable so the offline harness can drive it.
+STARTUP_GRACE_WINDOW_MINUTES="${STARTUP_GRACE_WINDOW_MINUTES:-30}"
+grace_epoch() {
+  local v="$1"
+  [[ -z "$v" ]] && { printf '0'; return; }
+  if [[ "$v" =~ ^[0-9]+$ ]]; then
+    if (( ${#v} >= 13 )); then printf '%s' "$(( v / 1000 ))"; else printf '%s' "$v"; fi
+    return
+  fi
+  date -d "$v" +%s 2>/dev/null || printf '0'
+}
+if [[ ! "$STARTUP_GRACE_WINDOW_MINUTES" =~ ^[0-9]+$ ]]; then
+  (( QUIET )) || printf '  %s-%s startup-grace check skipped (STARTUP_GRACE_WINDOW_MINUTES is not whole minutes)\n' "$C_DIM" "$C_RST"
+elif ! command -v jq >/dev/null 2>&1; then
+  (( QUIET )) || printf '  %s-%s startup-grace check skipped (jq not available)\n' "$C_DIM" "$C_RST"
+else
+  GRACE_CUTOFF=$(( $(date +%s) - STARTUP_GRACE_WINDOW_MINUTES * 60 ))
+  GRACE_PAGE_ID=""
+  GRACE_COUNT=0
+  GRACE_PAGES=0
+  GRACE_SKIP=""
+  while :; do
+    GRACE_PAGES=$(( GRACE_PAGES + 1 ))
+    GRACE_URL="http://127.0.0.1:${OH_PORT}/api/v1/app-conversations/start-tasks/search"
+    [[ -n "$GRACE_PAGE_ID" ]] && GRACE_URL="${GRACE_URL}?page_id=${GRACE_PAGE_ID}"
+    GRACE_BODY="$(curl -fsS --max-time 10 -H 'Accept: application/json' "$GRACE_URL" 2>/dev/null)"
+    if [[ -z "$GRACE_BODY" ]]; then
+      GRACE_SKIP="app-server not answering on ${OH_PORT}"
+      break
+    fi
+    if ! printf '%s' "$GRACE_BODY" | jq -e 'has("items") or has("data")' >/dev/null 2>&1; then
+      GRACE_SKIP="unexpected app-server response"
+      break
+    fi
+    GRACE_OUT_OF_WINDOW=0
+    while IFS=$'\t' read -r g_status g_ts g_err; do
+      [[ -n "$g_status" || -n "$g_ts" ]] || continue
+      g_epoch="$(grace_epoch "$g_ts")"
+      if (( g_epoch > 0 && g_epoch < GRACE_CUTOFF )); then
+        GRACE_OUT_OF_WINDOW=1
+        break
+      fi
+      if [[ "$g_status" == "ERROR" && "$g_err" == *"Sandbox entered error state"* ]]; then
+        GRACE_COUNT=$(( GRACE_COUNT + 1 ))
+      fi
+    done < <(printf '%s' "$GRACE_BODY" | jq -r '
+      (.items // .data // [])[]
+      | [ (.status // ""),
+          (.updated_at // .created_at // .updated_at_ns // "" | tostring),
+          ([(.error // empty),(.error_detail // empty),(.detail // empty),(.message // empty)] | map(tostring) | join(" ")) ]
+      | @tsv' 2>/dev/null)
+    (( GRACE_OUT_OF_WINDOW )) && break
+    GRACE_PAGE_ID="$(printf '%s' "$GRACE_BODY" | jq -r '.next_page_id // empty' 2>/dev/null)"
+    [[ -n "$GRACE_PAGE_ID" ]] || break
+    (( GRACE_PAGES >= 50 )) && break
+  done
+  if [[ -n "$GRACE_SKIP" ]]; then
+    (( QUIET )) || printf '  %s-%s startup-grace check skipped (%s)\n' "$C_DIM" "$C_RST" "$GRACE_SKIP"
+  elif (( GRACE_COUNT > 0 )); then
+    warn "${GRACE_COUNT} sandbox start(s) in the last ${STARTUP_GRACE_WINDOW_MINUTES}m were marked terminally ERROR (\"Sandbox entered error state\")" \
+         "The app-server startup grace is too short for this Pi. Set OPENHANDS_STARTUP_GRACE_SECONDS in .env (see openhands/docker-compose.openhands.yml), then: ${COMPOSE_CMD} up -d openhands"
+  else
+    pass "No sandbox start marked terminally ERROR in the last ${STARTUP_GRACE_WINDOW_MINUTES}m"
+  fi
+  unset GRACE_PAGE_ID GRACE_BODY GRACE_URL g_status g_ts g_err g_epoch
+fi
+
+# ---------------------------------------------------------------------------
 # 5b. Agent clone credentials
 #
 # OpenHands' app-server clones with `https://<token>@github.com/...`, and git
