@@ -720,6 +720,18 @@ ssh -L 3001:127.0.0.1:3001 <user>@<pi-tailnet-name>
 **First start times out.** The image is large and the first pull on a Pi can
 exceed the health-check window. Watch the pull, then re-check.
 
+**`500: Sandbox entered error state` on every dispatch.** The app-server gives a
+new sandbox only its built-in startup grace to answer `/health` (15 s in the
+1.10 build), but this Pi's agent-server answers at ~21 s. A start that loses
+that race is marked terminally `ERROR` and never recovers, so every dispatch
+fails. The circuit is `OPENHANDS_STARTUP_GRACE_SECONDS`, which the overlay
+passes to the app-server as `SANDBOX_STARTUP_GRACE_SECONDS`.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `500: Sandbox entered error state` on builder dispatches | Startup-grace race: the app-server's built-in 15 s grace expires before this Pi's agent-server answers `/health` at ~21 s | Set `OPENHANDS_STARTUP_GRACE_SECONDS` (default 120) in `.env`, then: `./openhands/scripts/openhands-control.sh start`. Keep it in `openhands/docker-compose.openhands.yml` so a deploy cannot revert it. |
+| Doctor warns that sandbox starts were marked terminally ERROR | The same race, detected live: recent `app-conversations/start-tasks/search` rows are `ERROR` with `Sandbox entered error state` | Same as above. The warning is advisory only; it never fails the deploy. |
+
 ---
 
 ## Agent clone embeds a credential in its git remote

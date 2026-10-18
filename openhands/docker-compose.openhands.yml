@@ -85,6 +85,11 @@ services:
       # The browser connects directly to each sandbox's random host port.
       # Must be a host/IP the browser can reach (Pi LAN IP or DNS name), not localhost.
       SANDBOX_CONTAINER_URL_PATTERN: http://${OPENHANDS_SANDBOX_HOST:?OPENHANDS_SANDBOX_HOST must be set - run ./install.sh}:{port}
+      # This app-server build waits only its built-in 15s for a new sandbox to
+      # answer /health. This Pi's agent-server answers at ~21s, so a start that
+      # loses that race is marked terminally ERROR ("500: Sandbox entered error
+      # state") and never recovers. Raise the window so the start can finish.
+      SANDBOX_STARTUP_GRACE_SECONDS: ${OPENHANDS_STARTUP_GRACE_SECONDS:-120}
       # Browser origins when the UI is reached through an SSH tunnel.
       # Browsers treat localhost and 127.0.0.1 as different origins, so allow both.
       OH_PERMITTED_CORS_ORIGINS_0: http://localhost:${OPENHANDS_PORT:-3001}

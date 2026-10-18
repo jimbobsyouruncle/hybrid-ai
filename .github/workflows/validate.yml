@@ -122,6 +122,16 @@ jobs:
         # repository" on a host whose repository opens fine.
         run: bash scripts/test-doctor-backup-probe.sh
 
+      - name: Doctor startup-grace tests
+        # Offline. RUNS doctor.sh (stubbed docker/curl/jq/getfacl, fixture JSON on
+        # disk) to prove the new warning-only startup-grace check: a healthy
+        # fixture passes, an in-window ERROR row warns with the remedy and exits 1
+        # (never 2), an unreachable app-server prints a skip note and leaves the
+        # exit code as the healthy run does, and the ERROR row on page 2 proves the
+        # pager is followed. The harness fails against a doctor.sh without the
+        # check.
+        run: bash scripts/test-doctor-startup-grace.sh
+
       - name: Deploy-remote tests
         # Offline. Proves scripts/deploy-remote.sh refuses a wrong revision
         # before running install.sh, and maps doctor.sh's exit code correctly.

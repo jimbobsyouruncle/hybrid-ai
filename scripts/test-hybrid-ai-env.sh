@@ -611,6 +611,61 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6. install.sh STEP 8 template renders the startup-grace default
+# ---------------------------------------------------------------------------
+echo "== install.sh STEP 8 template: OPENHANDS_STARTUP_GRACE_SECONDS =="
+# The template between `cat > "$TMP_ENV" <<EOF` and its closing `EOF` is rendered
+# here in a controlled environment, proving both directions of the override:
+# unset yields exactly 120, and an owner-set value is preserved byte-for-byte.
+STEP8_TMPL="${TMPROOT}/step8.tmpl"
+awk '/^cat > "\$TMP_ENV" <<EOF$/{f=1;next} f&&/^EOF$/{exit} f' \
+  "$REPO/install.sh" > "$STEP8_TMPL"
+
+if [[ -s "$STEP8_TMPL" ]]; then
+  ok "extracted the STEP 8 heredoc template from install.sh"
+else
+  bad "could not extract the STEP 8 heredoc template from install.sh"
+fi
+
+# Render the template exactly as install.sh does: every substitution comes from
+# the variables install.sh has already set. Unrelated ${...} lines are given a
+# neutral value; only the startup-grace line is asserted on.
+render_step8() { # extra_bash_commands_on_one_line
+  (
+    cd "$REPO" || exit 1
+    unset OPENHANDS_STARTUP_GRACE_SECONDS 2>/dev/null || true
+    export HYBRID_AI_UID=1000 HYBRID_AI_GID=1000 STATUS_UID=1000 DOCKER_GID=999 \
+      LOCAL_DOMAIN=example.test RUNPOD_HOST=rp PI_HOST=pi OPENROUTER_API_KEY='' \
+      RUNPOD_API_KEY='' RUNPOD_POD_ID='' TAILSCALE_IP='' PEER_HOSTNAME='' PEER_HOSTNAMES='' \
+      RUNPOD_AUTO_WAKE=true VLLM_PORT=8000 VLLM_MODEL_NAME=m POD_WARMUP_TIMEOUT=600 \
+      VLLM_DISPLAY_NAME=v VLLM_REQUEST_TIMEOUT=900 VLLM_MAX_TOKENS=4096 \
+      PIPE_LOG_LEVEL=INFO HERMES_PORT=8501 HERMES_API_PORT=8642 \
+      OPENHANDS_PORT=3001 OPENHANDS_WORKSPACE=/tmp/ws \
+      AGENT_REPOS_DIR=/tmp/ar OPENHANDS_SANDBOX_HOST=example.test \
+      OPENHANDS_STATE_DIR=/tmp/oh \
+      WEBUI_SECRET_KEY=x OPENROUTER_MODEL=m RAG_EMBEDDING_MODEL=m \
+      OLLAMA_MEM_LIMIT=8g WEBUI_MEM_LIMIT=3g OLLAMA_CPUS=3.5 WEBUI_CPUS=2.0 \
+      OLLAMA_CONTEXT_LENGTH=4096 OLLAMA_NUM_PARALLEL=2 OLLAMA_MAX_LOADED_MODELS=1 \
+      OLLAMA_KEEP_ALIVE=5m OLLAMA_FLASH_ATTENTION=true OLLAMA_KV_CACHE_TYPE=f16 \
+      TARGET_ENV_VERSION=1 APP_DIR=/tmp DATA_DIR=/tmp LOG_DIR=/tmp WORK_DIR=/tmp
+    [[ -n "${1:-}" ]] && eval "$1"
+    bash -c 'eval "cat <<EOF
+$(cat "$1")
+EOF"' _ "$STEP8_TMPL"
+  )
+}
+
+GRACE_UNSET="$(render_step8 "" \
+  | grep -E '^OPENHANDS_STARTUP_GRACE_SECONDS=' || true)"
+check "STEP 8 renders the default grace (120) when unset" \
+  "OPENHANDS_STARTUP_GRACE_SECONDS=120" "$GRACE_UNSET"
+
+GRACE_SET="$(render_step8 'export OPENHANDS_STARTUP_GRACE_SECONDS=180' \
+  | grep -E '^OPENHANDS_STARTUP_GRACE_SECONDS=' || true)"
+check "STEP 8 preserves an owner-set grace (180)" \
+  "OPENHANDS_STARTUP_GRACE_SECONDS=180" "$GRACE_SET"
+
+# ---------------------------------------------------------------------------
 echo
 if (( FAIL != 0 )); then
   printf 'FAILED: %d of %d checks\n' "$FAIL" "$(( PASS + FAIL ))" >&2

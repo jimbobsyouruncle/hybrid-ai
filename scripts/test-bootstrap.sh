@@ -1168,9 +1168,11 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   # the files a bootstrap card must not touch; a card that legitimately changes
   # one of them stops listing it here, exactly as done for the compose/log
   # fail-closed card (docker-compose.yml, hermes/docker-compose.hermes.yml and
-  # doctor.sh). The capture unit is frozen and stays listed.
+  # doctor.sh) and for the sandbox startup-grace card
+  # (openhands/docker-compose.openhands.yml). The capture unit is frozen and
+  # stays listed.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
-    openhands/docker-compose.openhands.yml status/Caddyfile \
+    status/Caddyfile \
     backup/backup-containers.sh \
     backup/system/hybrid-ai-backup-capture.service \
     backup/system/hybrid-ai-backup-capture.timer \

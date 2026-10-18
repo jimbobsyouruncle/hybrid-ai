@@ -109,6 +109,7 @@
 - env_key_state()
 - container_env()
 - install_hint()
+- grace_epoch()
 
 ## hermes/Dockerfile
 - FROM python:3.11-slim
@@ -450,6 +451,11 @@
 - pass()
 - fail()
 
+## scripts/test-doctor-startup-grace.sh
+- pass()
+- fail()
+- run_doctor()
+
 ## scripts/test-env-pin-migration.sh
 - ok()
 - bad()
@@ -471,6 +477,7 @@
 - resolve_rc()
 - fb_resolve()
 - fb_rc()
+- render_step8()
 
 ## scripts/test-install-health.sh
 - ok()
