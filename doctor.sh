@@ -116,7 +116,10 @@ container_env() {
 # Every compose command must use the same project, env file and BOTH compose
 # files. Running with only the OpenHands file makes Compose try to recreate the
 # shared network and stops OpenHands -- so remedies always print the full form.
-COMPOSE_CMD="docker compose -p hybrid-ai --env-file ${ENV_FILE} --project-directory ${APP_DIR} -f ${APP_DIR}/docker-compose.yml -f ${APP_DIR}/openhands/docker-compose.openhands.yml -f ${APP_DIR}/hermes/docker-compose.hermes.yml"
+# BOTH resolved env files are passed: the layout file holds the host paths and
+# identity settings, the stack file holds the runtime config and secrets. When
+# the two resolve to the same path, passing it twice is accepted.
+COMPOSE_CMD="docker compose -p hybrid-ai --env-file ${HYBRID_AI_ENV_FILE} --env-file ${ENV_FILE} --project-directory ${APP_DIR} -f ${APP_DIR}/docker-compose.yml -f ${APP_DIR}/openhands/docker-compose.openhands.yml -f ${APP_DIR}/hermes/docker-compose.hermes.yml"
 
 (( QUIET )) || {
   printf '%s\n' "============================================================"

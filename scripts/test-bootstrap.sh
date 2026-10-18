@@ -1164,13 +1164,13 @@ fi
 
 # Byte-identical files (AC15), when origin/main is available.
 if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  # Keep this list equal to the out-of-scope paths in the job brief. This card
-  # changes only backup/README.md, backup/backup.sh and the two system-mode
-  # .service units it pins (upload/check), so those are listed explicitly here
-  # rather than as a whole tree. The capture unit is frozen and stays listed.
+  # Keep this list equal to the out-of-scope paths in the job brief. These are
+  # the files a bootstrap card must not touch; a card that legitimately changes
+  # one of them stops listing it here, exactly as done for the compose/log
+  # fail-closed card (docker-compose.yml, hermes/docker-compose.hermes.yml and
+  # doctor.sh). The capture unit is frozen and stays listed.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
-    docker-compose.yml hermes/docker-compose.hermes.yml \
-    openhands/docker-compose.openhands.yml doctor.sh status/Caddyfile \
+    openhands/docker-compose.openhands.yml status/Caddyfile \
     backup/backup-containers.sh \
     backup/system/hybrid-ai-backup-capture.service \
     backup/system/hybrid-ai-backup-capture.timer \
@@ -1182,6 +1182,31 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   check "the out-of-scope files are byte-identical to origin/main" "" "$diff_out"
 else
   printf 'skip: origin/main is not available; the byte-identical check is a no-op here\n'
+fi
+
+# doctor.sh COMPOSE_CMD (offline, no Docker). Every printed Fix hint inherits
+# ${COMPOSE_CMD}, so on a bootstrapped host -- where the layout file
+# (HYBRID_AI_ENV_FILE) and the stack file (HYBRID_AI_STACK_ENV_FILE) are two
+# different paths -- the assignment must pass BOTH env files. A single-env-file
+# form (the pre-fix line) is the regression this asserts against.
+doctor_compose_cmd="$(grep -E '^COMPOSE_CMD=' "${REPO}/doctor.sh")"
+if [[ -n "$doctor_compose_cmd" ]]; then
+  ok "doctor.sh declares COMPOSE_CMD"
+else
+  bad "doctor.sh has no COMPOSE_CMD assignment"
+fi
+env_file_count="$(printf '%s\n' "$doctor_compose_cmd" | grep -o -- '--env-file' | wc -l | tr -d ' ')"
+check "doctor.sh COMPOSE_CMD passes exactly two --env-file values" "2" "$env_file_count"
+# shellcheck disable=SC2016  # the ${...} names are matched literally, not expanded
+have "doctor.sh COMPOSE_CMD passes the layout env file" "$doctor_compose_cmd" \
+  '--env-file ${HYBRID_AI_ENV_FILE}'
+# shellcheck disable=SC2016  # the ${...} name is matched literally, not expanded
+have "doctor.sh COMPOSE_CMD passes the stack env file" "$doctor_compose_cmd" \
+  '--env-file ${ENV_FILE}'
+if printf '%s\n' "$doctor_compose_cmd" | grep -qE -- '--env-file [^$]'; then
+  bad "doctor.sh COMPOSE_CMD has a hardcoded --env-file path"
+else
+  ok "doctor.sh COMPOSE_CMD has no hardcoded --env-file path"
 fi
 
 # The refusal codes are documented in the header AND in the troubleshooting doc.

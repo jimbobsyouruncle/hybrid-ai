@@ -335,10 +335,10 @@ Referenced by name only; values live in `.env`, which is gitignored.
 | `HERMES_HOME` | image `ENV` | Pins runtime dependency state (incl. the venv generation `.leases`) to the data volume `/root/.hermes`. Must never be `/opt/hermes-agent`, which is read-only to the runtime uid. |
 | `HYBRID_AI_UID` | `docker-compose.hermes.yml`, `docker-compose.yml` (status `user:`), `openhands/docker-compose.openhands.yml` (`SANDBOX_USER_ID`), `hermes/Dockerfile`, `install.sh`, `doctor.sh` | Dedicated non-root uid. Drives the Hermes container uid, the status-container `user:`, and the OpenHands sandbox uid, so the whole stack runs as that account. Unset keeps today's behaviour: the login account's uid. Set by the account migration. |
 | `HYBRID_AI_GID` | `docker-compose.hermes.yml`, `hermes/Dockerfile`, `install.sh` | Group id matching `HYBRID_AI_UID`. Unset keeps the login account's gid. |
-| `HYBRID_AI_DATA_DIR` | `docker-compose.yml`, `hermes/docker-compose.hermes.yml`, `scripts/lib/hybrid-ai-env.sh` | Host data root. `hermes_data/`, `webui_data/` and `ollama_data/` live under it, names unchanged. Default: the repo directory (bind source `${HYBRID_AI_DATA_DIR:-.}/hermes_data`). |
+| `HYBRID_AI_DATA_DIR` | `docker-compose.yml`, `hermes/docker-compose.hermes.yml`, `scripts/lib/hybrid-ai-env.sh` | Host data root. `hermes_data/`, `webui_data/` and `ollama_data/` live under it, names unchanged. The helper default is the repo directory; the compose bind source is fail-closed (`${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/hermes_data`), so compose refuses to parse unless the installer has exported it. |
 | `OPENROUTER_API_KEY` | container env, and each profile's own `.env` | Model provider for agent work. Each board-running profile (default, builder, reviewer) also needs `OPENROUTER_API_KEY` in its own profile `.env` under `hermes_data/` (e.g. `hermes_data/.env`, `hermes_data/profiles/builder/.env`, `hermes_data/profiles/reviewer/.env`); a profile without it stalls its board. |
 | `LOCAL_DOMAIN` | container env | Used for local subdomain routing. |
-| `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory; the overlay now binds `${HYBRID_AI_DATA_DIR:-.}/hermes_data`. |
+| `HERMES_DATA_DIR` | `.env.example` only | Documented as the memory directory; the overlay now binds `${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/hermes_data`. |
 
 ---
 

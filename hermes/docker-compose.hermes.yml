@@ -27,11 +27,11 @@ services:
       - "${HERMES_PORT:-8501}:8501"
       - "${HERMES_API_PORT:-8642}:8642"
     volumes:
-      - ${HYBRID_AI_DATA_DIR:-.}/hermes_data:/root/.hermes
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/hermes_data:/root/.hermes
       # Persistent WebUI workspace: the same host folder the container already
       # sees at /root/.hermes/workspace, mounted here at the WebUI Home path so
       # it survives a container recreate. Read-write.
-      - ${HYBRID_AI_DATA_DIR:-.}/hermes_data/workspace:/root/workspace
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/hermes_data/workspace:/root/workspace
       # The agent clone, NOT the deployment directory. The deployment directory
       # holds .env (RunPod key, WebUI secret) and the logs. Read-only: Hermes
       # reads code here; changes go through OpenHands or you.
@@ -49,8 +49,10 @@ services:
       # agent-context markdown files regardless of which ai/* branch OpenHands
       # last left checked out. `${AGENT_REPOS_DIR:-...}` defaults to
       # ${HOME}/hybrid-ai-repos when AGENT_REPOS_DIR is unset (Docker Compose
-      # expands the nested default), so a compose parse with no .env still
-      # succeeds. `:ro` is load-bearing: Hermes reads this tree, never writes.
+      # expands the nested default), so this mount source never needs setting.
+      # The data and workspace sources above DO need setting: they fail closed
+      # (`:?`) so a compose parse with no .env is refused, not silently
+      # defaulted. `:ro` is load-bearing: Hermes reads this tree, never writes.
       # The script refuses any path that is, contains, or is inside the
       # deployment dir or the OpenHands workspace, so .env stays out of reach.
       - ${AGENT_REPOS_DIR:-${HOME}/hybrid-ai-repos}:/agent-repos:ro
