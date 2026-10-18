@@ -330,6 +330,13 @@
 - planned_action()
 - inv_add()
 
+## scripts/test-agent-image-repo-migration.sh
+- ok()
+- bad()
+- check()
+- run_install()
+- env_value()
+
 ## scripts/test-backup-containers.sh
 - ok()
 - bad()

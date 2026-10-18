@@ -99,6 +99,7 @@
 - scripts/deploy-trigger.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
+- scripts/test-agent-image-repo-migration.sh - FILE: scripts/test-agent-image-repo-migration.sh
 - scripts/test-backup-containers.sh - FILE: scripts/test-backup-containers.sh
 - scripts/test-backup-mode-timers.sh - FILE: scripts/test-backup-mode-timers.sh
 - scripts/test-backup-system-units.sh - FILE: scripts/test-backup-system-units.sh
