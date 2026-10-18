@@ -919,9 +919,10 @@ fi
 # stores that URL verbatim in project/<repo>/.git/config. The token is then on
 # disk in plain text. Hand-stripping the URL does not hold: the next clone
 # rewrites it. The agent-server pin that stops this (>= 1.37.0) has shipped
-# (1.37.1-python); detection stays the control here regardless. This is a
-# WARNING, never a failure -- one legacy clone can still trip it, and a red
-# deploy must not be the result.
+# (1.37.1-python); detection stays the control here regardless. A credential
+# still on disk is now a defect, not a tolerable warning, so this check FAILS
+# the deploy (exit 2 -> red). An unreadable config or a missing check is still
+# only a warning -- neither proves a credential is present.
 # ---------------------------------------------------------------------------
 section "Agent clones"
 
@@ -952,7 +953,7 @@ else
   elif [[ -n "$CRED_OUT" ]]; then
     while IFS= read -r cline; do
       [[ -n "$cline" ]] || continue
-      warn "Credential embedded in a git remote: ${cline}" \
+      fail "Credential embedded in a git remote: ${cline}" \
            "Rotate that token in GitHub, then re-run ./doctor.sh. Do not hand-strip the URL: the next clone rewrites it. See docs/TROUBLESHOOTING.md for why."
     done <<<"$CRED_OUT"
   else
