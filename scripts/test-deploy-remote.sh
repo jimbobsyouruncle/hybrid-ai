@@ -199,6 +199,75 @@ else
   fi
 fi
 
+# --- Doctor-level credential check: a finding must fail the deploy ----------
+# Regression for card B26: an embedded credential is a HARD FAIL (doctor exit 2
+# -> deploy step exit 4), not a warning. The REAL doctor.sh is invoked with its
+# scan roots pointed at throwaway trees. Unrelated host failures are common in
+# CI, so the assertions compare the credential run against a baseline and a
+# clean run rather than assuming the host is healthy.
+DOCTOR="$SCRIPT_DIR/../doctor.sh"
+if [[ ! -f "$DOCTOR" ]]; then
+  fail "cannot find the real doctor.sh at $DOCTOR"
+else
+  # Fixture credential assembled at runtime so no literal userinfo shape is
+  # committed. It is a dummy (`user:pass`) in a temp dir, never a real secret.
+  FIX_USERINFO="$(printf '%s:%s' 'user' 'pass')"
+  FIX_URL="https://${FIX_USERINFO}@github.com/x.git"
+
+  CRED_BAD="$WORKDIR/cred-bad"
+  CRED_CLEAN="$WORKDIR/cred-clean"
+  CRED_NONE="$WORKDIR/cred-none"
+  mkdir -p "$CRED_BAD/proj/.git" "$CRED_CLEAN/proj/.git" "$CRED_NONE"
+  printf '[remote "origin"]\n\turl = %s\n' "$FIX_URL" > "$CRED_BAD/proj/.git/config"
+  printf '[remote "origin"]\n\turl = https://github.com/x.git\n' > "$CRED_CLEAN/proj/.git/config"
+
+  # run_doctor <workspace> <repos-dir> <outfile> -> sets DOCTOR_RC, DOCTOR_FAILS
+  run_doctor() {
+    set +e
+    OPENHANDS_WORKSPACE="$1" AGENT_REPOS_DIR="$2" "$DOCTOR" --no-cloud >"$3" 2>&1
+    DOCTOR_RC=$?
+    set -e
+    DOCTOR_FAILS="$(sed -n 's/.*[^0-9]\([0-9][0-9]*\) failure(s).*/\1/p' "$3" | tail -1)"
+    DOCTOR_FAILS="${DOCTOR_FAILS:-0}"
+  }
+
+  run_doctor "$CRED_NONE"  "$CRED_NONE"  "$WORKDIR/cred-none.out"
+  BASE_RC=$DOCTOR_RC; BASE_FAILS=$DOCTOR_FAILS
+  run_doctor "$CRED_CLEAN" "$CRED_NONE"  "$WORKDIR/cred-clean.out"
+  CLEAN_RC=$DOCTOR_RC; CLEAN_FAILS=$DOCTOR_FAILS
+  run_doctor "$CRED_BAD"   "$CRED_NONE"  "$WORKDIR/cred-bad.out"
+  BAD_RC=$DOCTOR_RC; BAD_FAILS=$DOCTOR_FAILS
+
+  # Clean tree keeps the previous exit and adds no failure.
+  if [[ "$CLEAN_RC" -eq "$BASE_RC" && "$CLEAN_FAILS" -eq "$BASE_FAILS" ]]; then
+    pass "clean scan roots keep the previous exit ($CLEAN_RC) and add no failure"
+  else
+    fail "clean scan roots changed the verdict (base rc $BASE_RC/$BASE_FAILS fails, clean rc $CLEAN_RC/$CLEAN_FAILS)"
+  fi
+
+  # Finding: exit 2, exactly one extra failure, path + key printed.
+  if [[ "$BAD_RC" -eq 2 && "$BAD_FAILS" -eq $(( CLEAN_FAILS + 1 )) ]]; then
+    pass "credential finding -> doctor exit 2, exactly one extra failure"
+  else
+    fail "credential finding expected exit 2 and one extra failure, got rc $BAD_RC, $BAD_FAILS vs clean $CLEAN_FAILS"
+  fi
+
+  if has_line "$WORKDIR/cred-bad.out" "Credential embedded in a git remote: $CRED_BAD/proj/.git/config: remote.origin.url"; then
+    pass "credential finding prints the config path and key"
+  else
+    fail "credential finding did not print path+key"
+  fi
+
+  if grep -qF -- "$FIX_USERINFO" "$WORKDIR/cred-bad.out" || grep -qF -- "$FIX_URL" "$WORKDIR/cred-bad.out"; then
+    fail "credential finding leaked the URL or the password"
+  else
+    pass "credential finding never prints the URL or the password"
+  fi
+
+  # The 1-vs-2 mapping already proven above (cases 5 and 6) turns rc 2 into
+  # exit 4; the credential finding now travels that path instead of rc 1.
+fi
+
 echo "== done =="
 if [[ "$failures" -ne 0 ]]; then
   echo "$failures case(s) failed."

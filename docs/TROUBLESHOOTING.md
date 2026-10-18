@@ -724,24 +724,26 @@ exceed the health-check window. Watch the pull, then re-check.
 
 ## Agent clone embeds a credential in its git remote
 
-`./doctor.sh` prints a warning for every agent clone whose git config stores a
+`./doctor.sh` fails for every agent clone whose git config stores a
 credential inside a remote URL:
 
 ```
-! Credential embedded in a git remote: <path>/.git/config: remote.origin.url
+✗ Credential embedded in a git remote: <path>/.git/config: remote.origin.url
 ```
 
 Only the file path and the config key are shown. The URL, the userinfo and the
 token are never printed — not on stdout, not on stderr. `scripts/check-git-remotes.sh`
-is the read-only check behind the warning; it scans the roots named by
+is the read-only check behind the failure; it scans the roots named by
 `OPENHANDS_WORKSPACE` (its root clone and `project/*/`) and `AGENT_REPOS_DIR`
 (`*/`), to a depth of four, and never follows a symlink.
 
-This is a warning, never a failure. A deploy stays green (exit `1`), because a
-single live clone trips the check today and turning it into a red deploy would
-block every deploy until the upstream fix lands.
+This is a failure, not a warning. As of the agent-server `1.37.1` upgrade the
+token is no longer written into clone URLs, so a credential still on disk is a
+defect rather than a tolerable legacy artefact: `doctor.sh` exits `2` and the
+deploy step exits `4` (red). An unreadable `.git/config` or a missing check
+script is still only a warning — neither proves a credential is present.
 
-**What the warning means.** OpenHands' app-server clones with a URL of the form
+**What the failure means.** OpenHands' app-server clones with a URL of the form
 `https://<token>@github.com/<owner>/<repo>.git`. Git writes that URL verbatim
 into `project/<repo>/.git/config` as `remote.<name>.url` (and sometimes
 `pushurl`, or a `url.<base>.insteadOf` shim). The token is therefore sitting on

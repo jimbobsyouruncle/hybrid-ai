@@ -435,6 +435,7 @@
 - line_number()
 - repo_sha()
 - run_deploy()
+- run_doctor()
 
 ## scripts/test-deploy-trigger.sh
 - ok()
