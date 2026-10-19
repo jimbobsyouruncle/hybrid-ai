@@ -907,8 +907,13 @@ if (( OH_RUNNING )); then
     # A root-owned project/ broke 'git init' once already.
     ROOT_OWNED="$(find "$OH_WS" -maxdepth 2 -user root ! -path '*/.git/*' 2>/dev/null | head -5)"
     if [[ -n "$ROOT_OWNED" ]]; then
+      # Never derive the owner from the calling user: doctor runs under sudo, so
+      # `id -un` is root and the printed fix would hand the whole workspace to
+      # root. Use the stack identity, then the workspace's own owner.
+      WS_OWNER="$(env_get HYBRID_AI_UID)"; WS_OWNER="${WS_OWNER:-$(stat -c '%u' "$OH_WS" 2>/dev/null)}"
+      WS_GROUP="$(env_get HYBRID_AI_GID)"; WS_GROUP="${WS_GROUP:-$(stat -c '%g' "$OH_WS" 2>/dev/null)}"
       fail "Root-owned files in the workspace: $(echo "$ROOT_OWNED" | tr '\n' ' ')" \
-           "Fix: sudo chown -R $(id -un):$(id -gn) ${OH_WS} && sudo setfacl -R -m u:${OH_SB_UID}:rwx ${OH_WS}"
+           "Fix: sudo chown -R ${WS_OWNER}:${WS_GROUP} ${OH_WS} && sudo setfacl -R -m u:${OH_SB_UID}:rwx ${OH_WS}"
     else
       pass "No root-owned files at the top of the workspace"
     fi
