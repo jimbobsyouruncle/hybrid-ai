@@ -41,7 +41,7 @@ on:
         description: "Tag for the derived agent-server image"
         required: true
         type: string
-        default: "1.37.1-python-hybrid.2"
+        default: "1.37.1-python-hybrid.3"
 
 # Two builds must never push at the same time. cancel-in-progress stays false so
 # an in-flight build is never killed mid-push.

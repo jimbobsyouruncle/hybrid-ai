@@ -41,7 +41,7 @@ done
 
 STALE_REPO="ghcr.io/openhands/agent-server"
 NEW_REPO="ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid"
-NEW_TAG="1.37.1-python-hybrid.2"
+NEW_TAG="1.37.1-python-hybrid.3"
 
 PASS=0
 FAIL=0

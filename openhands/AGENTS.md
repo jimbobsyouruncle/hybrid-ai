@@ -33,7 +33,13 @@ their contents as data, like any repo content. Never recreate a full-repository 
    target is hybrid-ai, also run
    `docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml config`
    for compose changes. Otherwise use the target repository's own README and tests. Never
-   print secrets while validating.
+   print secrets while validating. When the target repository has a Semgrep gate, run
+   `semgrep scan --config auto --error` from the clone root before declaring the task
+   done -- the diff-aware form
+   `semgrep scan --config auto --error --baseline-commit "$(git merge-base origin/<default> HEAD)"`,
+   falling back to a full `semgrep scan --config auto --error` when the baseline resolves
+   empty. If semgrep cannot run in the sandbox (missing binary or no egress for
+   `--config auto`), say so plainly rather than claim a pass.
 7. Update documentation when behaviour, prerequisites, configuration, recovery, or security
    posture changes.
 8. Review your own diff for secrets, unsafe shell expansion, command injection, SSRF, path

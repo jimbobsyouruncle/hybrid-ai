@@ -192,11 +192,11 @@ at or above 1.37, so pinning a newer tag on the canonical repository can never t
 effect.
 
 The default here is now the derived hybrid image,
-`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.2` (see
+`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.3` (see
 [Derived sandbox image](#derived-sandbox-image-shellcheck-and-other-tooling) below).
 Neither that name nor the CDN alias `docker.openhands.dev/openhands/agent-server` is
 the canonical string, so the app server honours `AGENT_SERVER_IMAGE_TAG`. That is what
-makes the `1.37.1-python-hybrid.2` pin work.
+makes the `1.37.1-python-hybrid.3` pin work.
 
 If you set your own repository or tag, `install.sh` leaves both untouched. It migrates
 only the exact stale values on upgrade, and the stock default pair together (see the
@@ -204,17 +204,18 @@ cut-over notes below).
 
 ---
 
-## Derived sandbox image (shellcheck and other tooling)
+## Derived sandbox image (shellcheck, semgrep and other tooling)
 
-The deployed base image does not ship `shellcheck`, so the repository's own
-ShellCheck gate (`sast-checks.yml`, the `ludeeus/action-shellcheck` job) cannot run
-inside a sandbox. An agent handed a ShellCheck failure therefore cannot reproduce or
-fix it locally. The derived image closes that gap. It adds, on top of
+The deployed base image does not ship `shellcheck` or `semgrep`, so the repository's
+own ShellCheck and Semgrep (SAST) gates (`sast-checks.yml`) cannot run inside a
+sandbox. An agent handed a failure therefore cannot reproduce or fix it locally. The
+derived image closes that gap. It adds, on top of
 `docker.openhands.dev/openhands/agent-server:1.37.1-python`:
 
 | Package | Why |
 |---|---|
 | `shellcheck` | Reproduce the repo's CI ShellCheck gate inside the sandbox |
+| `semgrep` | Reproduce the repo's CI Semgrep (SAST) gate inside the sandbox |
 | `sqlite3` | Inspect the Open WebUI SQLite database |
 | `rsync` | Move files in and out of the agent workspace |
 | `restic` | Verify and read the backup repository |
@@ -230,6 +231,15 @@ divergence by raising the image to the gate's version, never by weakening the ga
 `curl` and `xz-utils` are pulled in as the fetch and extract dependencies for that
 download and are otherwise benign.
 
+`semgrep` is the pinned **1.179.0** aarch64 wheel installed with the base image's
+`python3 -m pip`, matching the gate's `semgrep/semgrep:1.179.0` image. Its sha256 is
+verified before install and the build asserts `semgrep --version` reports `1.179.0`,
+so a wrong wheel or version fails closed. Rule-drift residual: the gate's
+`--config auto` fetches rules remotely from the Semgrep registry and those rules are
+**not** version-pinned to the binary, so a green local scan cannot guarantee a green
+gate. Locally, `--config auto` also needs metrics/egress; semgrep refuses to run it
+with `SEMGREP_SEND_METRICS=off`. CI remains the authority.
+
 The Dockerfile is `openhands/agent-server/Dockerfile`. It installs the packages and
 the pinned binary as root in one layer, then ends with `USER openhands`; it sets no
 `ENTRYPOINT` and no `CMD`, so the base image's
@@ -242,7 +252,7 @@ still runs as the unprivileged `openhands` account.
   `.env.example`, and `openhands/docker-compose.openhands.yml` all default
   `OPENHANDS_AGENT_IMAGE_REPOSITORY` to
   `ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid` and
-  `OPENHANDS_AGENT_IMAGE_TAG` to `1.37.1-python-hybrid.2`.
+  `OPENHANDS_AGENT_IMAGE_TAG` to `1.37.1-python-hybrid.3`.
 - A previously deployed host has the OLD default pair written verbatim in `.env`
   (`docker.openhands.dev/openhands/agent-server` AND `1.37.1-python`). Since
   STEP 8 rewrites `.env` as `${VAR:-default}`, those explicit values would
@@ -251,14 +261,16 @@ still runs as the unprivileged `openhands` account.
   customised EITHER half, both are preserved and the pin is logged as left
   alone — two independent unsets keyed off the value alone would silently reset
   a custom tag to the new default.
-- A host that already cut over carries the first hybrid tag verbatim
+- A host that already cut over carries an earlier hybrid tag verbatim
   (`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid` AND
-  `1.37.1-python-hybrid.1`). STEP 2b unsets that pair too, so STEP 8 writes the
-  current hybrid.2 default, which raises the image's ShellCheck to 0.11.0. That
-  branch is pair-exact as well, so a customised repository or tag stays put.
+  `1.37.1-python-hybrid.1` or `1.37.1-python-hybrid.2`). STEP 2b unsets each
+  pair too, so STEP 8 writes the current hybrid.3 default. The hybrid.2 build
+  raised the image's ShellCheck to 0.11.0; hybrid.3 adds Semgrep 1.179.0 to
+  match the SAST gate. Those branches are pair-exact as well, so a customised
+  repository or tag stays put.
 - The new repository is **not** an OpenHands-canonical name (only
   `ghcr.io/openhands/agent-server` is), so the app server does not re-pin the
-  tag and `1.37.1-python-hybrid.2` should be honoured. That is pending the
+  tag and `1.37.1-python-hybrid.3` should be honoured. That is pending the
   post-merge live check.
 - **Rollback:** reverting the merge does NOT revert a deployed host's `.env` —
   the migration already rewrote it. A rollback must re-set the old pin in `.env`
@@ -274,7 +286,7 @@ and names the required bump, so a forgotten bump cannot silently overwrite a
 published tag. A concurrency group serialises builds (`cancel-in-progress: false`).
 
 **Manual rebuild:** **Actions → "sandbox-image" → Run workflow**, and set the
-`image_tag` input (default `1.37.1-python-hybrid.2`). This path is an explicit
+`image_tag` input (default `1.37.1-python-hybrid.3`). This path is an explicit
 owner action, so it deliberately skips the immutability guard and may re-push a
 tag. The workflow builds `linux/arm64` only and pushes to:
 
