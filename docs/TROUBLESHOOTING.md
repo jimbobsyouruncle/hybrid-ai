@@ -665,6 +665,20 @@ sets conservatively and deliberately. Use a smaller model rather than raising it
 OpenHands is optional. Chat, the cloud pipe and backups all work without it,
 so `install.sh` warns rather than failing when it does not come up.
 
+**`OpenHands workspace ACLs not applied` during a deploy.** That warning comes
+from `prepare_openhands_workspace`, which runs `docker pull` on the pinned
+agent-server image before it applies the workspace ACLs. If the pull fails — for
+example because the deploy raced the image build and the tag's manifest was not
+published yet — the ACL step is skipped and the warning prints. The deploy
+workflow now gates on the image manifest before it triggers the remote install:
+`scripts/deploy-image-gate.sh` polls GHCR for the tag pinned by `install.sh`
+STEP 8 and fails closed if it never appears, so a deploy can no longer start
+against a missing image. If you still see the warning, the host's own
+`OPENHANDS_AGENT_IMAGE_TAG` in `.env` may differ from the repo default the gate
+checks (the gate does not read a host-customised tag); confirm the tag exists
+with `docker manifest inspect <repo>:<tag>` and re-run
+`./openhands/scripts/openhands-control.sh start`.
+
 **The container vanished after a deploy or re-install.** Almost certainly a
 `docker compose up -d --remove-orphans` that omitted the overlay file, which
 makes compose treat OpenHands as an orphan and delete it. State in

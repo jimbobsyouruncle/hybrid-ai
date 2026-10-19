@@ -4,6 +4,7 @@
 |---|---|
 | `workflows/deploy.yml` | On a push to `main`, reuses `validate.yml` and then triggers the deploy unit on the Pi over the Tailscale network. |
 | `workflows/validate.yml` | Reusable source validation (`workflow_call` only). Called by `sast-checks.yml` on every pull request and by `deploy.yml` on every push to `main`. Holds no secrets. |
+| `workflows/sandbox-image.yml` | Builds and publishes the derived agent-server image to GHCR. Auto-publishes on a push to `main` that changes `openhands/agent-server/Dockerfile` (tag read from the `image_tag` default, guarded against overwriting an existing tag); `workflow_dispatch` is the manual rebuild path. |
 | `workflows/agent-context.yml` | Checks the checked-in `REPO_MAP.md` and `CODE_INDEX.md` are fresh on every pull request. Read-only; never commits. |
 | `workflows/sast-checks.yml` | The single pull-request gate: ShellCheck, Semgrep, source validation, CodeQL and the Hermes non-root smoke test, ending in the `Security & SAST gate`. |
 | `dependabot.yml` | Grouped pull request that opens weekly on Sunday at 22:00 America/New_York to bump the SHA-pinned GitHub Actions. GitHub Actions only. |
@@ -55,13 +56,14 @@ The old advisory ShellCheck step is gone from validation. It was `continue-on-er
 
 Only runs if `validate` passed.
 
-1. Joins the tailnet as an ephemeral node tagged `tag:ci`
-2. Confirms the Pi is reachable, retrying for ~50 seconds while mesh routes establish
-3. Connects as the dedicated `hybrid-ai-deploy` account and sends exactly one command string, `deploy <sha>`, through `scripts/deploy-trigger.sh`
-4. The forced command on the Pi starts the system unit `hybrid-ai-deploy@<sha>.service`, which runs `scripts/deploy-instance.sh <sha>`: it refuses any revision that is not an ancestor of `origin/main`, resets to the exact `github.sha` CI validated, and asserts `HEAD` equals it
-5. `scripts/deploy-instance.sh` hands off to `scripts/deploy-remote.sh <sha>`, which re-asserts `HEAD` and then runs `./install.sh --non-interactive`
-6. `scripts/deploy-remote.sh` polls the health endpoint for up to two minutes and gates on `./doctor.sh --no-cloud`: warnings stay green, failures turn the deploy red
-7. The forced command reads back the unit result and prints the run log into the workflow output, so you can diagnose a failure without SSHing in yourself
+1. Runs `scripts/deploy-image-gate.sh`, a fail-closed pre-flight gate that polls GHCR until the sandbox image tag pinned by `install.sh` STEP 8 is published, so the deploy cannot race the image build. It needs no token and no tailnet; `permissions` stay `contents: read`. Bounded at 36 minutes, just past the build workflow's 30-minute ceiling.
+2. Joins the tailnet as an ephemeral node tagged `tag:ci`
+3. Confirms the Pi is reachable, retrying for ~50 seconds while mesh routes establish
+4. Connects as the dedicated `hybrid-ai-deploy` account and sends exactly one command string, `deploy <sha>`, through `scripts/deploy-trigger.sh`
+5. The forced command on the Pi starts the system unit `hybrid-ai-deploy@<sha>.service`, which runs `scripts/deploy-instance.sh <sha>`: it refuses any revision that is not an ancestor of `origin/main`, resets to the exact `github.sha` CI validated, and asserts `HEAD` equals it
+6. `scripts/deploy-instance.sh` hands off to `scripts/deploy-remote.sh <sha>`, which re-asserts `HEAD` and then runs `./install.sh --non-interactive`
+7. `scripts/deploy-remote.sh` polls the health endpoint for up to two minutes and gates on `./doctor.sh --no-cloud`: warnings stay green, failures turn the deploy red
+8. The forced command reads back the unit result and prints the run log into the workflow output, so you can diagnose a failure without SSHing in yourself
 
 **Why the revision is pinned, not `origin/main`.** `validate` tests the commit that
 triggered the run (`GITHUB_SHA`). If the deploy reset to `origin/main`, and `main`

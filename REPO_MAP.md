@@ -98,6 +98,7 @@
 - scripts/check-git-remotes.sh - FILE: scripts/check-git-remotes.sh
 - scripts/check-hermes-nonroot.sh - FILE: scripts/check-hermes-nonroot.sh
 - scripts/deploy-forced-command.sh
+- scripts/deploy-image-gate.sh - FILE: scripts/deploy-image-gate.sh
 - scripts/deploy-instance.sh
 - scripts/deploy-remote.sh
 - scripts/deploy-trigger.sh
@@ -113,6 +114,7 @@
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
 - scripts/test-deploy-forced-command.sh
+- scripts/test-deploy-image-gate.sh
 - scripts/test-deploy-instance.sh
 - scripts/test-deploy-remote.sh
 - scripts/test-deploy-trigger.sh
