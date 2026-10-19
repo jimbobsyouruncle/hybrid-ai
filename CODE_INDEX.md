@@ -17,6 +17,9 @@
 - validate
 - deploy
 
+## .github/workflows/sandbox-image.yml
+- build
+
 ## .github/workflows/sast-checks.yml
 - shellcheck
 - semgrep
@@ -132,6 +135,9 @@
 - install_backup_scheduler()
 - setup_backups()
 - run_backup()
+
+## openhands/agent-server/Dockerfile
+- FROM docker.openhands.dev/openhands/agent-server:1.37.1-python
 
 ## openhands/docker-compose.openhands.yml
 - openhands

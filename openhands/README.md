@@ -201,6 +201,45 @@ canonical value is migrated on upgrade.
 
 ---
 
+## Derived sandbox image (shellcheck and other tooling)
+
+The deployed base image does not ship `shellcheck`, so the repository's own
+ShellCheck gate (`sast-checks.yml`, the `ludeeus/action-shellcheck` job) cannot run
+inside a sandbox. An agent handed a ShellCheck failure therefore cannot reproduce or
+fix it locally. The derived image closes that gap. It adds, on top of
+`docker.openhands.dev/openhands/agent-server:1.37.1-python`:
+
+| Package | Why |
+|---|---|
+| `shellcheck` | Reproduce the repo's CI ShellCheck gate inside the sandbox |
+| `sqlite3` | Inspect the Open WebUI SQLite database |
+| `rsync` | Move files in and out of the agent workspace |
+| `restic` | Verify and read the backup repository |
+
+`jq` is already in the base image, so it is not reinstalled.
+
+The Dockerfile is `openhands/agent-server/Dockerfile`. It installs the packages as
+root in one layer, then ends with `USER openhands`; it sets no `ENTRYPOINT` and no
+`CMD`, so the base image's `tini -- /usr/local/bin/openhands-agent-server` is
+inherited unchanged and the sandbox still runs as the unprivileged `openhands`
+account.
+
+Build and publish it by hand: **Actions → "sandbox-image" → Run workflow**, and set
+the `image_tag` input (default `1.37.1-python-hybrid.1`). The workflow is
+`workflow_dispatch` only — nothing publishes on a push, a merge or a schedule. It
+builds `linux/arm64` only and pushes to:
+
+```text
+ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:<tag>
+```
+
+**Nothing in the deployment consumes this image yet.** No `.env` pin, no compose
+value, no installer line and no unit references it, and none is changed here. The
+stack keeps running the stock base image until a separate cut-over card lands. Until
+then publishing is inert with respect to the running system.
+
+---
+
 ## Git workflow
 
 ```text

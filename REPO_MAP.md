@@ -27,6 +27,7 @@
 
 - .github/workflows/agent-context.yml
 - .github/workflows/deploy.yml
+- .github/workflows/sandbox-image.yml
 - .github/workflows/sast-checks.yml
 - .github/workflows/validate.yml
 ## backup
@@ -68,6 +69,9 @@
 - openhands/AGENTS.md - OpenHands Maintenance Agent Instructions
 - openhands/README.md - openhands/ — natural-language code maintenance
 - openhands/docker-compose.openhands.yml - FILE: openhands/docker-compose.openhands.yml
+## openhands/agent-server
+
+- openhands/agent-server/Dockerfile
 ## openhands/prompts
 
 - openhands/prompts/feature.md - Implement a requested feature

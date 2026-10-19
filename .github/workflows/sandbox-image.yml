@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# FILE: .github/workflows/sandbox-image.yml
+# PURPOSE (plain English):
+#   Build the derived OpenHands agent-server image and publish it to GHCR.
+#
+#   THIS WORKFLOW IS MANUAL ONLY. It runs on workflow_dispatch and nothing else:
+#   no push, no pull_request, no schedule. A merge or a push never publishes an
+#   image. A human starts it from Actions -> "sandbox-image" -> Run workflow and
+#   supplies the tag.
+#
+#   It publishes to ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid,
+#   linux/arm64 only (the supported target is a Raspberry Pi, aarch64).
+#
+#   NOTHING CONSUMES THE PUBLISHED IMAGE YET. No pin, no compose value, no
+#   installer line and no unit references it. The deployment keeps running the
+#   stock base image until the separate cut-over card lands. Publishing here is
+#   inert with respect to the running system.
+# ---------------------------------------------------------------------------
+
+name: sandbox-image
+
+on:
+  # Manual only. Deliberately the sole trigger.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag for the derived agent-server image"
+        required: true
+        type: string
+        default: "1.37.1-python-hybrid.1"
+
+# Least privilege, exactly what the job needs: read the tree, push to GHCR.
+# No pull-requests: write, no id-token: write.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and push (linux/arm64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the derived image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: openhands/agent-server/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:${{ inputs.image_tag }}
