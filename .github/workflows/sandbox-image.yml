@@ -27,7 +27,7 @@ on:
         description: "Tag for the derived agent-server image"
         required: true
         type: string
-        default: "1.37.1-python-hybrid.1"
+        default: "1.37.1-python-hybrid.2"
 
 # Least privilege, exactly what the job needs: read the tree, push to GHCR.
 # No pull-requests: write, no id-token: write.

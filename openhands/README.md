@@ -192,11 +192,11 @@ at or above 1.37, so pinning a newer tag on the canonical repository can never t
 effect.
 
 The default here is now the derived hybrid image,
-`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.1` (see
+`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.2` (see
 [Derived sandbox image](#derived-sandbox-image-shellcheck-and-other-tooling) below).
 Neither that name nor the CDN alias `docker.openhands.dev/openhands/agent-server` is
 the canonical string, so the app server honours `AGENT_SERVER_IMAGE_TAG`. That is what
-makes the `1.37.1-python-hybrid.1` pin work.
+makes the `1.37.1-python-hybrid.2` pin work.
 
 If you set your own repository or tag, `install.sh` leaves both untouched. It migrates
 only the exact stale values on upgrade, and the stock default pair together (see the
@@ -221,11 +221,20 @@ fix it locally. The derived image closes that gap. It adds, on top of
 
 `jq` is already in the base image, so it is not reinstalled.
 
-The Dockerfile is `openhands/agent-server/Dockerfile`. It installs the packages as
-root in one layer, then ends with `USER openhands`; it sets no `ENTRYPOINT` and no
-`CMD`, so the base image's `tini -- /usr/local/bin/openhands-agent-server` is
-inherited unchanged and the sandbox still runs as the unprivileged `openhands`
-account.
+`shellcheck` is **not** the apt package. The CI gate (`ludeeus/action-shellcheck`
+2.0.0, track `stable`) runs ShellCheck **0.11.0**, while apt still ships 0.10.0. The
+Dockerfile therefore installs the pinned upstream **0.11.0** static `linux/arm64`
+binary to `/usr/local/bin/shellcheck`, verifying its sha256 before install so a
+mismatch fails the build. PATH must resolve 0.11.0 to match the gate; fix a future
+divergence by raising the image to the gate's version, never by weakening the gate.
+`curl` and `xz-utils` are pulled in as the fetch and extract dependencies for that
+download and are otherwise benign.
+
+The Dockerfile is `openhands/agent-server/Dockerfile`. It installs the packages and
+the pinned binary as root in one layer, then ends with `USER openhands`; it sets no
+`ENTRYPOINT` and no `CMD`, so the base image's
+`tini -- /usr/local/bin/openhands-agent-server` is inherited unchanged and the sandbox
+still runs as the unprivileged `openhands` account.
 
 **This image is now the deployed default.** The cut-over has landed:
 
@@ -233,7 +242,7 @@ account.
   `.env.example`, and `openhands/docker-compose.openhands.yml` all default
   `OPENHANDS_AGENT_IMAGE_REPOSITORY` to
   `ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid` and
-  `OPENHANDS_AGENT_IMAGE_TAG` to `1.37.1-python-hybrid.1`.
+  `OPENHANDS_AGENT_IMAGE_TAG` to `1.37.1-python-hybrid.2`.
 - A previously deployed host has the OLD default pair written verbatim in `.env`
   (`docker.openhands.dev/openhands/agent-server` AND `1.37.1-python`). Since
   STEP 8 rewrites `.env` as `${VAR:-default}`, those explicit values would
@@ -242,16 +251,21 @@ account.
   customised EITHER half, both are preserved and the pin is logged as left
   alone — two independent unsets keyed off the value alone would silently reset
   a custom tag to the new default.
+- A host that already cut over carries the first hybrid tag verbatim
+  (`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid` AND
+  `1.37.1-python-hybrid.1`). STEP 2b unsets that pair too, so STEP 8 writes the
+  current hybrid.2 default, which raises the image's ShellCheck to 0.11.0. That
+  branch is pair-exact as well, so a customised repository or tag stays put.
 - The new repository is **not** an OpenHands-canonical name (only
   `ghcr.io/openhands/agent-server` is), so the app server does not re-pin the
-  tag and `1.37.1-python-hybrid.1` should be honoured. That is pending the
+  tag and `1.37.1-python-hybrid.2` should be honoured. That is pending the
   post-merge live check.
 - **Rollback:** reverting the merge does NOT revert a deployed host's `.env` —
   the migration already rewrote it. A rollback must re-set the old pin in `.env`
   (or unset both variables) and re-run `install.sh`.
 
 Build and publish it by hand: **Actions → "sandbox-image" → Run workflow**, and set
-the `image_tag` input (default `1.37.1-python-hybrid.1`). The workflow is
+the `image_tag` input (default `1.37.1-python-hybrid.2`). The workflow is
 `workflow_dispatch` only — nothing publishes on a push, a merge or a schedule. It
 builds `linux/arm64` only and pushes to:
 

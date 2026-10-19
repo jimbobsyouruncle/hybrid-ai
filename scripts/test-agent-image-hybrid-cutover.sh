@@ -17,12 +17,21 @@
 #   half, both are preserved and the pin is logged as left alone -- two
 #   independent unsets would silently reset a custom tag to the new default.
 #
+#   A SECOND PAIR-EXACT migration covers the tag bump of the hybrid image itself:
+#   a host that already cut over carries the hybrid.1 pair verbatim, and STEP 8
+#   would preserve it as an owner pin, so STEP 2b unsets it to let STEP 8 write
+#   the hybrid.2 default. It is pair-exact for the same reason: a host with a
+#   customised either half stays on its owner-chosen pin.
+#
 # CASES:
 #   (a) legacy default pair in .env        -> both migrated to the new defaults
 #   (b) owner-chosen repository and/or tag -> preserved byte-for-byte
 #   (c) no .env                            -> the new defaults are written
 #   (d) a second run over the migrated .env -> no change, no migration logged
 #   (e) old repository + custom tag        -> BOTH preserved (partial match)
+#   (f) hybrid.1 pair in .env              -> both migrated to the hybrid.2 defaults
+#   (g) hybrid repository + custom tag     -> BOTH preserved (partial match)
+#   (h) a second run over the hybrid-migrated .env -> no change, no migration logged
 #
 # USAGE:
 #   bash scripts/test-agent-image-hybrid-cutover.sh
@@ -42,11 +51,13 @@ for t in mktemp stat grep; do
 done
 
 # Old stock pin (what a previously deployed host has in .env) and the new
-# derived hybrid pin it must migrate to.
+# derived hybrid pin it must migrate to. HYBRID_1_TAG is the first hybrid build a
+# cut-over host carries; the migration bumps it to NEW_TAG (the hybrid.2 build).
 OLD_REPO="docker.openhands.dev/openhands/agent-server"
 OLD_TAG="1.37.1-python"
 NEW_REPO="ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid"
-NEW_TAG="1.37.1-python-hybrid.1"
+NEW_TAG="1.37.1-python-hybrid.2"
+HYBRID_1_TAG="1.37.1-python-hybrid.1"
 
 PASS=0
 FAIL=0
@@ -263,6 +274,75 @@ elif grep -q 'Leaving the OpenHands agent-server image pin alone' "$LOG"; then
   ok "the pin was logged as left alone"
 else
   bad "the left-alone pin was not logged"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (f) hybrid.1 pair in .env is migrated to the hybrid.2 defaults =="
+{
+  printf 'OPENHANDS_AGENT_IMAGE_REPOSITORY=%s\n' "$NEW_REPO"
+  printf 'OPENHANDS_AGENT_IMAGE_TAG=%s\n' "$HYBRID_1_TAG"
+} > "$STACK"
+chmod 600 "$STACK"
+: > "$LOG"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 migrating the hybrid.1 pair" "0" "$rc"
+check "the repository stays the hybrid default" "$NEW_REPO" "$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_REPOSITORY)"
+check "the hybrid.1 tag is bumped to hybrid.2" "$NEW_TAG" "$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_TAG)"
+if grep -q 'Migrating the derived hybrid image pin' "$LOG"; then
+  ok "the hybrid.1 -> hybrid.2 migration was logged"
+else
+  bad "the hybrid.1 -> hybrid.2 migration was not logged"
+  sed 's/^/      /' "$LOG" >&2
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (g) hybrid repository + custom tag are BOTH preserved (partial match) =="
+CUSTOM_TAG_G="hybrid-local-build"
+{
+  printf 'OPENHANDS_AGENT_IMAGE_REPOSITORY=%s\n' "$NEW_REPO"
+  printf 'OPENHANDS_AGENT_IMAGE_TAG=%s\n' "$CUSTOM_TAG_G"
+} > "$STACK"
+chmod 600 "$STACK"
+BEFORE_G="$(grep -E '^OPENHANDS_AGENT_IMAGE_(REPOSITORY|TAG)=' "$STACK")"
+: > "$LOG"
+rc=0
+run_install "$LOG" || rc=$?
+AFTER_G="$(grep -E '^OPENHANDS_AGENT_IMAGE_(REPOSITORY|TAG)=' "$STACK")"
+check "install.sh exits 0 with a hybrid repository + custom tag" "0" "$rc"
+check "the hybrid repository is preserved" "$NEW_REPO" "$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_REPOSITORY)"
+check "the custom tag is preserved" "$CUSTOM_TAG_G" "$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_TAG)"
+check "the seeded repository and tag lines are preserved byte-for-byte" "$BEFORE_G" "$AFTER_G"
+if grep -q 'Migrating the derived hybrid image pin' "$LOG"; then
+  bad "a partial hybrid match was wrongly migrated"
+elif grep -q 'Leaving the OpenHands agent-server image pin alone' "$LOG"; then
+  ok "the partial hybrid pin was logged as left alone"
+else
+  bad "the left-alone hybrid pin was not logged"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (h) a second run over the hybrid-migrated .env changes nothing =="
+{
+  printf 'OPENHANDS_AGENT_IMAGE_REPOSITORY=%s\n' "$NEW_REPO"
+  printf 'OPENHANDS_AGENT_IMAGE_TAG=%s\n' "$HYBRID_1_TAG"
+} > "$STACK"
+chmod 600 "$STACK"
+run_install "$WORK/first-hybrid.log" || true
+check "the first run bumped the tag to hybrid.2" "$NEW_TAG" "$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_TAG)"
+TAG_AFTER_H1="$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_TAG)"
+: > "$LOG"
+rc=0
+run_install "$LOG" || rc=$?
+check "a second install.sh run exits 0" "0" "$rc"
+check "the tag is unchanged on the second run" "$TAG_AFTER_H1" "$(env_value "$STACK" OPENHANDS_AGENT_IMAGE_TAG)"
+if grep -q 'Migrating the derived hybrid image pin' "$LOG"; then
+  bad "the hybrid migration re-ran on an already-migrated .env"
+else
+  ok "the hybrid migration is idempotent (nothing logged on the second run)"
 fi
 
 # ---------------------------------------------------------------------------
