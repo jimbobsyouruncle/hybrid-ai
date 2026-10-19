@@ -39,7 +39,7 @@ done
 STALE_IMAGE="docker.openhands.dev/openhands/openhands:1.8"
 NEW_IMAGE="docker.openhands.dev/openhands/openhands:1.10"
 STALE_TAG="1.26.0-python"
-NEW_TAG="1.37.1-python"
+NEW_TAG="1.37.1-python-hybrid.1"
 
 PASS=0
 FAIL=0

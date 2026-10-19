@@ -53,14 +53,20 @@ services:
       - "172.17.0.1:${OPENHANDS_PORT:-3001}:3000"
 
     environment:
-      # The app server treats ghcr.io/openhands/agent-server as its own reserved
-      # repository. When that exact string is set, it silently re-pins
-      # AGENT_SERVER_IMAGE_TAG to the SDK version bundled in the app-server image,
-      # so the tag below would be ignored. The CDN alias
-      # docker.openhands.dev/openhands/agent-server serves the identical image but
-      # is not the canonical string, so the pinned tag is honoured.
-      AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-docker.openhands.dev/openhands/agent-server}
-      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}
+      # The default is now the DERIVED hybrid image
+      # (ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid), which adds
+      # shellcheck/sqlite3/rsync/restic on top of the stock agent-server.
+      #
+      # Why the repository string still matters: the app server treats
+      # ghcr.io/openhands/agent-server as its own reserved repository. When that
+      # exact canonical string is set, it silently re-pins AGENT_SERVER_IMAGE_TAG
+      # to the SDK version bundled in the app-server image, so the tag below would
+      # be ignored. Never set an OpenHands-canonical repository here.
+      # ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid is NOT an
+      # OpenHands-canonical name, so the pinned tag should be honoured -- pending
+      # the post-merge live check.
+      AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}
+      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.1}
 
       # Off by default: event logs are verbose and can echo file contents from
       # the workspace. Turn on temporarily when debugging, then turn it back off.

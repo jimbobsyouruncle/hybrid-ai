@@ -230,6 +230,19 @@ fi
 # then writes the new pin. Any other value is an owner-chosen pin and is preserved
 # untouched. Idempotent: after one run the loaded value no longer matches, so a
 # second run migrates nothing.
+#
+# The final migration cuts the sandbox over from the stock agent-server to the
+# derived hybrid image (ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid),
+# which adds the tooling the repo's ShellCheck gate needs. It is PAIR-EXACT on
+# purpose: it unsets OPENHANDS_AGENT_IMAGE_REPOSITORY and
+# OPENHANDS_AGENT_IMAGE_TAG only when BOTH load as the OLD default pair
+# (docker.openhands.dev/openhands/agent-server AND 1.37.1-python). A deployed
+# host carries that pair verbatim, so the two independent unsets above would not
+# clear it and ${VAR:-default} in STEP 8 would keep the stale pair forever. The
+# pair check is used instead of two independent unsets so that a host which
+# customised EITHER half is treated as an owner-chosen pin: unsets keyed off the
+# value alone would silently reset a custom tag to the new default. On a partial
+# match both values are left untouched and the pin is logged as left alone.
 if [[ "${OPENHANDS_IMAGE:-}" == "docker.openhands.dev/openhands/openhands:1.8" ]]; then
   log "Migrating OPENHANDS_IMAGE off the stale :1.8 pin to the current default."
   unset OPENHANDS_IMAGE
@@ -241,6 +254,14 @@ fi
 if [[ "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" == "ghcr.io/openhands/agent-server" ]]; then
   log "Migrating OPENHANDS_AGENT_IMAGE_REPOSITORY off the canonical ghcr.io/openhands/agent-server repository to the current default."
   unset OPENHANDS_AGENT_IMAGE_REPOSITORY
+fi
+if [[ "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" == "docker.openhands.dev/openhands/agent-server" \
+   && "${OPENHANDS_AGENT_IMAGE_TAG:-}" == "1.37.1-python" ]]; then
+  log "Migrating the stock agent-server pin (docker.openhands.dev/openhands/agent-server:1.37.1-python) to the derived hybrid image."
+  unset OPENHANDS_AGENT_IMAGE_REPOSITORY
+  unset OPENHANDS_AGENT_IMAGE_TAG
+elif [[ -n "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" || -n "${OPENHANDS_AGENT_IMAGE_TAG:-}" ]]; then
+  log "Leaving the OpenHands agent-server image pin alone (not the stock default pair)."
 fi
 
 # The shared helper above already resolved every LAYOUT-managed setting from
@@ -695,8 +716,8 @@ AGENT_REPOS_DIR=${AGENT_REPOS_DIR}
 OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.10}
-OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-docker.openhands.dev/openhands/agent-server}
-OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}
+OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}
+OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.1}
 OPENHANDS_STARTUP_GRACE_SECONDS=${OPENHANDS_STARTUP_GRACE_SECONDS:-120}
 OPENHANDS_LOG_ALL_EVENTS=${OPENHANDS_LOG_ALL_EVENTS:-false}
 OPENHANDS_MEM_LIMIT=${OPENHANDS_MEM_LIMIT:-3g}
@@ -733,7 +754,7 @@ prepare_openhands_workspace() {
   if ! command -v setfacl >/dev/null 2>&1; then
     "${SUDO[@]}" apt-get install -y acl || return 1
   fi
-  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-docker.openhands.dev/openhands/agent-server}:${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python}"
+  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}:${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.1}"
   docker pull -q "$img" >/dev/null || return 1
   local uid
   uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
