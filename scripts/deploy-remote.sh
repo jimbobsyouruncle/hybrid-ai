@@ -140,3 +140,10 @@ case "$doctor_rc" in
     exit 4
     ;;
 esac
+
+# HERMES_POST_DEPLOY_VERIFY: this script runs inside the deploy workflow, so
+# detach a waiter that verifies only after the workflow run completes.
+if [ -x /usr/local/sbin/run-post-deploy-verify.sh ]; then
+  setsid nohup /usr/local/sbin/run-post-deploy-verify.sh --wait-for "$EXPECTED_SHA" \
+    >/var/log/hybrid-ai-post-deploy-verify.log 2>&1 </dev/null &
+fi
