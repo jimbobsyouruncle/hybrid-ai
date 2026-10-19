@@ -789,12 +789,17 @@ prepare_openhands_workspace() {
   uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
   [[ -d "$OPENHANDS_WORKSPACE/.git" ]] || return 1
   mkdir -p "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations"
+  # The overlay bind-mounts this file at /etc/gitconfig. The mount source must
+  # exist before docker starts the sandbox, or docker creates a DIRECTORY in its
+  # place. 0644 so the sandbox uid can read it; re-running rewrites it.
+  install -m 0644 "${APP_DIR}/openhands/sandbox-gitconfig" \
+    "$OPENHANDS_WORKSPACE/.sandbox-gitconfig" || return 1
   "${SUDO[@]}" chown -R "${STATUS_UID}:${STACK_GID}" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations" || return 1
   "${SUDO[@]}" setfacl -R -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   "${SUDO[@]}" setfacl -R -d -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   # Keep agent runtime folders out of the clone's git status
   local ex="$OPENHANDS_WORKSPACE/.git/info/exclude" d
-  for d in conversations/ project/; do grep -qxF "$d" "$ex" 2>/dev/null || echo "$d" >> "$ex"; done
+  for d in conversations/ project/ .sandbox-gitconfig; do grep -qxF "$d" "$ex" 2>/dev/null || echo "$d" >> "$ex"; done
   ok "OpenHands workspace ready for sandbox uid ${uid}."
 }
 prepare_openhands_workspace || warn "OpenHands workspace ACLs not applied (needs sudo). Re-run ./install.sh interactively, then check with ./doctor.sh"

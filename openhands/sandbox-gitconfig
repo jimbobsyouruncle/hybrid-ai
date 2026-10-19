@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# FILE: openhands/sandbox-gitconfig
+# PURPOSE (plain English):
+#   The system git config handed to every new OpenHands sandbox. install.sh
+#   copies it into the workspace, and the overlay mounts it READ-ONLY at
+#   /etc/gitconfig inside each sandbox.
+#
+# WHY:
+#   The sandbox runs as the image's unprivileged uid (10001). The bind-mounted
+#   workspace is owned by the host account, so the two uids differ. git compares
+#   uids and refuses to operate, exiting 128 with "detected dubious ownership".
+#   ACLs do not help: git's check is uid-based, not permission-based. Listing
+#   the workspace roots here tells git they are trusted.
+#
+#   The entries are deliberately scoped to the two workspace roots. The blanket
+#   `safe.directory = '*'` is deliberately NOT used -- it would mark every
+#   repository on the system trusted, including any untrusted clone.
+#
+#   Wildcard matching needs git >= 2.47; the sandbox image ships 2.47.3.
+#
+# SECURITY:
+#   Read-only mount. It grants no write access and no credential access; it only
+#   suppresses git's ownership refusal for the two workspace roots.
+# ---------------------------------------------------------------------------
+[safe]
+	directory = /workspace
+	directory = /workspace/project/*

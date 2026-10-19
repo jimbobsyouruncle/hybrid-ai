@@ -752,6 +752,41 @@ the host's local zone and count stale rows as recent.
 
 ---
 
+## `fatal: detected dubious ownership in repository at '/workspace/project/...'`
+
+Git inside an OpenHands sandbox refuses the mounted workspace and exits 128.
+
+Cause: the sandbox runs as the image's unprivileged uid (10001), while the bind-mounted
+workspace is owned by the host account. Git compares uids, not permissions, so it rejects the
+repository. `sudo git` fails the same way, because git compares the process uid. The
+`SANDBOX_USER_ID` line in the overlay is inert — app-server 1.10.0 and agent-server 1.37.1 never
+read it.
+
+The shipped fix is a system git config, `openhands/sandbox-gitconfig`, mounted read-only at
+`/etc/gitconfig` in every new sandbox. It lists only the two workspace roots:
+
+```ini
+[safe]
+	directory = /workspace
+	directory = /workspace/project/*
+```
+
+Verify in a fresh sandbox:
+
+```bash
+docker exec <sandbox> git -C /workspace/project/hybrid-ai remote -v   # exits 0
+docker exec <sandbox> git -C /workspace/project/hybrid-ai merge-base origin/main HEAD
+```
+
+If you still see this, the sandbox predates the fix or the mount is missing. Re-run
+`./install.sh`, then start a new conversation: an existing sandbox keeps the mounts it was
+created with.
+
+Do not use `safe.directory '*'`. It marks every repository on the system trusted, including any
+untrusted clone. Do not edit `.git/config` — the config is a system file, mounted read-only.
+
+---
+
 ## Agent clone embeds a credential in its git remote
 
 `./doctor.sh` fails for every agent clone whose git config stores a

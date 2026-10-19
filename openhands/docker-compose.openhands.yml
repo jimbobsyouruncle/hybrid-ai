@@ -73,15 +73,18 @@ services:
       LOG_ALL_EVENTS: ${OPENHANDS_LOG_ALL_EVENTS:-false}
 
       OH_PERSISTENCE_DIR: /.openhands
-      # NOTE: whether agent-server 1.37.1 honours SANDBOX_USER_ID is unverified
-      # offline. install.sh does not assume either way: it pulls the image and
-      # derives the sandbox uid dynamically (docker run --entrypoint id ... -u
-      # openhands), then grants that uid access to the workspace via ACLs.
+      # NOTE: app-server 1.10.0 and agent-server 1.37.1 never read
+      # SANDBOX_USER_ID. The sandbox always runs as the image's unprivileged
+      # uid, so this line is inert. The scoped /etc/gitconfig mount below is
+      # what makes git work in the sandbox. Kept unchanged (harmless).
       SANDBOX_USER_ID: ${HYBRID_AI_UID:-${STATUS_UID:-1000}}
 
       # The isolated clone -- NOT this directory. See note 2 above.
       # No default: fail loudly rather than fall back to something unsafe.
-      SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:rw
+      # The second mount hands the sandbox a read-only system git config that
+      # trusts the workspace roots, so git does not refuse the bind mount with
+      # "dubious ownership". The source file is written by install.sh.
+      SANDBOX_VOLUMES: ${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}:/workspace:rw,${OPENHANDS_WORKSPACE:?OPENHANDS_WORKSPACE must be set - run ./install.sh}/.sandbox-gitconfig:/etc/gitconfig:ro
 
       # --- Sandbox connectivity --------------------------------------------
       # Legacy names are deliberate: this build's fallback config path reads
