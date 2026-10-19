@@ -268,6 +268,15 @@ if grep -qxF '.sandbox-gitconfig' "$WORK/ws/.git/info/exclude"; then
 else
   bad ".sandbox-gitconfig is not in the clone's .git/info/exclude"
 fi
+# install.sh runs as root on the host, so `install` creates the mount source
+# root-owned unless it is handed to the stack identity like project/ and
+# conversations/. A root-owned file fails doctor's workspace check and turns the
+# deploy red; chown is stubbed here, so assert the CODE, not the resulting owner.
+if grep -F 'chown -R' "$REPO/install.sh" | grep -qF '.sandbox-gitconfig'; then
+  ok "install.sh hands .sandbox-gitconfig to the stack owner"
+else
+  bad "install.sh leaves .sandbox-gitconfig root-owned (doctor fails the workspace check)"
+fi
 
 # ---------------------------------------------------------------------------
 echo
