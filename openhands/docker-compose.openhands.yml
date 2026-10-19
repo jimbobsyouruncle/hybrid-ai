@@ -66,7 +66,7 @@ services:
       # OpenHands-canonical name, so the pinned tag should be honoured -- pending
       # the post-merge live check.
       AGENT_SERVER_IMAGE_REPOSITORY: ${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}
-      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.1}
+      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.2}
 
       # Off by default: event logs are verbose and can echo file contents from
       # the workspace. Turn on temporarily when debugging, then turn it back off.

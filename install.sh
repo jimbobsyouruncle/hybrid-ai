@@ -231,7 +231,7 @@ fi
 # untouched. Idempotent: after one run the loaded value no longer matches, so a
 # second run migrates nothing.
 #
-# The final migration cuts the sandbox over from the stock agent-server to the
+# The next migration cuts the sandbox over from the stock agent-server to the
 # derived hybrid image (ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid),
 # which adds the tooling the repo's ShellCheck gate needs. It is PAIR-EXACT on
 # purpose: it unsets OPENHANDS_AGENT_IMAGE_REPOSITORY and
@@ -243,6 +243,18 @@ fi
 # customised EITHER half is treated as an owner-chosen pin: unsets keyed off the
 # value alone would silently reset a custom tag to the new default. On a partial
 # match both values are left untouched and the pin is logged as left alone.
+#
+# The final migration cuts the hybrid image over from the TAGGED build it first
+# shipped (ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid at
+# 1.37.1-python-hybrid.1) to the current hybrid tag (the hybrid.2 build, whose
+# ShellCheck is raised to 0.11.0 to match the CI gate). This one is PAIR-EXACT
+# too, and for the same reason: an already-migrated host carries the hybrid.1
+# pair verbatim in its stack env, and STEP 8 preserves an explicit value as an
+# owner pin, so without this branch the host would stay on hybrid.1 forever. The
+# pair check keeps a host which customised EITHER half (a private repository, or
+# a self-built tag) on its owner-chosen pin -- unsets keyed off the value alone
+# would silently reset it. Idempotent: after one run the loaded pair no longer
+# matches, so a second run migrates nothing.
 if [[ "${OPENHANDS_IMAGE:-}" == "docker.openhands.dev/openhands/openhands:1.8" ]]; then
   log "Migrating OPENHANDS_IMAGE off the stale :1.8 pin to the current default."
   unset OPENHANDS_IMAGE
@@ -260,8 +272,13 @@ if [[ "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" == "docker.openhands.dev/openhands
   log "Migrating the stock agent-server pin (docker.openhands.dev/openhands/agent-server:1.37.1-python) to the derived hybrid image."
   unset OPENHANDS_AGENT_IMAGE_REPOSITORY
   unset OPENHANDS_AGENT_IMAGE_TAG
+elif [[ "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" == "ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid" \
+     && "${OPENHANDS_AGENT_IMAGE_TAG:-}" == "1.37.1-python-hybrid.1" ]]; then
+  log "Migrating the derived hybrid image pin (ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.1) to the current hybrid tag."
+  unset OPENHANDS_AGENT_IMAGE_REPOSITORY
+  unset OPENHANDS_AGENT_IMAGE_TAG
 elif [[ -n "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" || -n "${OPENHANDS_AGENT_IMAGE_TAG:-}" ]]; then
-  log "Leaving the OpenHands agent-server image pin alone (not the stock default pair)."
+  log "Leaving the OpenHands agent-server image pin alone (not a known stale default pair)."
 fi
 
 # The shared helper above already resolved every LAYOUT-managed setting from
@@ -717,7 +734,7 @@ OPENHANDS_SANDBOX_HOST=${OPENHANDS_SANDBOX_HOST}
 OPENHANDS_STATE_DIR=${OPENHANDS_STATE_DIR}
 OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.10}
 OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}
-OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.1}
+OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.2}
 OPENHANDS_STARTUP_GRACE_SECONDS=${OPENHANDS_STARTUP_GRACE_SECONDS:-120}
 OPENHANDS_LOG_ALL_EVENTS=${OPENHANDS_LOG_ALL_EVENTS:-false}
 OPENHANDS_MEM_LIMIT=${OPENHANDS_MEM_LIMIT:-3g}
@@ -754,7 +771,7 @@ prepare_openhands_workspace() {
   if ! command -v setfacl >/dev/null 2>&1; then
     "${SUDO[@]}" apt-get install -y acl || return 1
   fi
-  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}:${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.1}"
+  local img="${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}:${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.2}"
   docker pull -q "$img" >/dev/null || return 1
   local uid
   uid="$(docker run --rm --entrypoint id "$img" -u openhands)" || return 1
