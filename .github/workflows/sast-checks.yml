@@ -1,8 +1,12 @@
 name: Security & SAST Checks
 
-# ONE gate for every pull request to main. It is deliberately unfiltered:
-# a docs-only change still runs the job so the required checks are always
-# present. CodeQL advanced setup replaces the repository's dynamic
+# ONE gate for every pull request to main. The gate itself is deliberately
+# unfiltered: it always runs and fails closed, so the required check is always
+# present. The Hermes non-root smoke -- the longest job by far -- is the single
+# exception. A `changes` job skips it when the pull request touches neither
+# hermes/ nor this workflow, because such a pull request cannot change the
+# image the smoke builds. Every other job, and `schedule`/`workflow_dispatch`,
+# stay unfiltered. CodeQL advanced setup replaces the repository's dynamic
 # "default setup" (the owner disables that by hand before merging this).
 #
 # Triggers:
@@ -119,6 +123,52 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
 
+  # Decides whether the Hermes image can possibly change. The smoke job builds
+  # only the hermes/ tree, and this workflow defines that job, so a pull
+  # request touching neither cannot change the image the smoke builds. This
+  # narrows only WHEN the smoke runs; its assertions stay untouched. It is
+  # fail-closed: `set -euo pipefail` means any git failure fails this job, and
+  # the gate requires `changes` to succeed.
+  changes:
+    name: Detect Hermes changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      hermes_image: ${{ steps.detect.outputs.hermes_image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history: the diff below compares the pull-request base commit
+          # against HEAD, which a depth-1 checkout does not contain.
+          fetch-depth: 0
+      - name: Decide whether the Hermes image can change
+        # The base ref is passed through env, never interpolated into the
+        # script (the same shape as the Semgrep job's BASE_SHA). An empty base
+        # (schedule, workflow_dispatch) is unfiltered. Two paths matter: the
+        # hermes/ tree the image is built from, and this workflow, which
+        # defines the smoke. `set -euo pipefail` makes any git failure fail the
+        # step rather than silently report "no change".
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_REF}" ]; then
+            echo "No base ref (not a pull request): running the smoke unfiltered."
+            echo "hermes_image=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "origin/${BASE_REF}"...HEAD -- hermes/ .github/workflows/sast-checks.yml; then
+            echo "No change under hermes/ or this workflow: skipping the smoke."
+            echo "hermes_image=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "hermes/ or this workflow changed: running the smoke."
+            echo "hermes_image=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # Proves the Hermes image runs as a dedicated non-root uid. It builds the
   # image with HYBRID_AI_UID=10001, runs it as 10001 with an empty data dir,
   # no capabilities and no secrets, and checks the WebUI and liveness. The
@@ -126,6 +176,8 @@ jobs:
   # Raspberry Pi (aarch64).
   hermes-nonroot-smoke:
     name: Hermes non-root smoke
+    needs: changes
+    if: needs.changes.outputs.hermes_image == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
     permissions:
@@ -347,33 +399,50 @@ jobs:
         if: always()
         run: docker rm -f hermes-nonroot-smoke || true
 
-  # The single required check. It always runs and fails closed: a failure,
-  # a cancellation, or a skipped dependency all end non-zero.
+  # The single required check. It always runs and fails closed: a failure or a
+  # cancellation anywhere ends non-zero, and every job listed in `needs` must
+  # report `success`. There is exactly one exception -- the Hermes non-root
+  # smoke may report `skipped`, and only when the `changes` job decided the
+  # pull request cannot change the image the smoke builds. That exception is
+  # itself conditional on `changes` succeeding, so a broken detector reds the
+  # gate rather than silently skipping the smoke.
   gate:
     name: Security & SAST gate
     if: always()
-    needs: [shellcheck, semgrep, validate, codeql, hermes-nonroot-smoke]
+    needs: [changes, shellcheck, semgrep, validate, codeql, hermes-nonroot-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every check to succeed
         run: |
+          echo "Changes detector : ${{ needs.changes.result }}"
           echo "ShellCheck       : ${{ needs.shellcheck.result }}"
           echo "Semgrep          : ${{ needs.semgrep.result }}"
           echo "Validate sources : ${{ needs.validate.result }}"
           echo "CodeQL           : ${{ needs.codeql.result }}"
           echo "Hermes non-root  : ${{ needs.hermes-nonroot-smoke.result }}"
           failed=0
+          # Every job here must report `success`. `changes` must succeed even
+          # when the smoke ran, so a broken detector can never skip the smoke
+          # vacuously.
           for result in \
+            "${{ needs.changes.result }}" \
             "${{ needs.shellcheck.result }}" \
             "${{ needs.semgrep.result }}" \
             "${{ needs.validate.result }}" \
-            "${{ needs.codeql.result }}" \
-            "${{ needs.hermes-nonroot-smoke.result }}"; do
+            "${{ needs.codeql.result }}"; do
             if [ "$result" != "success" ]; then
               failed=1
             fi
           done
+          # The Hermes non-root smoke is the single exception: `skipped` is
+          # accepted, and only because `changes` (checked above) proved the
+          # pull request cannot change the image it builds. A `failure` or
+          # `cancelled` here still reds the gate.
+          smoke="${{ needs.hermes-nonroot-smoke.result }}"
+          if [ "$smoke" != "success" ] && [ "$smoke" != "skipped" ]; then
+            failed=1
+          fi
           if [ "$failed" -ne 0 ]; then
             echo "::error::One or more security checks did not succeed."
             exit 1

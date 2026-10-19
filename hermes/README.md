@@ -106,7 +106,9 @@ An upgrade is a pull request that changes the pins and re-checks the patch:
    Confirm `patches/0001-kanban-prompt-body-chars.patch` still applies at that commit.
 2. **WebUI:** set `HERMES_WEBUI_COMMIT` to the new commit. The build asserts `git rev-parse`.
    Also bump the matching string in the `validate.yml` assertion so the check tracks the pin.
-3. Let CI prove it: the `hermes-nonroot-smoke` job builds the image, runs it as uid `10001`
+3. Let CI prove it: the `hermes-nonroot-smoke` job (which runs on any pull request touching
+   `hermes/` or the workflow, and unconditionally on the weekly schedule and manual dispatch)
+   builds the image, runs it as uid `10001`
    with a **decoy** agent on the data volume, and checks PID 1 maps only `/opt/hermes-agent`,
    the decoy was never imported, a login shell resolves `hermes`, and nothing under `/app` or
    `/opt` changed.
@@ -285,7 +287,8 @@ in the background, then `exec`s `bootstrap.py` as PID 1. The port is positional
 Keeping the start command in one place is deliberate: an image `CMD` that production never
 ran (because compose overrode it) is exactly how the `--port` bug reached the Pi. The
 `validate` workflow and the `hermes-nonroot-smoke` job both assert against
-`hermes/Dockerfile`.
+`hermes/Dockerfile`. The smoke job runs whenever a pull request touches `hermes/` or the
+workflow (and unconditionally on the weekly schedule and manual dispatch).
 
 The gateway runs as the **default** profile, pinned with `-p default`
 (`hermes -p default gateway run --replace`). This is load-bearing: a sticky named
