@@ -281,6 +281,10 @@
 ## scripts/deploy-forced-command.sh
 - refuse()
 
+## scripts/deploy-image-gate.sh
+- resolve_pin()
+- probe_manifest()
+
 ## scripts/deploy-instance.sh
 - die()
 - url_has_userinfo()
@@ -429,6 +433,12 @@
 - has_line()
 - hasnt_regex()
 - run()
+
+## scripts/test-deploy-image-gate.sh
+- ok()
+- bad()
+- probes_used()
+- run_gate()
 
 ## scripts/test-deploy-instance.sh
 - ok()

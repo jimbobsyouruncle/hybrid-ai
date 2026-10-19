@@ -109,6 +109,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Wait for the sandbox image
+        # Fail-closed pre-flight gate. Before the runner joins the tailnet and
+        # triggers the remote install, this waits until the sandbox image the
+        # host will pull is published on GHCR. Without it, a deploy could race
+        # the sandbox-image build and start install.sh while the manifest is
+        # still missing -- the race that produced the "OpenHands workspace ACLs
+        # not applied" warning on the 0b4cb53 deploy. It needs no token and no
+        # tailnet; permissions stay contents: read. 36 minutes clears the build
+        # workflow's 30-minute ceiling.
+        run: ./scripts/deploy-image-gate.sh
+        timeout-minutes: 36
+
       - name: Connect to tailnet
         # Joins the runner to your private network as an ephemeral node tagged
         # "tag:ci". It is removed automatically when the job ends.

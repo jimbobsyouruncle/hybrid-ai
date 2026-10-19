@@ -1169,8 +1169,9 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   # one of them stops listing it here, exactly as done for the compose/log
   # fail-closed card (docker-compose.yml, hermes/docker-compose.hermes.yml and
   # doctor.sh) and for the sandbox startup-grace card
-  # (openhands/docker-compose.openhands.yml). The capture unit is frozen and
-  # stays listed.
+  # (openhands/docker-compose.openhands.yml), and for the sandbox-image
+  # auto-publish / deploy gate card (.github/workflows/deploy.yml). The capture
+  # unit is frozen and stays listed.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
     status/Caddyfile \
     backup/backup-containers.sh \
@@ -1179,7 +1180,7 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
     backup/system/hybrid-ai-backup-check.timer \
     backup/hybrid-ai-backup.service backup/hybrid-ai-backup.timer \
     backup/hybrid-ai-check.service backup/hybrid-ai-check.timer \
-    .github/workflows/deploy.yml scripts/deploy-instance.sh \
+    scripts/deploy-instance.sh \
     deploy/hybrid-ai-deploy@.service deploy/50-hybrid-ai-deploy.rules 2>/dev/null)"
   check "the out-of-scope files are byte-identical to origin/main" "" "$diff_out"
 else

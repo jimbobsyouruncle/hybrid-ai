@@ -163,6 +163,16 @@ jobs:
         # ssh, ssh-keyscan and ssh-keygen are stubbed on PATH.
         run: bash scripts/test-deploy-trigger.sh
 
+      - name: Deploy image gate tests
+        # Offline, with no root, network or Docker. Proves
+        # scripts/deploy-image-gate.sh resolves the pin from install.sh's STEP 8
+        # defaults, probes the GHCR manifest anonymously, exits 0 on HTTP 200,
+        # retries on 404, times out non-zero, and FAILS CLOSED on an unexpected
+        # HTTP status or a transport error rather than proceeding. curl is
+        # stubbed on PATH; retry/timeout are squeezed to seconds. The harness
+        # fails against a tree without scripts/deploy-image-gate.sh.
+        run: bash scripts/test-deploy-image-gate.sh
+
       - name: Host bootstrap / migration tests
         # Offline, with no root, Docker or network. Proves scripts/bootstrap.sh
         # refuses a non-root caller and every bad input with its own exit code,

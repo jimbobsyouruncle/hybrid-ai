@@ -3,24 +3,38 @@
 # PURPOSE (plain English):
 #   Build the derived OpenHands agent-server image and publish it to GHCR.
 #
-#   THIS WORKFLOW IS MANUAL ONLY. It runs on workflow_dispatch and nothing else:
-#   no push, no pull_request, no schedule. A merge or a push never publishes an
-#   image. A human starts it from Actions -> "sandbox-image" -> Run workflow and
-#   supplies the tag.
+#   THIS WORKFLOW AUTO-PUBLISHES ON MERGES TO main. When a push to main changes
+#   openhands/agent-server/Dockerfile, GitHub builds and pushes the image with no
+#   human in the loop. The tag is not supplied: it is read from the `default:` of
+#   the `image_tag` input below, so the same merge that edits the Dockerfile MUST
+#   bump that default. A push-triggered run whose resolved tag already exists on
+#   GHCR fails BEFORE building (tag immutability guard) and names the required
+#   bump, so a forgotten bump cannot silently overwrite a published image.
+#
+#   workflow_dispatch remains for manual rebuilds: a human starts it from
+#   Actions -> "sandbox-image" -> Run workflow and supplies the tag. That path
+#   deliberately skips the immutability guard, because re-pushing a tag there is
+#   an explicit owner action.
 #
 #   It publishes to ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid,
 #   linux/arm64 only (the supported target is a Raspberry Pi, aarch64).
 #
-#   NOTHING CONSUMES THE PUBLISHED IMAGE YET. No pin, no compose value, no
-#   installer line and no unit references it. The deployment keeps running the
-#   stock base image until the separate cut-over card lands. Publishing here is
-#   inert with respect to the running system.
+#   The deploy workflow gates on this image's manifest before it triggers the
+#   remote install (scripts/deploy-image-gate.sh), so a deploy can no longer run
+#   against a tag that has not been published yet.
 # ---------------------------------------------------------------------------
 
 name: sandbox-image
 
 on:
-  # Manual only. Deliberately the sole trigger.
+  # Auto-publish when a merged change touches the derived image's Dockerfile.
+  push:
+    branches: [main]
+    paths:
+      - openhands/agent-server/Dockerfile
+
+  # Manual rebuild path. An explicit owner action; the immutability guard below
+  # does not apply here.
   workflow_dispatch:
     inputs:
       image_tag:
@@ -28,6 +42,12 @@ on:
         required: true
         type: string
         default: "1.37.1-python-hybrid.2"
+
+# Two builds must never push at the same time. cancel-in-progress stays false so
+# an in-flight build is never killed mid-push.
+concurrency:
+  group: sandbox-image-publish
+  cancel-in-progress: false
 
 # Least privilege, exactly what the job needs: read the tree, push to GHCR.
 # No pull-requests: write, no id-token: write.
@@ -46,6 +66,65 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve image tag
+        # workflow_dispatch uses the supplied input. A push-triggered run parses
+        # the `default:` of the image_tag input out of this very workflow file,
+        # so the commit that changes the Dockerfile must bump that default.
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$DISPATCH_TAG"
+          else
+            # First `default:` that follows the `image_tag:` input key. No other
+            # key in this file is named image_tag, so this cannot drift.
+            tag="$(awk '/^ *image_tag:/{f=1; next} f && /^ *default:/{sub(/^ *default: */,""); gsub(/"/,""); print; exit}' \
+              .github/workflows/sandbox-image.yml)"
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::could not resolve an image tag (event=$EVENT_NAME)."
+            exit 1
+          fi
+          echo "Resolved image tag: $tag"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite an existing tag (push builds only)
+        # Tag immutability guard. The probe is anonymous: no credentials, no
+        # GITHUB_TOKEN, nothing that could be logged. HTTP 200 means the tag is
+        # already published, so the merge forgot to bump the default and the run
+        # stops before building. workflow_dispatch skips this step on purpose.
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          package="jimbobsyouruncle/openhands-agent-server-hybrid"
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${package}:pull" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${package}/manifests/${TAG}")"
+          case "$code" in
+            404)
+              echo "Tag ${TAG} is not published yet; proceeding with the build."
+              ;;
+            200)
+              echo "::error::tag ${TAG} already exists on GHCR. Bump the image_tag default in .github/workflows/sandbox-image.yml before merging a Dockerfile change."
+              exit 1
+              ;;
+            *)
+              echo "::error::unexpected GHCR response ${code} while probing tag ${TAG}; refusing to build."
+              exit 1
+              ;;
+          esac
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -63,4 +142,4 @@ jobs:
           file: openhands/agent-server/Dockerfile
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:${{ inputs.image_tag }}
+          tags: ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:${{ steps.resolve.outputs.tag }}

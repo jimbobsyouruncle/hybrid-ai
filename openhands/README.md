@@ -264,14 +264,29 @@ still runs as the unprivileged `openhands` account.
   the migration already rewrote it. A rollback must re-set the old pin in `.env`
   (or unset both variables) and re-run `install.sh`.
 
-Build and publish it by hand: **Actions → "sandbox-image" → Run workflow**, and set
-the `image_tag` input (default `1.37.1-python-hybrid.2`). The workflow is
-`workflow_dispatch` only — nothing publishes on a push, a merge or a schedule. It
-builds `linux/arm64` only and pushes to:
+**Publishing is automatic on a merge to `main`.** A push to `main` that changes
+`openhands/agent-server/Dockerfile` builds and pushes the image with no human in
+the loop. The tag is not supplied by hand: it is read from the `default:` of the
+`image_tag` input in `.github/workflows/sandbox-image.yml`, so the same merge that
+edits the Dockerfile **must** bump that default. A push-triggered run whose
+resolved tag already exists on GHCR fails before building (tag immutability guard)
+and names the required bump, so a forgotten bump cannot silently overwrite a
+published tag. A concurrency group serialises builds (`cancel-in-progress: false`).
+
+**Manual rebuild:** **Actions → "sandbox-image" → Run workflow**, and set the
+`image_tag` input (default `1.37.1-python-hybrid.2`). This path is an explicit
+owner action, so it deliberately skips the immutability guard and may re-push a
+tag. The workflow builds `linux/arm64` only and pushes to:
 
 ```text
 ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:<tag>
 ```
+
+**The deploy waits on this image.** Before the deploy workflow triggers the
+remote install it runs `scripts/deploy-image-gate.sh`, which polls GHCR until the
+pinned tag's manifest exists (fail closed). That closes the race in which a
+deploy started `install.sh` before the image was published — the race behind the
+"OpenHands workspace ACLs not applied" warning.
 
 **Publishing now feeds the running system.** The cut-over above makes this image
 the deployment default, so a newly published tag only changes what runs once the
