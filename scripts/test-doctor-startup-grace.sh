@@ -21,7 +21,8 @@
 #     (a) healthy fixture        -> the check reports pass;
 #     (b) in-window ERROR        -> a warn names the remedy, exit 1, never 2;
 #     (c) app-server unreachable -> a skip note, exit code identical to (a);
-#     (d) endpoint up, no rows   -> NOT reported as a skip.
+#     (d) endpoint up, no rows   -> NOT reported as a skip;
+#     (e) offset-less UTC row on a non-UTC host -> still outside the window.
 #   The ERROR row sits on page 2 with page 1 carrying a cursor, so (b) also
 #   proves the pager is followed rather than reading page 1 alone.
 #
@@ -239,6 +240,7 @@ case "$url" in
       warn)
         if [[ "$url" == *"page_id="* ]]; then cat "$FIXDIR/warn.page2.json"; else cat "$FIXDIR/warn.page1.json"; fi
         exit 0 ;;
+      offsetless) cat "$FIXDIR/offsetless.page1.json"; exit 0 ;;
       *) cat "$FIXDIR/ok.page1.json"; exit 0 ;;
     esac ;;
   *":11434/api/tags") printf '%s' '{"models":[{"name":"llama3.2:3b"}]}'; exit 0 ;;
@@ -310,6 +312,13 @@ printf '{"items":[{"id":"t-run","status":"RUNNING","updated_at":"%s"}],"next_pag
   "$NOW_ISO" > "$FIXDIR/warn.page1.json"
 printf '{"items":[{"id":"t-err","status":"ERROR","updated_at":"%s","error":"Sandbox entered error state"}],"next_page_id":null}\n' \
   "$NOW_ISO" > "$FIXDIR/warn.page2.json"
+# The real start-tasks/search endpoint emits OFFSET-LESS UTC (no trailing Z, no
+# +/-hh:mm). Parsed as UTC this row is 60 minutes old (outside the default
+# 30-minute window); parsed in America/New_York (UTC-4) `date -d` shifts it ~4
+# hours into the future, so the unpatched doctor.sh counts it as recent.
+OFFSETLESS_ISO="$(date -u -d '-60 minutes' +%Y-%m-%dT%H:%M:%S)"
+printf '{"items":[{"id":"t-offsetless","status":"ERROR","updated_at":"%s","error":"Sandbox entered error state"}],"next_page_id":null}\n' \
+  "$OFFSETLESS_ISO" > "$FIXDIR/offsetless.page1.json"
 
 # --- scratch app ------------------------------------------------------------
 cp "$REPO_ROOT/scripts/lib/hybrid-ai-env.sh" "$APPD/scripts/lib/"
@@ -337,13 +346,17 @@ chmod 600 "$APPD/.env"
 
 SKIP_RE='startup-grace check skipped'
 
-run_doctor() { # fixture ; sets RC, writes $WORK/out.<fixture>
+run_doctor() { # fixture [timezone] ; sets RC, writes $WORK/out.<fixture>
   local fixture="$1"
-  ( cd "$APPD" && \
+  local tz="${2:-}"
+  (
+    cd "$APPD" || exit 1
+    [[ -n "$tz" ]] && export TZ="$tz"
     FIXTURE="$fixture" FIXDIR="$FIXDIR" \
     PATH="$BIN:$PATH" HOME="$WORK/home" SHELL=/bin/bash \
     HYBRID_AI_DATA_DIR="$APPD" HYBRID_AI_LOG_DIR="$APPD" HYBRID_AI_WORK_DIR="$APPD" \
-    timeout 120 bash "$APPD/doctor.sh" --no-cloud ) > "$WORK/out.$fixture" 2>&1
+    timeout 120 bash "$APPD/doctor.sh" --no-cloud
+  ) > "$WORK/out.$fixture" 2>&1
   RC=$?
 }
 
@@ -396,6 +409,32 @@ if ! grep -q "$SKIP_RE" "$WORK/out.empty"; then
   pass "empty fixture: a reachable endpoint is not reported as a skip"
 else
   fail "empty fixture: a reachable endpoint was reported as a skip"
+fi
+
+# --- (e) offset-less UTC timestamp on a non-UTC host -----------------------
+# The endpoint's naive timestamp is UTC; the harness forces a non-UTC TZ so a
+# plain `date -d` would misread it as local time and inflate the count.
+run_doctor offsetless America/New_York
+RC_OFFSETLESS=$RC
+if grep -q "No sandbox start marked terminally ERROR" "$WORK/out.offsetless"; then
+  pass "offset-less fixture: the startup-grace check reports pass"
+else
+  fail "offset-less fixture: no pass line for the startup-grace check"
+fi
+if ! grep -q "Sandbox entered error state" "$WORK/out.offsetless"; then
+  pass "offset-less fixture: no inflated warn count for an out-of-window row"
+else
+  fail "offset-less fixture: a stale row was counted as recent (warn printed)"
+fi
+if [[ "$RC_OFFSETLESS" == "$RC_OK" ]]; then
+  pass "offset-less fixture: exit code matches the healthy run (${RC_OK})"
+else
+  fail "offset-less fixture: exit code ${RC_OFFSETLESS} differs from the healthy run (${RC_OK})"
+fi
+if [[ "$RC_OFFSETLESS" != "2" ]]; then
+  pass "offset-less fixture: exit code is never 2 (check is warning-only)"
+else
+  fail "offset-less fixture: exit code is 2 -- the check must never fail the run"
 fi
 
 echo "---"

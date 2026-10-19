@@ -732,6 +732,10 @@ passes to the app-server as `SANDBOX_STARTUP_GRACE_SECONDS`.
 | `500: Sandbox entered error state` on builder dispatches | Startup-grace race: the app-server's built-in 15 s grace expires before this Pi's agent-server answers `/health` at ~21 s | Set `OPENHANDS_STARTUP_GRACE_SECONDS` (default 120) in `.env`, then: `./openhands/scripts/openhands-control.sh start`. Keep it in `openhands/docker-compose.openhands.yml` so a deploy cannot revert it. |
 | Doctor warns that sandbox starts were marked terminally ERROR | The same race, detected live: recent `app-conversations/start-tasks/search` rows are `ERROR` with `Sandbox entered error state` | Same as above. The warning is advisory only; it never fails the deploy. |
 
+The start-tasks timestamps are offset-less UTC (e.g. `2026-10-18T22:03:34.402382`),
+so doctor.sh parses them with `date -u -d`; a naive `date -d` would read them in
+the host's local zone and count stale rows as recent.
+
 ---
 
 ## Agent clone embeds a credential in its git remote
