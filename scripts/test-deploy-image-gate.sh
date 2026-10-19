@@ -27,7 +27,12 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT="${SCRIPT_DIR}/deploy-image-gate.sh"
+
+# The current default agent-server image tag. The fixture install.sh below and
+# the real install.sh must both resolve to this.
+EXPECTED_TAG="1.37.1-python-hybrid.3"
 
 [[ -f "$SCRIPT" ]] || { echo "FATAL: cannot find $SCRIPT" >&2; exit 1; }
 
@@ -87,9 +92,9 @@ chmod +x "$BIN/curl"
 
 # Fixture install.sh files.
 GOOD_INSTALL="$WORK/install-good.sh"
-cat > "$GOOD_INSTALL" <<'EOF'
+sed "s|__EXPECTED_TAG__|${EXPECTED_TAG}|" > "$GOOD_INSTALL" <<'EOF'
 OPENHANDS_AGENT_IMAGE_REPOSITORY=${OPENHANDS_AGENT_IMAGE_REPOSITORY:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}
-OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-1.37.1-python-hybrid.2}
+OPENHANDS_AGENT_IMAGE_TAG=${OPENHANDS_AGENT_IMAGE_TAG:-__EXPECTED_TAG__}
 EOF
 NOPIN_INSTALL="$WORK/install-nopin.sh"
 cat > "$NOPIN_INSTALL" <<'EOF'
@@ -166,6 +171,18 @@ if [ "$rc" != "0" ] && grep -q 'could not resolve' "$WORK/e.log"; then
   ok "(e) an install.sh with no pin exits non-zero ($rc)"
 else
   bad "(e) expected a non-zero exit when the pin cannot be resolved (rc=$rc)"
+fi
+
+# --- (f) the real install.sh resolves to the current default tag ------------
+# The gate reads the pin straight out of install.sh, so this asserts the real
+# file's default is the hybrid.3 tag (the fixture above embeds it too). Fails
+# against an install.sh still on hybrid.2.
+printf '200\n' > "$STATE/codes"
+rc="$(GATE_INSTALL_SH="$REPO_ROOT/install.sh" run_gate "$WORK/f.log")"
+if [ "$rc" = "0" ] && grep -q ":${EXPECTED_TAG} is published" "$WORK/f.log"; then
+  ok "(f) install.sh resolves the default tag ${EXPECTED_TAG}"
+else
+  bad "(f) expected install.sh to resolve ${EXPECTED_TAG} (rc=$rc)"
 fi
 
 # --- the anonymous token is never printed ----------------------------------
