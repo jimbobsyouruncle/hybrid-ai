@@ -69,6 +69,7 @@
 - openhands/AGENTS.md - OpenHands Maintenance Agent Instructions
 - openhands/README.md - openhands/ — natural-language code maintenance
 - openhands/docker-compose.openhands.yml - FILE: openhands/docker-compose.openhands.yml
+- openhands/sandbox-gitconfig
 ## openhands/agent-server
 
 - openhands/agent-server/Dockerfile
