@@ -943,7 +943,7 @@ grace_epoch() {
     if (( ${#v} >= 13 )); then printf '%s' "$(( v / 1000 ))"; else printf '%s' "$v"; fi
     return
   fi
-  date -d "$v" +%s 2>/dev/null || printf '0'
+  date -u -d "$v" +%s 2>/dev/null || printf '0'
 }
 if [[ ! "$STARTUP_GRACE_WINDOW_MINUTES" =~ ^[0-9]+$ ]]; then
   (( QUIET )) || printf '  %s-%s startup-grace check skipped (STARTUP_GRACE_WINDOW_MINUTES is not whole minutes)\n' "$C_DIM" "$C_RST"
