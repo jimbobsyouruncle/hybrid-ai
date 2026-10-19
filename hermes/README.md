@@ -11,6 +11,14 @@ the OpenHands API by service name over a private network.
 | `Dockerfile` | Builds the image: a pinned Hermes Agent install plus the Hermes WebUI |
 | `patches/0001-kanban-prompt-body-chars.patch` | The one local patch the build applies to the pinned Hermes checkout |
 
+The image installs the base CLI tooling its own harnesses need: `git`, `curl`, `coreutils`,
+`findutils`, `build-essential`, `libxi6`, plus **`sqlite3`**, **`jq`**, **`rsync`** and
+**`restic`** (`apt-get install --no-install-recommends`, apt lists cleaned in the same layer).
+A runtime `apt-get install` cannot supply them — the runtime uid has no root and the image
+cleans the apt lists — so they are baked in. `scripts/test-backup.sh` needs `sqlite3` and
+`rsync`, `backup/backup.sh` and `backup/restore.sh` need `restic`, and `collect-diagnostics.sh`
+needs `jq`.
+
 The service is defined only in the overlay. Compose must always run with all three files —
 `docker-compose.yml`, `openhands/docker-compose.openhands.yml`,
 `hermes/docker-compose.hermes.yml` — because a run that omits an overlay treats its service
@@ -95,6 +103,19 @@ move `.leases` (and the whole generation tree) into the read-only `/opt` tree an
 runtime uid; pinning it to the volume keeps the lease writable. The supported setting for
 this routing is `HERMES_HOME`; the smoke job asserts it is the data volume, alongside the
 `docker diff` check that the runtime never writes under `/opt`.
+
+The Hermes PM also writes **install state** into the sealed `/opt` tree — `install-stamp.json`,
+`tools/facts.json`, `installs/<key>/facts.json`, and `installs/<key>/pm-runtime` with its
+generations. The build wrote those as mode `0600`/`0700`, so the runtime uid could not read
+them: every dispatch printed the install-out-of-sync banner, `hermes pm doctor` refused, and the
+bundled tools under `tools/` were never put on `PATH`. The image now `chmod -R a+rX`es those
+paths at **build** time (state files `0644`, the `pm-runtime` and generation directories `0755`),
+so the runtime uid can read them and `hermes pm doctor` runs. A build-time `chmod` adds no write
+at runtime, so `docker diff` stays clean. Ownership is untouched — `chmod` only, never `chown` —
+so `/opt/hermes-agent` stays root-owned with no group/other write bit, and the immutability
+assertions in the `Dockerfile` stay green. The stamp's `distribution` is set to `docker` in the
+same step that sets `updateMechanism=external`, which is the value `hermes_cli/steward.py`
+expects for a sealed `/opt` tree (`sealed_steward()` otherwise returns `unknown`).
 
 ### Upgrading Hermes or the WebUI
 
@@ -429,6 +450,12 @@ it, and `doctor.sh` was syntax-checked. The post-recreate checks — `docker net
 coder-net` showing exactly two members, a write test against `/agent-repo` failing, a request
 from Hermes to `http://openhands:3000` succeeding, and `./doctor.sh` green — were **not**
 run here; run them on the Pi after `./install.sh`.
+
+The CLI-tooling and PM install-state change is also a build-only edit; the image was not built
+here. Verify after merge on the Pi: a plain dispatch prints no install-out-of-sync banner,
+`hermes pm doctor` exits `0`, the bundled `ffmpeg`, `node`, `npm` and `rg` resolve for Hermes
+children, `scripts/test-backup.sh` runs to completion, and
+`command -v sqlite3 jq rsync restic` all resolve inside the container.
 
 ---
 

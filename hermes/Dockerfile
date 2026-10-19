@@ -2,6 +2,10 @@ FROM python:3.11-slim
 
 # Install system dependencies
 # Add retry flags and quiet output to prevent mirror timeouts
+# sqlite3, jq, rsync and restic are base CLI tools the image's own harnesses
+# require (scripts/test-backup.sh, backup/backup.sh, backup/restore.sh,
+# collect-diagnostics.sh). A runtime `apt-get install` cannot supply them: this
+# RUN cleans the apt lists, and the runtime uid has no root.
 RUN apt-get update -o Acquire::Retries=5 && \
     apt-get install -y --no-install-recommends \
         git \
@@ -9,7 +13,11 @@ RUN apt-get update -o Acquire::Retries=5 && \
         coreutils \
         findutils \
         build-essential \
-        libxi6 && \
+        libxi6 \
+        sqlite3 \
+        jq \
+        rsync \
+        restic && \
     rm -rf /var/lib/apt/lists/*
 
 # --- Pinned Hermes Agent, installed OUTSIDE the data volume ------------------
@@ -65,7 +73,7 @@ RUN set -eu; \
       "repo": d.name, "venv": str(v.relative_to(d.parent)), "store": d.name + "/tools", \
       "launchers": ["hermes", "hermes-acp"]}, indent=2) + "\n")' "${HERMES_INSTALL_DIR}" "${VENV}" \
  && python3 -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]) / "install-stamp.json"; \
-      s=json.loads(p.read_text()); s["updateMechanism"] = "external"; p.write_text(json.dumps(s) + "\n")' "${HERMES_INSTALL_DIR}" \
+      s=json.loads(p.read_text()); s["updateMechanism"] = "external"; s["distribution"] = "docker"; p.write_text(json.dumps(s) + "\n")' "${HERMES_INSTALL_DIR}" \
  && STORE_PY="$(find "${HERMES_INSTALL_DIR}/tools" -maxdepth 3 -type f -name 'python3.*' -path '*/bin/*' | head -n1)" \
  && "${STORE_PY}" -m compileall -q "${HERMES_INSTALL_DIR}" \
  && test "$(stat -c '%u' "${HERMES_INSTALL_DIR}")" = "0" \
@@ -164,6 +172,49 @@ RUN "${HERMES_INSTALL_DIR}/.hermes/venv/bin/python" -m compileall -q /app \
  && test "$(stat -c '%u' /app)" = "0" \
  && ! find /app -user "${HYBRID_AI_UID}" -print -quit | grep -q . \
  && ! find "${HERMES_INSTALL_DIR}" -user "${HYBRID_AI_UID}" -print -quit | grep -q .
+
+# --- PM install state: readable by the runtime uid, still root-owned ----------
+# The Hermes PM writes install-state files into the sealed /opt tree as mode
+# 0600/0700 (install-stamp.json, tools/facts.json, installs/<key>/facts.json,
+# installs/<key>/pm-runtime and its generations). The runtime uid cannot read
+# them, so every dispatch prints the install-out-of-sync banner, `hermes pm
+# doctor` refuses, and the bundled tools (ffmpeg/node/npm/rg under
+# tools/) are not put on PATH.
+#
+# Fix with chmod ONLY: `a+rX` adds read everywhere and execute on directories
+# (never on plain files), so the state files become 0644 and the pm-runtime /
+# generation directories 0755. Ownership is untouched: /opt/hermes-agent stays
+# ROOT-OWNED and gets no group/other WRITE bit, so the assertion above stays
+# green and /opt stays immutable to the runtime uid. The chmod runs at BUILD
+# time, so it causes no runtime write under /opt (the `docker diff` smoke check
+# stays clean).
+#
+# The final assertion tolerates pre-existing 0666 `.lock` files created by the
+# install step (they are root-owned and out of this change's scope), but every
+# directory and every non-lock state file must still be free of group/other
+# write bits: a writable dir or state file would let uid 10001 replace or
+# rewrite root-owned state.
+RUN set -eu; \
+    for f in \
+        "${HERMES_INSTALL_DIR}/install-stamp.json" \
+        "${HERMES_INSTALL_DIR}/tools/facts.json" \
+        "${HERMES_INSTALL_DIR}/installs" \
+    ; do test -e "$f" || { echo "missing PM state: $f" >&2; exit 1; }; done; \
+    chmod -R a+rX \
+        "${HERMES_INSTALL_DIR}/install-stamp.json" \
+        "${HERMES_INSTALL_DIR}/tools" \
+        "${HERMES_INSTALL_DIR}/installs"; \
+    test -r "${HERMES_INSTALL_DIR}/install-stamp.json"; \
+    test -r "${HERMES_INSTALL_DIR}/tools/facts.json"; \
+    pmrt="$(find "${HERMES_INSTALL_DIR}/installs" -type d -name pm-runtime -print -quit)"; \
+    test -n "$pmrt"; \
+    test -r "$pmrt"; \
+    test "$(stat -c '%u' "${HERMES_INSTALL_DIR}")" = "0"; \
+    test -z "$(find \
+        "${HERMES_INSTALL_DIR}/install-stamp.json" \
+        "${HERMES_INSTALL_DIR}/tools" \
+        "${HERMES_INSTALL_DIR}/installs" \
+        \( -type d -o \( -type f ! -name '.lock' \) \) -perm /022 -print -quit)"
 
 # HOME stays /root. Saved state under hermes_data/ holds absolute /root/...
 # paths and the compose volume paths are unchanged, so this must not move.
