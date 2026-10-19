@@ -87,7 +87,7 @@ is what removes the admin-account login from the deploy path.
 | Job | Check | What it catches |
 |---|---|---|
 | `shellcheck` | ShellCheck (Bash) | Common shell scripting bugs. Blocking. |
-| `semgrep` | Semgrep (`--config auto --error`) | SAST findings from the community rulesets. Blocking. |
+| `semgrep` | Semgrep (`--config auto --error`) | SAST findings from the community rulesets. Blocking. On a pull request it scans only the files the PR changed (`--baseline-commit` against the PR base SHA); `workflow_dispatch` and the weekly `schedule` keep the full-tree scan. |
 | `validate` | `Validate sources` | Calls the same reusable `validate.yml` the deploy uses (see Job 1 above). |
 | `codeql` | `Analyze (python)` and `Analyze (actions)` | CodeQL advanced setup for Python and GitHub Actions. |
 | `hermes-nonroot-smoke` | Hermes non-root smoke | Builds the Hermes image as uid/gid `10001` and runs it as `10001` with `--cap-drop ALL --security-opt no-new-privileges`, no secrets, and a `10001`-owned `/root/.hermes` seeded with a **decoy** agent (a valid Agent source root that writes a marker if imported). Checks `id -u`, HTTP 200 on 8501 within 180 s, liveness at +60 s, the gateway is up, and the local kanban patch is in `/opt/hermes-agent`. Then the pinning checks: PID 1 maps Python only from `/opt/hermes-agent` (never `/root/.hermes`), the decoy marker is absent, one `/api/onboarding/status` request (which imports `run_agent`) answers 200, `bash -lc 'command -v hermes'` resolves to `/usr/local/bin/hermes`, and `docker diff` shows no change under `/app` or `/opt`. Prints `docker diff` (paths only). |
@@ -112,7 +112,7 @@ Dependabot covers **GitHub Actions only**. These pins still move by hand and are
 
 | Pin | Where | Why Dependabot does not cover it |
 |---|---|---|
-| `semgrep/semgrep@sha256:93963d…` | `workflows/sast-checks.yml` | Container image digest, not an action |
+| `semgrep/semgrep:1.179.0@sha256:93963d…` | `workflows/sast-checks.yml` | Container image tag and digest, not an action |
 | Compose / Dockerfile image tags | `docker-compose.yml`, `hermes/Dockerfile` | Container images, not actions |
 | `httpx==0.28.1` | `workflows/validate.yml` | pip pin inside a workflow step |
 | shared-actions `ref:` | `workflows/agent-context.yml` | A non-action git ref outside Dependabot's scope |
