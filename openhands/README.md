@@ -94,6 +94,48 @@ and to branch from `origin/<default>` rather than a local `main` or `master`.
 
 ---
 
+## Sandbox git ownership and `/etc/gitconfig`
+
+Git inside the sandbox needs a nudge, and this is why.
+
+The sandbox runs as the image's unprivileged uid (10001). The bind-mounted workspace is owned
+by the host account, so the two uids differ. Git compares uids, not permissions, so it refuses
+the mount and exits 128 with:
+
+```
+fatal: detected dubious ownership in repository at '/workspace/project/...'
+```
+
+`sudo git` does not help: git compares the process uid, so root does not bypass the check.
+The `SANDBOX_USER_ID` line in the overlay is inert — app-server 1.10.0 and agent-server 1.37.1
+never read it.
+
+The fix is a system git config, `openhands/sandbox-gitconfig`, mounted read-only at
+`/etc/gitconfig` in every new sandbox. It lists only the two workspace roots:
+
+```ini
+[safe]
+	directory = /workspace
+	directory = /workspace/project/*
+```
+
+The blanket `safe.directory = '*'` is deliberately not used: it would mark every repository on
+the system trusted, including any untrusted clone. Wildcard matching needs git 2.47 or newer;
+the image ships 2.47.3. `install.sh` copies the file into the workspace so the mount source
+exists before Docker starts a sandbox.
+
+Verify in a fresh sandbox:
+
+```bash
+docker exec <sandbox> git -C /workspace/project/hybrid-ai remote -v   # exits 0
+docker exec <sandbox> git -C /workspace/project/hybrid-ai merge-base origin/main HEAD
+```
+
+An existing sandbox keeps the mounts it was created with. After changing anything here, re-run
+`./install.sh` and start a new conversation.
+
+---
+
 ## The clone is also visible to Hermes, read-only
 
 Hermes reads the same clone at `/agent-repo`, mounted read-only

@@ -845,7 +845,7 @@ if (( OH_RUNNING )); then
     fi
     if grep -q "dubious ownership" <<<"$LOGS"; then
       warn "${sb}: git reports 'dubious ownership' of /workspace" \
-           "Expected while the workspace is owned by you and the sandbox runs as another uid. Per-sandbox fix: docker exec ${sb} git config --global --add safe.directory '*' (does not persist to new sandboxes)."
+           "This sandbox predates the shipped fix, or the /etc/gitconfig mount is missing. Every new sandbox mounts a read-only system git config that trusts only /workspace and /workspace/project/*, so git accepts the bind mount. Re-run ./install.sh, then start a NEW conversation: an existing sandbox keeps the mounts it was created with."
     fi
 
     # Test the exact URL the browser is given, from the Pi itself. This proves
