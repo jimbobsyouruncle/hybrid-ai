@@ -794,7 +794,7 @@ prepare_openhands_workspace() {
   # place. 0644 so the sandbox uid can read it; re-running rewrites it.
   install -m 0644 "${APP_DIR}/openhands/sandbox-gitconfig" \
     "$OPENHANDS_WORKSPACE/.sandbox-gitconfig" || return 1
-  "${SUDO[@]}" chown -R "${STATUS_UID}:${STACK_GID}" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations" || return 1
+  "${SUDO[@]}" chown -R "${STATUS_UID}:${STACK_GID}" "$OPENHANDS_WORKSPACE/project" "$OPENHANDS_WORKSPACE/conversations" "$OPENHANDS_WORKSPACE/.sandbox-gitconfig" || return 1
   "${SUDO[@]}" setfacl -R -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   "${SUDO[@]}" setfacl -R -d -m "u:${uid}:rwx" "$OPENHANDS_WORKSPACE" || return 1
   # Keep agent runtime folders out of the clone's git status
