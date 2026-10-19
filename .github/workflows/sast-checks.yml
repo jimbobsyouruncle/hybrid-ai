@@ -55,13 +55,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:
-      image: semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b # latest as of 2026-10-13
+      # Semgrep 1.179.0 (release-1.179.0), pinned by tag AND digest. The
+      # digest alone said nothing about which Semgrep release ran.
+      image: semgrep/semgrep:1.179.0@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history: --baseline-commit on a pull request needs the PR
+          # base SHA, which the default depth-1 checkout does not contain.
+          fetch-depth: 0
       - name: Run Semgrep Rules
-        run: semgrep scan --config auto --error
+        # Diff-aware on pull requests, full tree otherwise. A PR scans only
+        # what it changed against the base commit; workflow_dispatch and the
+        # weekly schedule keep the whole-tree scan, so the rule-drift check
+        # and manual runs still see every file. An absent or empty base SHA
+        # (e.g. a schedule event) falls back to the full scan rather than to
+        # a scan of nothing, so a diff-aware run can never pass vacuously.
+        # Residual: --config auto still resolves rules from the Semgrep
+        # registry at run time, so rule CONTENT is not pinned by the image
+        # digest even though the Semgrep version is.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$BASE_SHA" ]; then
+            semgrep scan --config auto --error --baseline-commit "$BASE_SHA"
+          else
+            semgrep scan --config auto --error
+          fi
 
   # The same validation the deploy runs, exposed to pull requests so a
   # mistake is caught before merge rather than on the Pi.
