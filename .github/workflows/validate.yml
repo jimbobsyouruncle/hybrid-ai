@@ -197,6 +197,16 @@ jobs:
         # friends are stubbed on PATH; the run uses --no-start.
         run: bash scripts/test-agent-image-repo-migration.sh
 
+      - name: Agent-server hybrid cutover tests
+        # Offline. Proves install.sh's STEP 2b pair-exact migration cuts a
+        # previously deployed host over from the OLD default pair
+        # (docker.openhands.dev/openhands/agent-server AND 1.37.1-python) to the
+        # derived hybrid defaults, preserves an owner-chosen repository and/or
+        # tag untouched (a partial match leaves BOTH alone and logs it), writes
+        # the new defaults when no .env exists, and is idempotent on a second
+        # run. Docker and friends are stubbed on PATH; the run uses --no-start.
+        run: bash scripts/test-agent-image-hybrid-cutover.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. HYBRID_AI_DATA_DIR and

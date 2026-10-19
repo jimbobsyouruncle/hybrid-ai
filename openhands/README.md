@@ -191,13 +191,16 @@ ignored, so the sandbox keeps running the old SDK. No app-server release bundles
 at or above 1.37, so pinning a newer tag on the canonical repository can never take
 effect.
 
-The default here is `docker.openhands.dev/openhands/agent-server`. It serves the same
-image (the manifest is identical to the ghcr.io one, same sha256) but the string is not
-the canonical one, so the app server honours `AGENT_SERVER_IMAGE_TAG`. That is what makes
-the `1.37.1-python` pin work.
+The default here is now the derived hybrid image,
+`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.1` (see
+[Derived sandbox image](#derived-sandbox-image-shellcheck-and-other-tooling) below).
+Neither that name nor the CDN alias `docker.openhands.dev/openhands/agent-server` is
+the canonical string, so the app server honours `AGENT_SERVER_IMAGE_TAG`. That is what
+makes the `1.37.1-python-hybrid.1` pin work.
 
-If you set your own repository, `install.sh` leaves it untouched. Only the exact stale
-canonical value is migrated on upgrade.
+If you set your own repository or tag, `install.sh` leaves both untouched. It migrates
+only the exact stale values on upgrade, and the stock default pair together (see the
+cut-over notes below).
 
 ---
 
@@ -224,6 +227,29 @@ root in one layer, then ends with `USER openhands`; it sets no `ENTRYPOINT` and 
 inherited unchanged and the sandbox still runs as the unprivileged `openhands`
 account.
 
+**This image is now the deployed default.** The cut-over has landed:
+
+- `install.sh` (STEP 8 `.env` template and the `docker pull` fallback),
+  `.env.example`, and `openhands/docker-compose.openhands.yml` all default
+  `OPENHANDS_AGENT_IMAGE_REPOSITORY` to
+  `ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid` and
+  `OPENHANDS_AGENT_IMAGE_TAG` to `1.37.1-python-hybrid.1`.
+- A previously deployed host has the OLD default pair written verbatim in `.env`
+  (`docker.openhands.dev/openhands/agent-server` AND `1.37.1-python`). Since
+  STEP 8 rewrites `.env` as `${VAR:-default}`, those explicit values would
+  survive every deploy, so STEP 2b unsets them. The migration is **pair-exact**:
+  it unsets BOTH variables only when BOTH load as the old pair. If the owner
+  customised EITHER half, both are preserved and the pin is logged as left
+  alone — two independent unsets keyed off the value alone would silently reset
+  a custom tag to the new default.
+- The new repository is **not** an OpenHands-canonical name (only
+  `ghcr.io/openhands/agent-server` is), so the app server does not re-pin the
+  tag and `1.37.1-python-hybrid.1` should be honoured. That is pending the
+  post-merge live check.
+- **Rollback:** reverting the merge does NOT revert a deployed host's `.env` —
+  the migration already rewrote it. A rollback must re-set the old pin in `.env`
+  (or unset both variables) and re-run `install.sh`.
+
 Build and publish it by hand: **Actions → "sandbox-image" → Run workflow**, and set
 the `image_tag` input (default `1.37.1-python-hybrid.1`). The workflow is
 `workflow_dispatch` only — nothing publishes on a push, a merge or a schedule. It
@@ -233,10 +259,9 @@ builds `linux/arm64` only and pushes to:
 ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:<tag>
 ```
 
-**Nothing in the deployment consumes this image yet.** No `.env` pin, no compose
-value, no installer line and no unit references it, and none is changed here. The
-stack keeps running the stock base image until a separate cut-over card lands. Until
-then publishing is inert with respect to the running system.
+**Publishing now feeds the running system.** The cut-over above makes this image
+the deployment default, so a newly published tag only changes what runs once the
+`.env` pin (or the default) points at it.
 
 ---
 

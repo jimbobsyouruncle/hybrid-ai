@@ -40,8 +40,8 @@ for t in mktemp stat grep; do
 done
 
 STALE_REPO="ghcr.io/openhands/agent-server"
-NEW_REPO="docker.openhands.dev/openhands/agent-server"
-NEW_TAG="1.37.1-python"
+NEW_REPO="ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid"
+NEW_TAG="1.37.1-python-hybrid.1"
 
 PASS=0
 FAIL=0

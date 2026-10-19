@@ -337,6 +337,13 @@
 - planned_action()
 - inv_add()
 
+## scripts/test-agent-image-hybrid-cutover.sh
+- ok()
+- bad()
+- check()
+- run_install()
+- env_value()
+
 ## scripts/test-agent-image-repo-migration.sh
 - ok()
 - bad()

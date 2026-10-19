@@ -780,14 +780,18 @@ control until the upgrade.
 **The real fix: upgrade the agent-server.** An OpenHands agent-server at
 **`1.37.0` or newer** stops embedding credentials in the clone URL and uses a
 credential helper instead, so nothing sensitive lands in `.git/config`. That
-pin has now shipped: the stack defaults to agent-server **`1.37.1-python`** and
-app-server **`:1.10`**. The pin is honoured because the stack sets
-`OPENHANDS_AGENT_IMAGE_REPOSITORY` to the CDN value
-`docker.openhands.dev/openhands/agent-server` rather than the canonical
-`ghcr.io/openhands/agent-server`: the app server reserves the canonical repository
-for its own bundled SDK version and silently re-pins the tag when it is set, so only
-the CDN repository lets the `1.37.1-python` tag take effect. A clone made before the
-upgrade can still carry a stale
+pin has now shipped: the stack defaults to agent-server
+**`1.37.1-python-hybrid.1`** and app-server **`:1.10`**. The default repository is
+the derived hybrid image
+`ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid` (it adds
+shellcheck/sqlite3/rsync/restic on top of the stock agent-server), not the
+canonical `ghcr.io/openhands/agent-server`: the app server reserves the canonical
+repository for its own bundled SDK version and silently re-pins the tag when it is
+set, so a non-canonical repository lets the tag take effect. On upgrade, `install.sh`
+STEP 2b migrates a host still pinned to the OLD default pair
+(`docker.openhands.dev/openhands/agent-server` AND `1.37.1-python`) to the new
+defaults; if you customised either the repository or the tag, both are left
+untouched. A clone made before the upgrade can still carry a stale
 embedded credential, so rotate the token and re-check to confirm the old value
 is gone.
 
