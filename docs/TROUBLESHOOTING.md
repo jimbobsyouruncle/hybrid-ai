@@ -904,7 +904,9 @@ what the image `CMD` starts, and an `exec`ed one is not tracked as that process.
 
 The `hermes-nonroot-smoke` CI job builds `hermes/Dockerfile` and runs the image as uid
 `10001` on a data volume seeded with a **decoy** agent (a valid Agent source root that would
-leave a marker if imported). It fails closed on these modes. Each maps to one build or
+leave a marker if imported). It runs on every pull request that can change the image — the
+`changes` job diffs the PR base for `hermes/` and this workflow — and unconditionally on the
+weekly schedule and manual dispatch. It fails closed on these modes. Each maps to one build or
 configuration change.
 
 | Symptom | Cause | Fix |
