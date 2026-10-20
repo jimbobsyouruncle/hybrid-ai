@@ -315,7 +315,9 @@
 
 ## scripts/sandbox-firewall.sh
 - usage()
+- resolve_bridge()
 - apply_rule()
+- is_owned()
 
 ## scripts/setup-agent-workspace.sh
 - log()
@@ -533,10 +535,17 @@
 - bad()
 - check()
 - have()
+- absent()
 - chain_exists()
 - new_fixture()
 - run_firewall()
 - rules_of()
+- accept_app_to_sandbox()
+- accept_sandbox_to_app()
+- drop_stack()
+- drop_dest()
+- ip_to_int()
+- cidr_matches()
 - drop_matches()
 
 ## scripts/test-sync-agent-repos.sh

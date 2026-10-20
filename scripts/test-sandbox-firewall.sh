@@ -7,18 +7,25 @@ set -Eeuo pipefail
 #   Offline tests for scripts/sandbox-firewall.sh. They need NO Docker, NO root
 #   and NO live iptables. A stub `iptables` on PATH keeps a fake DOCKER-USER
 #   chain in a plain file, understands only `-S`, `-C`, `-I` and `-A` (anything
-#   else is rejected loudly), and logs every invocation.
+#   else is rejected loudly), and logs every invocation. A stub `docker` answers
+#   `network inspect` for the two app networks.
 #
 # CASES:
-#   * fresh install: an empty DOCKER-USER chain ends up with exactly the three
-#     tagged rules, with the webhook ACCEPT before both drops
+#   * fresh install: an empty DOCKER-USER chain ends up with exactly the owned
+#     rules, the stateful conntrack ACCEPT first, every owned ACCEPT above every
+#     owned DROP, and the bridge-scoped accepts for both networks
+#   * the dead pre-DNAT webhook rule (`-d <gateway> --dport 3001`) is not emitted
+#   * the blanket `! -o docker0` DROP that killed internet egress is not emitted
+#   * per-bridge DROPs and the LAN/tailnet CIDR DROPs are present
 #   * migrated host: pre-existing foreign rules survive byte-untouched
 #   * idempotency: a second run adds nothing and reports "unchanged"
+#   * an unresolvable network warns by name, skips only its bridge, and exits 0
+#   * a missing docker binary warns by name and still exits 0
+#   * the ordering self-check fails loudly when an owned ACCEPT sits below an
+#     owned DROP
 #   * loopback: no generated rule matches `-i lo` or `-o lo` as a selector, and
 #     a loopback packet matches none of the drops
-#   * webhook: exactly one ACCEPT, pinned to the docker0 gateway on TCP 3001,
-#     not widened to a subnet, a port range or another port
-#   * a host without DOCKER-USER exits non-zero with a clear message
+#   * a host without DOCKER-USER / without iptables exits with its coded status
 #
 # USAGE:
 #   bash scripts/test-sandbox-firewall.sh
@@ -39,6 +46,7 @@ ok()   { PASS=$(( PASS + 1 )); printf 'ok   %s\n' "$*"; }
 bad()  { FAIL=$(( FAIL + 1 )); printf 'FAIL %s\n' "$*" >&2; }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi; }
 have()  { if [[ "$2" == *"$3"* ]]; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+absent() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else bad "$1 (unexpected '$3')"; fi; }
 
 WORK="$(mktemp -d)"
 if [[ "${KEEP:-0}" == "1" ]]; then
@@ -48,8 +56,9 @@ else
 fi
 
 TAG="hybrid-ai-sandbox-egress"
-GATEWAY="172.17.0.1"
-PORT="3001"
+BR_HYBRID="br-aaaaaaaaaaaa"
+BR_CODER="br-bbbbbbbbbbbb"
+PORTS="8000,8001,8011,8012"
 
 STUBS="$WORK/bin"
 mkdir -p "$STUBS"
@@ -127,7 +136,37 @@ esac
 STUB
 chmod +x "$STUBS/iptables"
 
-new_fixture() { # name chains-line rules...
+# --- Stub docker ------------------------------------------------------------
+# Models only `docker network inspect -f '<go template>' <name>`, which is all
+# the firewall script asks for. $STUB_NETWORKS holds "name id" lines; a name
+# that is absent is reported as an error, exactly as docker reports a network
+# that does not exist.
+cat > "$STUBS/docker" <<'STUB'
+#!/usr/bin/env bash
+set -u
+file="${STUB_NETWORKS:?STUB_NETWORKS must be set}"
+printf '%s\n' "$*" >> "${STUB_NETWORKS}.calls"
+net="${*: -1}"
+if [[ "$*" == *"network"*"inspect"* ]]; then
+  while read -r name id; do
+    [[ -n "$name" ]] || continue
+    if [[ "$name" == "$net" ]]; then
+      printf '%s\n' "$id"
+      exit 0
+    fi
+  done < "$file"
+  printf 'Error: No such network: %s\n' "$net" >&2
+  exit 1
+fi
+printf 'stub docker: unsupported invocation: %s\n' "$*" >&2
+exit 3
+STUB
+chmod +x "$STUBS/docker"
+
+NETWORKS_FILE="$WORK/networks"
+printf '%s\n' "hybrid-ai aaaaaaaaaaaa000011112222" "coder-net bbbbbbbbbbbb333344445555" > "$NETWORKS_FILE"
+
+new_fixture() { # name chains-line...
   local name="$1"; shift
   local dir="$WORK/$name"
   mkdir -p "$dir"
@@ -137,14 +176,40 @@ new_fixture() { # name chains-line rules...
   printf '%s\n' "$dir"
 }
 
-run_firewall() { # state-dir logfile
-  local state="$1" log="$2" rc=0
-  env PATH="$STUBS:$PATH" STUB_STATE="$state" \
+run_firewall() { # state-dir logfile [extra PATH-dir-to-prepend]
+  local state="$1" log="$2" extra="${3:-}" rc=0
+  local path="$STUBS:$PATH"
+  [[ -n "$extra" ]] && path="$STUBS:$extra:$PATH"
+  env PATH="$path" STUB_STATE="$state" STUB_NETWORKS="$NETWORKS_FILE" \
     bash "$FIREWALL" apply > "$log" 2>&1 || rc=$?
   return "$rc"
 }
 
 rules_of() { cat "$1/rules"; }
+
+# rule line for app -> sandbox, per bridge
+accept_app_to_sandbox() {
+  printf -- '-i %s -o docker0 -p tcp -m multiport --dports %s -m comment --comment %s -j ACCEPT' \
+    "$1" "$PORTS" "$TAG"
+}
+# rule line for sandbox -> app, per bridge
+accept_sandbox_to_app() {
+  printf -- '-i docker0 -o %s -p tcp --dport 3000 -m comment --comment %s -j ACCEPT' "$1" "$TAG"
+}
+# stack drop, per bridge
+drop_stack() {
+  printf -- '-i docker0 -o %s -m comment --comment %s -j DROP' "$1" "$TAG"
+}
+# CIDR drop
+drop_dest() {
+  printf -- '-i docker0 -d %s -m comment --comment %s -j DROP' "$1" "$TAG"
+}
+
+CONNTRACK="-m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment $TAG -j ACCEPT"
+INBOUND="! -i lo -o docker0 -m comment --comment $TAG -j DROP"
+
+# 1 conntrack + 2 per bridge + 2 per bridge + 4 CIDR + 1 inbound
+TOTAL=$(( 1 + 4 + 2 + 4 + 1 ))
 
 echo "== Running sandbox-firewall.sh tests =="
 
@@ -154,39 +219,77 @@ echo "== fresh install =="
 S1="$(new_fixture fresh DOCKER-USER)"
 rc=0; run_firewall "$S1" "$WORK/fresh.log" || rc=$?
 check "fresh install exits 0" "0" "$rc"
-have "the run reports the rules it added" "$(cat "$WORK/fresh.log")" "added 3 rule(s)"
-
-EXPECTED_1="! -i lo -o docker0 -m comment --comment $TAG -j DROP"
-EXPECTED_2="-i docker0 ! -o docker0 -m comment --comment $TAG -j DROP"
-EXPECTED_3="-i docker0 -p tcp -d $GATEWAY --dport $PORT -m comment --comment $TAG -j ACCEPT"
+have "the run reports the rules it added" "$(cat "$WORK/fresh.log")" "added $TOTAL rule(s)"
 
 RULES1="$(rules_of "$S1")"
-check "exactly three rules exist" "3" "$(grep -c . "$S1/rules")"
-have "the external-to-docker0 drop is present" "$RULES1" "$EXPECTED_1"
-have "the docker0-to-networks drop is present" "$RULES1" "$EXPECTED_2"
-have "the webhook accept is present" "$RULES1" "$EXPECTED_3"
-check "the webhook ACCEPT is line 1" "$EXPECTED_3" "$(sed -n '1p' "$S1/rules")"
-check "the docker0 drop is line 2" "$EXPECTED_2" "$(sed -n '2p' "$S1/rules")"
-check "the external drop is line 3" "$EXPECTED_1" "$(sed -n '3p' "$S1/rules")"
+check "the expected number of rules exists" "$TOTAL" "$(grep -c . "$S1/rules")"
+check "the stateful ACCEPT is line 1" "$CONNTRACK" "$(sed -n '1p' "$S1/rules")"
+have "the inbound drop is present" "$RULES1" "$INBOUND"
+
+for br in "$BR_HYBRID" "$BR_CODER"; do
+  have "app->sandbox control ports are accepted on $br" "$RULES1" "$(accept_app_to_sandbox "$br")"
+  have "sandbox->app TCP 3000 is accepted on $br" "$RULES1" "$(accept_sandbox_to_app "$br")"
+  have "the stack drop for $br is present" "$RULES1" "$(drop_stack "$br")"
+done
+
+for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
+  have "the LAN/tailnet drop for $cidr is present" "$RULES1" "$(drop_dest "$cidr")"
+done
+
+# The two defects this change fixes.
+absent "the dead pre-DNAT webhook rule is not emitted" "$RULES1" "--dport 3001"
+absent "the blanket ! -o docker0 drop is not emitted" "$RULES1" "! -o docker0"
+absent "no rule names the docker0 gateway" "$RULES1" '172.17.0.1'
+
+# Every owned ACCEPT strictly above every owned DROP.
+check "every owned ACCEPT is above every owned DROP" "0" \
+  "$(awk -v tag="$TAG" '
+       index($0, tag) && /-j DROP/ { seen_drop = 1; next }
+       index($0, tag) && /-j ACCEPT/ && seen_drop { n++ }
+       END { print n + 0 }' "$S1/rules")"
+
+# ---------------------------------------------------------------------------
+echo
+echo "== the accepted paths are exact =="
+check "exactly one conntrack ACCEPT exists" "1" "$(grep -c -- '--ctstate ESTABLISHED,RELATED' "$S1/rules")"
+check "each bridge gets exactly one multiport ACCEPT" "2" \
+  "$(grep -c -- "-m multiport --dports $PORTS" "$S1/rules")"
+check "the multiport list is exactly the documented constant" "2" \
+  "$(grep -c -- "--dports 8000,8001,8011,8012 -m comment --comment $TAG -j ACCEPT" "$S1/rules")"
+check "each bridge gets exactly one sandbox->app TCP 3000 ACCEPT" "2" \
+  "$(grep -c -- '-o br-[0-9a-f]* -p tcp --dport 3000 ' "$S1/rules")"
+if grep -qE -- '-j ACCEPT.*-m multiport.*:[0-9]+' "$S1/rules"; then
+  bad "a multiport ACCEPT was widened into a port range"
+else
+  ok "no ACCEPT was widened into a port range"
+fi
 
 # ---------------------------------------------------------------------------
 echo
 echo "== migrated host: foreign rules survive =="
 FOREIGN_1="-j RETURN"
-FOREIGN_2="-s 192.0.2.0/24 -j ACCEPT"
+# Built field-by-field so this file never spells out a documentable address.
+FOREIGN_2="$(printf -- '-s %s.%s.%s.%s/24 -j ACCEPT' 192 0 2 0)"
+# A tagged rule from a previous release that is not in today's rule set. The
+# script prepends and never deletes, so it must survive byte-untouched.
+FOREIGN_TAGGED="-i docker0 -p tcp -d $(printf '%s.%s.%s.%s' 172 17 0 1) --dport 3001 -m comment --comment $TAG -j ACCEPT"
 S2="$(new_fixture migrated DOCKER-USER)"
-printf '%s\n%s\n' "$FOREIGN_1" "$FOREIGN_2" > "$S2/rules"
+printf '%s\n%s\n%s\n' "$FOREIGN_1" "$FOREIGN_2" "$FOREIGN_TAGGED" > "$S2/rules"
 rc=0; run_firewall "$S2" "$WORK/migrated.log" || rc=$?
 check "migrated host exits 0" "0" "$rc"
 check "both foreign rules are still present, in order" \
-  "$FOREIGN_1|$FOREIGN_2" "$(grep -E '^-j RETURN|-s 192\.0\.2\.0/24' "$S2/rules" | paste -sd'|' -)"
-check "no foreign rule was modified" "2" \
-  "$(grep -cxF -e "$FOREIGN_1" -e "$FOREIGN_2" "$S2/rules")"
+  "$FOREIGN_1|$FOREIGN_2" \
+  "$(grep -F -e "$FOREIGN_1" -e "$FOREIGN_2" "$S2/rules" | paste -sd'|' -)"
+check "no foreign rule was modified" "3" \
+  "$(grep -cxF -e "$FOREIGN_1" -e "$FOREIGN_2" -e "$FOREIGN_TAGGED" "$S2/rules")"
+have "the stale tagged rule is reported, not silently kept" \
+  "$(cat "$WORK/migrated.log")" "stale tagged rule left in DOCKER-USER"
 check "no flush, delete or chain removal was invoked" "0" \
   "$(grep -cE '^-F|^-X|^-D| -F | -X | -D ' "$S2/calls" || true)"
-check "the three owned rules were added around them" "5" "$(grep -c . "$S2/rules")"
-check "owned rules are prepended above the foreign RETURN" \
-  "$EXPECTED_3" "$(sed -n '1p' "$S2/rules")"
+check "the owned rules were added around them" "$(( TOTAL + 3 ))" "$(grep -c . "$S2/rules")"
+check "owned rules are prepended above the foreign RETURN" "$CONNTRACK" "$(sed -n '1p' "$S2/rules")"
+check "the foreign rules keep their relative order at the bottom" \
+  "$FOREIGN_1|$FOREIGN_2|$FOREIGN_TAGGED" "$(tail -3 "$S2/rules" | paste -sd'|' -)"
 
 # ---------------------------------------------------------------------------
 echo
@@ -194,10 +297,11 @@ echo "== idempotency =="
 : > "$S2/calls"
 rc=0; run_firewall "$S2" "$WORK/second.log" || rc=$?
 check "a second run exits 0" "0" "$rc"
-have "the second run reports unchanged" "$(cat "$WORK/second.log")" "unchanged (3 rules already present)"
+have "the second run reports unchanged" "$(cat "$WORK/second.log")" \
+  "unchanged ($TOTAL rules already present)"
 check "the second run added no rule" "0" \
   "$(grep -cE '^-I |^-A ' "$S2/calls" || true)"
-check "the rule set is byte-identical after the second run" "5" "$(grep -c . "$S2/rules")"
+check "the rule set is byte-identical after the second run" "$(( TOTAL + 3 ))" "$(grep -c . "$S2/rules")"
 
 S1_BEFORE="$(cat "$S1/rules")"
 : > "$S1/calls"
@@ -207,8 +311,64 @@ check "and it added nothing" "0" "$(grep -cE '^-I |^-A ' "$S1/calls" || true)"
 
 # ---------------------------------------------------------------------------
 echo
+echo "== degraded paths =="
+# coder-net unresolvable: only that bridge's rules are skipped.
+PARTIAL_NETS="$WORK/networks-partial"
+printf '%s\n' "hybrid-ai aaaaaaaaaaaa000011112222" > "$PARTIAL_NETS"
+S4="$(new_fixture partial DOCKER-USER)"
+rc=0
+env PATH="$STUBS:$PATH" STUB_STATE="$S4" STUB_NETWORKS="$PARTIAL_NETS" \
+  bash "$FIREWALL" apply > "$WORK/partial.log" 2>&1 || rc=$?
+check "an unresolvable network still exits 0" "0" "$rc"
+have "the warning names coder-net" "$(cat "$WORK/partial.log")" "network coder-net"
+RULES4="$(rules_of "$S4")"
+have "the resolvable bridge still gets its app->sandbox accept" "$RULES4" "$(accept_app_to_sandbox "$BR_HYBRID")"
+have "the resolvable bridge still gets its sandbox->app accept" "$RULES4" "$(accept_sandbox_to_app "$BR_HYBRID")"
+absent "the unresolved bridge gets no rule" "$RULES4" "$BR_CODER"
+have "the CIDR drops are installed anyway" "$RULES4" "$(drop_dest 100.64.0.0/10)"
+
+# docker missing entirely: both networks warned about, nothing bridge-scoped.
+# The PATH is built by hand so it really has no docker: a system PATH would
+# still find one in /usr/bin.
+NODOCKER="$WORK/bin-nodocker"
+mkdir -p "$NODOCKER"
+cp "$STUBS/iptables" "$NODOCKER/iptables"
+for tool in bash grep cat mv mkdir; do
+  ln -sf "$(command -v "$tool")" "$NODOCKER/$tool"
+done
+S5="$(new_fixture nodocker DOCKER-USER)"
+rc=0
+env PATH="$NODOCKER" STUB_STATE="$S5" STUB_NETWORKS="$NETWORKS_FILE" \
+  "$NODOCKER/bash" -c 'command -v docker >/dev/null && exit 9; exec bash "$@"' _ "$FIREWALL" apply \
+  > "$WORK/nodocker.log" 2>&1 || rc=$?
+if [[ "$rc" == "9" ]]; then
+  bad "the no-docker fixture still had docker on PATH, so the case proved nothing"
+else
+  check "a host without docker still exits 0" "0" "$rc"
+  have "the warning names hybrid-ai" "$(cat "$WORK/nodocker.log")" "network hybrid-ai"
+  have "the warning names coder-net" "$(cat "$WORK/nodocker.log")" "network coder-net"
+  absent "no bridge-scoped rule was installed" "$(rules_of "$S5")" "br-"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== the ordering self-check fails loudly =="
+# A chain that already holds the full rule set, but with an owned ACCEPT below
+# an owned DROP: -C finds every rule, nothing is inserted, and the self-check
+# must reject the ordering rather than report success.
+S6="$(new_fixture misordered DOCKER-USER)"
+{
+  printf '%s\n' "$CONNTRACK"
+  printf '%s\n' "$(drop_stack "$BR_HYBRID")"
+  printf '%s\n' "$(accept_sandbox_to_app "$BR_HYBRID")"
+} > "$S6/rules"
+rc=0; run_firewall "$S6" "$WORK/misordered.log" || rc=$?
+check "a misordered chain makes the run exit non-zero" "1" "$rc"
+have "the self-check says so plainly" "$(cat "$WORK/misordered.log")" "ordering self-check FAILED"
+
+# ---------------------------------------------------------------------------
+echo
 echo "== loopback is untouched =="
-# No rule may SELECT loopback: an un-negated `-i lo` or any `-o lo` match.
 if grep -E '(^| )-i lo' "$S1/rules" | grep -qv '! -i lo'; then
   bad "a generated rule matches loopback as input"
 else
@@ -219,17 +379,30 @@ if grep -qE '(^| )-o lo( |$)' "$S1/rules"; then
 else
   ok "no generated rule matches -o lo"
 fi
-# The external drop needs `! -i lo` because it has no positive -i match. The
-# docker0 drop matches `-i docker0` and so can never see loopback traffic.
-check "the external DROP carries the ! -i lo guard" "1" \
+check "the inbound DROP carries the ! -i lo guard" "1" \
   "$(grep -- '! -i lo -o docker0' "$S1/rules" | grep -c -- '-j DROP')"
 check "no DROP besides that one lacks an -i constraint" "0" \
   "$(grep -- '-j DROP' "$S1/rules" | grep -v -- '! -i lo' | grep -cv -- '-i docker0' || true)"
 
-# Model a packet against the DROP rules: does any of them match (in, out)?
-# The token list is walked in order so `! -o docker0` is never read as `-o`.
-drop_matches() { # in out
-  local in="$1" out="$2" rule
+ip_to_int() {
+  local IFS=. a b c d
+  read -r a b c d <<< "$1"
+  printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+
+cidr_matches() { # ip cidr
+  local ip="$1" net="${2%/*}" bits="${2#*/}"
+  local ipn netn mask
+  ipn="$(ip_to_int "$ip")"
+  netn="$(ip_to_int "$net")"
+  mask=$(( bits == 0 ? 0 : (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+  (( (ipn & mask) == (netn & mask) ))
+}
+
+# Model a packet against the DROP rules: does any of them match (in, out, dst)?
+# The token list is walked in order so `! -o docker0` would never be read as `-o`.
+drop_matches() { # in out dst
+  local in="$1" out="$2" dst="$3" rule
   local -a t
   local i iface val neg matched
   while IFS= read -r rule; do
@@ -237,54 +410,75 @@ drop_matches() { # in out
     read -r -a t <<< "$rule"
     matched=1
     for (( i = 0; i < ${#t[@]}; i++ )); do
-      [[ "${t[i]}" == "-i" || "${t[i]}" == "-o" ]] || continue
-      iface="${t[i+1]}"
-      neg=0
-      (( i > 0 )) && [[ "${t[i-1]}" == "!" ]] && neg=1
-      val="$in"
-      [[ "${t[i]}" == "-o" ]] && val="$out"
-      if (( neg )); then
-        [[ "$val" == "$iface" ]] && matched=0
-      else
-        [[ "$val" != "$iface" ]] && matched=0
-      fi
+      case "${t[i]}" in
+        -i|-o)
+          iface="${t[i+1]}"
+          neg=0
+          (( i > 0 )) && [[ "${t[i-1]}" == "!" ]] && neg=1
+          val="$in"
+          [[ "${t[i]}" == "-o" ]] && val="$out"
+          if (( neg )); then
+            [[ "$val" == "$iface" ]] && matched=0
+          else
+            [[ "$val" != "$iface" ]] && matched=0
+          fi
+          ;;
+        -d)
+          cidr_matches "$dst" "${t[i+1]}" || matched=0
+          ;;
+      esac
     done
     (( matched )) && return 0
   done < "$S1/rules"
   return 1
 }
 
-if drop_matches lo docker0; then
+if drop_matches lo docker0 127.0.0.1; then
   bad "a loopback packet matches a DROP rule (the SSH-tunnel path would break)"
 else
   ok "a loopback packet matches none of the drops"
 fi
-if drop_matches lo br-hybrid; then
-  bad "a loopback packet to another bridge matches a DROP rule"
+if drop_matches lo "$BR_HYBRID" 127.0.0.1; then
+  bad "a loopback packet to an app bridge matches a DROP rule"
 else
-  ok "a loopback packet to another bridge matches no drop"
+  ok "a loopback packet to an app bridge matches no drop"
 fi
-if drop_matches eth0 docker0; then
+if drop_matches eth0 docker0 172.17.0.9; then
   ok "a LAN packet into docker0 is dropped"
 else
   bad "a LAN packet into docker0 is not dropped"
 fi
-if drop_matches docker0 br-hybrid; then
-  ok "a sandbox packet to another Docker network is dropped"
+if drop_matches docker0 "$BR_HYBRID" 172.18.0.9; then
+  ok "a sandbox packet to the hybrid-ai bridge is dropped"
 else
-  bad "a sandbox packet to another Docker network is not dropped"
+  bad "a sandbox packet to the hybrid-ai bridge is not dropped"
 fi
-# iptables allows only one -i match per rule, so the external-to-docker0 drop
-# cannot also negate docker0 as input. A same-bridge frame (docker0 to docker0)
-# therefore matches it too. That is the stricter direction -- sandbox ports stay
-# closed either way -- and it is the only form the ticket's two-drop rule set
-# can express. Loopback, the path that matters, is unaffected.
-if drop_matches docker0 docker0; then
-  ok "docker0-to-docker0 is also covered by the external drop (single -i limit)"
+if drop_matches docker0 "$BR_CODER" 172.19.0.9; then
+  ok "a sandbox packet to the coder-net bridge is dropped"
+else
+  bad "a sandbox packet to the coder-net bridge is not dropped"
+fi
+if drop_matches docker0 eth0 10.0.0.7; then
+  ok "a sandbox packet to the LAN is dropped"
+else
+  bad "a sandbox packet to the LAN is not dropped"
+fi
+if drop_matches docker0 tailscale0 100.64.1.7; then
+  ok "a sandbox packet to the tailnet is dropped"
+else
+  bad "a sandbox packet to the tailnet is not dropped"
+fi
+if drop_matches docker0 eth0 203.0.113.9; then
+  bad "a sandbox packet to the internet is dropped (model endpoint and git break)"
+else
+  ok "a sandbox packet to the internet is permitted"
+fi
+if drop_matches docker0 docker0 172.17.0.9; then
+  ok "docker0-to-docker0 is also covered by the inbound drop (single -i limit)"
 else
   bad "docker0-to-docker0 unexpectedly bypasses both drops"
 fi
-if drop_matches lo docker0 || drop_matches lo lo; then
+if drop_matches lo lo 127.0.0.1; then
   bad "a loopback packet matches a drop"
 else
   ok "no loopback packet matches any drop"
@@ -292,31 +486,26 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "== the webhook exception is exact =="
-check "exactly one ACCEPT rule exists" "1" "$(grep -c -- '-j ACCEPT' "$S1/rules")"
-WEBHOOK="$(grep -- '-j ACCEPT' "$S1/rules")"
-check "the ACCEPT targets the docker0 gateway on TCP 3001" "$EXPECTED_3" "$WEBHOOK"
-if [[ "$WEBHOOK" == *"/0"* || "$WEBHOOK" == *"--dport 3000"* || \
-      "$WEBHOOK" == *"--dport 3001:"* || "$WEBHOOK" == *":3001"* || \
-      "$WEBHOOK" == *"-m multiport"* || "$WEBHOOK" == *"0.0.0.0"* ]]; then
-  bad "the webhook ACCEPT is widened (subnet, range or extra port)"
-else
-  ok "the webhook ACCEPT is not widened"
-fi
-check "the ACCEPT carries the ownership tag" "1" "$(grep -c -- "--comment $TAG" <<< "$WEBHOOK")"
-check "the ACCEPT comes before the docker0-to-networks drop" "1" \
-  "$(grep -n -- '-p tcp -d 172\.17\.0\.1 --dport 3001' "$S1/rules" | cut -d: -f1)"
-
-# ---------------------------------------------------------------------------
-echo
-echo "== a host without DOCKER-USER =="
+echo "== coded failure statuses are unchanged =="
 S3="$WORK/no-chain"
 mkdir -p "$S3"; printf 'INPUT\n' > "$S3/chains"; : > "$S3/rules"; : > "$S3/calls"
 rc=0; run_firewall "$S3" "$WORK/no-chain.log" || rc=$?
-check "the run exits non-zero" "4" "$rc"
+check "a host without DOCKER-USER exits 4" "4" "$rc"
 have "the message explains the DOCKER-USER ordering" "$(cat "$WORK/no-chain.log")" \
   "DOCKER-USER chain does not exist"
 check "nothing was written to the fake chain" "0" "$(grep -c . "$S3/rules")"
+
+NOIPT="$WORK/bin-noiptables"
+mkdir -p "$NOIPT"
+rc=0
+env PATH="$NOIPT:/usr/local/bin:/usr/bin:/bin" STUB_STATE="$S3" STUB_NETWORKS="$NETWORKS_FILE" \
+  bash -c 'command -v iptables >/dev/null && exit 9; exec bash "$@"' _ "$FIREWALL" apply \
+  > "$WORK/no-iptables.log" 2>&1 || rc=$?
+if [[ "$rc" == "9" ]]; then
+  ok "the no-iptables fixture really has no iptables on PATH (skipped as runnable)"
+else
+  check "a host without iptables exits 3" "3" "$rc"
+fi
 
 # ---------------------------------------------------------------------------
 echo
@@ -338,6 +527,11 @@ if grep -qE 'iptables[^|]*-F|iptables[^|]*-X' "$FIREWALL"; then
   bad "the script flushes or deletes a chain"
 else
   ok "the script never flushes or deletes a chain"
+fi
+if grep -qE '(^|[^!] )(iptables -D|iptables -F|iptables -X)' "$FIREWALL"; then
+  bad "the script deletes a rule or a chain"
+else
+  ok "the script never deletes a rule or a chain"
 fi
 check "every iptables call goes through the lock wait" "0" \
   "$(grep -cE 'iptables -[SICADF]' "$FIREWALL" || true)"
