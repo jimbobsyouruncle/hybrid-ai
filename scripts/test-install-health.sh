@@ -94,10 +94,18 @@ chmod 644 "$LAYOUT"
 
 # --- stubs -------------------------------------------------------------------
 for d in docker git jq openssl sqlite3 rsync tailscale hostname nproc \
-         loginctl setfacl apt-get sudo restic; do
+         loginctl setfacl apt-get restic; do
   # shellcheck disable=SC2016  # $0 must expand inside the generated stub
   printf '#!/usr/bin/env bash\nprintf "%%s stub\\n" "$0"\nexit 0\n' > "$BIN/$d"
 done
+# sudo logs its argv and then swallows the call, exactly as before. The rest of
+# install.sh does use sudo (prepare_openhands_workspace), so this asserts about
+# the firewall step only, never "sudo was never called".
+cat > "$BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SUDO_ARGV_LOG:-/dev/null}"
+exit 0
+EOF
 # `id` answers without a real account; chown is a no-op.
 # shellcheck disable=SC2016  # $@ must expand inside the generated stub
 printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "1000\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$BIN/id"
@@ -185,6 +193,7 @@ ln -sfn "$BIN_ROOT/id" "$BIN_NOSYS/id"
 
 INSTALL_ARGV="$WORK/install-argv.log"
 SYSTEMCTL_ARGV="$WORK/systemctl-argv.log"
+SUDO_ARGV="$WORK/sudo-argv.log"
 
 # run_install hermes_health log [unit_dir] [install_argv_log] [path]
 # The path argument picks the variant: ROOT_PATH for the privileged runs and
@@ -203,6 +212,7 @@ run_install() {
       HYBRID_AI_ENV_FILE="$LAYOUT" \
       HYBRID_AI_SYSTEMD_UNIT_DIR="$unit_dir" \
       INSTALL_ARGV_LOG="$argv_log" \
+      SUDO_ARGV_LOG="$SUDO_ARGV" \
       SYSTEMCTL_LOG="$SYSTEMCTL_ARGV" \
       SYSTEMCTL_STATE="$WORK/sysstate" \
       SYSTEMCTL_UNIT_DIR="$unit_dir" \
@@ -359,9 +369,18 @@ UNIT="hybrid-ai-firewall.service"
 UNIT_SRC="$REPO/deploy/hybrid-ai-firewall.service"
 UNIT_INSTALLED="$SYSD/$UNIT"
 
+# The firewall step must not shell out through sudo at all. install.sh does use
+# sudo legitimately elsewhere (prepare_openhands_workspace: setfacl, chown,
+# apt-get), so match only the argv that would belong to this step: the unit,
+# systemctl, or an install of the unit.
+firewall_sudo() {
+  grep -E "hybrid-ai-firewall|systemctl|(^|[[:space:]])install([[:space:]].*/)?hybrid-ai" \
+    "$SUDO_ARGV" 2>/dev/null || true
+}
+
 # (a) fresh root run: install the unit 0644 into the scratch unit dir, reload,
 # enable, verify. The installer must not start it, and must never use sudo.
-rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"; : > "$SUDO_ARGV"
 rm -rf "${WORK:?}/sysstate"; mkdir -p "$WORK/sysstate"
 : > "$INSTALL_LOG"
 rc=0
@@ -416,9 +435,15 @@ else
   bad "sandbox_firewall_unit_installed was not logged"
 fi
 if grep -Eq '(^|[[:space:]])sudo([[:space:]]|$)' "$INSTALL_ARGV" "$SYSTEMCTL_ARGV"; then
-  bad "sudo appears in a recorded argv"
+  bad "sudo appears in a recorded install/systemctl argv"
 else
-  ok "no sudo in any recorded argv"
+  ok "no sudo in any recorded install/systemctl argv"
+fi
+if firewall_sudo | grep -q .; then
+  bad "the firewall step shelled out through sudo"
+  firewall_sudo | sed 's/^/      sudo /' >&2
+else
+  ok "the firewall step made no sudo call"
 fi
 
 # (b) rerun: byte-identical unit, still enabled, exit 0.
@@ -450,7 +475,7 @@ else
 fi
 
 # (c) non-root: warn, exit 0, no install of the unit and no mutating systemctl.
-rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"; : > "$SUDO_ARGV"
 rm -rf "${WORK:?}/sysstate"; mkdir -p "$WORK/sysstate"
 : > "$INSTALL_LOG"
 rc=0
@@ -481,9 +506,15 @@ if [[ -e "$UNIT_INSTALLED" ]]; then
 else
   ok "the non-root run wrote no unit file"
 fi
+if firewall_sudo | grep -q .; then
+  bad "the non-root run shelled out through sudo for the firewall step"
+  firewall_sudo | sed 's/^/      sudo /' >&2
+else
+  ok "the non-root run made no sudo call for the firewall step"
+fi
 
 # (d) systemctl absent: warn, exit 0, and the unit is not installed.
-rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"; : > "$SUDO_ARGV"
 : > "$INSTALL_LOG"
 rc=0
 run_install ok "$WORK/fw-nosystemctl.log" "$SYSD" "$INSTALL_ARGV" "$BIN_NOSYS" || rc=$?
