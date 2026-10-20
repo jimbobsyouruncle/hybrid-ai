@@ -1007,6 +1007,87 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5a2. Sandbox network containment (WARNING-ONLY)
+#
+# Placed outside the container-inspect gate for the same reason as 5a: the
+# rules live in the host's DOCKER-USER chain, so the answer does not depend on
+# any container being detected.
+#
+# WARNING-ONLY: `iptables -S` is the only command this runs -- no insert,
+# append, delete, flush or restore -- so it cannot change firewall state, and
+# it never calls fail(), so it adds no path to exit 2. A sandbox port being
+# reachable from the LAN is worth a warning even when everything else is
+# healthy, but it must never turn a deploy red.
+#
+# THE SKIP PATH EXISTS because the probe genuinely cannot answer everywhere: a
+# non-Linux host has no iptables, a non-root run may not read the chain, and
+# Docker may not have created DOCKER-USER yet. Each of those prints a dim
+# "skipped" line and leaves the exit code exactly as it would have been.
+#
+# It accepts exactly what scripts/sandbox-firewall.sh installs: the three rules
+# carrying its comment tag -- the single ACCEPT for the docker0 gateway webhook
+# path on the sandbox port, the DROP from docker0 to the other Docker networks,
+# and the DROP from external interfaces into docker0.
+# ---------------------------------------------------------------------------
+SBX_TAG="hybrid-ai-sandbox-egress"
+SBX_CHAIN="DOCKER-USER"
+SBX_GATEWAY="172.17.0.1"
+SBX_PORT="${OH_PORT:-3001}"
+SBX_LISTING=""
+SBX_SKIP=""
+SBX_ACCEPT=0
+SBX_D0_DROP=0
+SBX_EXT_DROP=0
+if [[ "$(uname -s 2>/dev/null)" != "Linux" ]]; then
+  SBX_SKIP="not a Linux host"
+elif ! command -v iptables >/dev/null 2>&1; then
+  SBX_SKIP="iptables not installed"
+elif ! SBX_LISTING="$(iptables -w 5 -S "$SBX_CHAIN" 2>/dev/null)"; then
+  SBX_SKIP="cannot read ${SBX_CHAIN} (needs root, or Docker is not up)"
+elif [[ -z "$SBX_LISTING" ]]; then
+  SBX_SKIP="empty ${SBX_CHAIN} listing"
+elif [[ "$SBX_LISTING" != *"-N ${SBX_CHAIN}"* && "$SBX_LISTING" != *"-A ${SBX_CHAIN}"* ]]; then
+  SBX_SKIP="unexpected ${SBX_CHAIN} listing"
+fi
+
+if [[ -n "$SBX_SKIP" ]]; then
+  (( QUIET )) || printf '  %s-%s sandbox firewall check skipped (%s)\n' "$C_DIM" "$C_RST" "$SBX_SKIP"
+else
+  while IFS= read -r SBX_LINE; do
+    [[ "$SBX_LINE" == *"$SBX_TAG"* ]] || continue
+    SBX_PAD=" $SBX_LINE "
+    if [[ "$SBX_PAD" == *" -j ACCEPT "* && "$SBX_PAD" == *" -i docker0 "* \
+       && "$SBX_PAD" == *" --dport ${SBX_PORT} "* ]] \
+       && { [[ "$SBX_PAD" == *" -d ${SBX_GATEWAY} "* ]] || [[ "$SBX_PAD" == *" -d ${SBX_GATEWAY}/32 "* ]]; }; then
+      SBX_ACCEPT=1
+    elif [[ "$SBX_PAD" == *" -j DROP "* ]]; then
+      if [[ "$SBX_PAD" == *" -i docker0 "* && "$SBX_PAD" == *" ! -o docker0 "* ]]; then
+        SBX_D0_DROP=1
+      fi
+      if [[ "$SBX_PAD" == *" ! -i lo "* && "$SBX_PAD" == *" -o docker0 "* ]]; then
+        SBX_EXT_DROP=1
+      fi
+    fi
+  done <<< "$SBX_LISTING"
+  SBX_MISSING=""
+  (( SBX_ACCEPT )) || SBX_MISSING="the webhook ACCEPT for the docker0 gateway on port ${SBX_PORT}"
+  if (( ! SBX_D0_DROP )); then
+    SBX_MISSING="${SBX_MISSING:+${SBX_MISSING}, }the DROP from docker0 to other Docker networks"
+  fi
+  if (( ! SBX_EXT_DROP )); then
+    SBX_MISSING="${SBX_MISSING:+${SBX_MISSING}, }the DROP from external interfaces into docker0"
+  fi
+  if [[ -z "$SBX_MISSING" ]]; then
+    pass "Sandbox firewall: ${SBX_CHAIN} drops keep the sandbox ports off the LAN, with the single webhook ACCEPT in place"
+  else
+    warn "Sandbox firewall: ${SBX_CHAIN} is missing ${SBX_MISSING}, so sandbox ports may be reachable from the LAN" \
+         "Run: sudo ./scripts/sandbox-firewall.sh apply (or re-run ./install.sh); the boot unit hybrid-ai-firewall.service re-applies them on every boot."
+  fi
+  unset SBX_LINE SBX_PAD
+fi
+unset SBX_LISTING SBX_SKIP SBX_MISSING SBX_ACCEPT SBX_D0_DROP SBX_EXT_DROP
+
+# ---------------------------------------------------------------------------
 # 5b. Agent clone credentials
 #
 # OpenHands' app-server clones with `https://<token>@github.com/...`, and git

@@ -52,6 +52,7 @@
 - deploy/50-hybrid-ai-deploy.rules
 - deploy/README.md - deploy/ — headless deploy (one commit, one unit)
 - deploy/hybrid-ai-deploy@.service
+- deploy/hybrid-ai-firewall.service
 ## docs
 
 - docs/BUILDER_PUBLISH_SMOKE_TEST.md
@@ -103,6 +104,7 @@
 - scripts/deploy-instance.sh
 - scripts/deploy-remote.sh
 - scripts/deploy-trigger.sh
+- scripts/sandbox-firewall.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
 - scripts/test-agent-image-hybrid-cutover.sh - FILE: scripts/test-agent-image-hybrid-cutover.sh
@@ -120,12 +122,14 @@
 - scripts/test-deploy-remote.sh
 - scripts/test-deploy-trigger.sh
 - scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
+- scripts/test-doctor-sandbox-firewall.sh - FILE: scripts/test-doctor-sandbox-firewall.sh
 - scripts/test-doctor-startup-grace.sh - FILE: scripts/test-doctor-startup-grace.sh
 - scripts/test-env-pin-migration.sh - FILE: scripts/test-env-pin-migration.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
 - scripts/test-install-health.sh - FILE: scripts/test-install-health.sh
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
+- scripts/test-sandbox-firewall.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 ## scripts/lib
 

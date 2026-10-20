@@ -313,6 +313,10 @@
 - probe_can_read()
 - find_unreadable()
 
+## scripts/sandbox-firewall.sh
+- usage()
+- apply_rule()
+
 ## scripts/setup-agent-workspace.sh
 - log()
 - ok()
@@ -475,6 +479,14 @@
 - pass()
 - fail()
 
+## scripts/test-doctor-sandbox-firewall.sh
+- pass()
+- fail()
+- run_parent_apply()
+- count_of()
+- run_doctor()
+- check_skip_flavour()
+
 ## scripts/test-doctor-startup-grace.sh
 - pass()
 - fail()
@@ -515,6 +527,17 @@
 - skip()
 - check()
 - run_find_unreadable()
+
+## scripts/test-sandbox-firewall.sh
+- ok()
+- bad()
+- check()
+- have()
+- chain_exists()
+- new_fixture()
+- run_firewall()
+- rules_of()
+- drop_matches()
 
 ## scripts/test-sync-agent-repos.sh
 - pass()
