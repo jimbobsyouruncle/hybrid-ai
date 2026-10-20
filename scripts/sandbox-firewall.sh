@@ -22,11 +22,15 @@ set -Eeuo pipefail
 #     2. sandbox -> app: TCP 3000 from docker0 to each app bridge, for webhooks
 #        and for the secret fetch (/api/v1/webhooks/secrets) that conversation
 #        creation performs.
-#     3. sandbox -> internet: the model endpoint, git and package mirrors. This
+#     3. sandbox -> resolver: UDP/53 and TCP/53 from docker0. This ACCEPT must
+#        sit ABOVE the CIDR DROPs: the resolver's answer arrives from an address
+#        inside the dropped RFC1918 space, so a later DROP would swallow it and
+#        the sandbox would lose DNS.
+#     4. sandbox -> internet: the model endpoint, git and package mirrors. This
 #        egress is DELIBERATELY PERMITTED. It is required, not an oversight:
 #        without it a sandbox boots, reaches READY, then records
 #        `prompt_tokens: 0` with no actions.
-#     4. the stateful return path for all of the above.
+#     5. the stateful return path for all of the above.
 #
 #   THE PATHS THAT MUST NOT WORK:
 #     * LAN and tailnet clients reaching a sandbox port (the inbound drop into
@@ -47,9 +51,10 @@ set -Eeuo pipefail
 #   by another tool, or by hand survive byte-untouched.
 #
 #   ORDERING. Every owned ACCEPT is kept strictly above every owned DROP, so no
-#   drop can swallow an accepted path. Rules are prepended, which also keeps
-#   them above a foreign `-j RETURN`. After applying, the script reads
-#   DOCKER-USER back and exits non-zero if that invariant does not hold.
+#   drop can swallow an accepted path. That matters most for the DNS ACCEPT: its
+#   answer comes back from inside the dropped RFC1918 space. Rules are prepended,
+#   which also keeps them above a foreign `-j RETURN`. After applying, the script
+#   reads DOCKER-USER back and exits non-zero if that invariant does not hold.
 #
 #   DEGRADED PATHS. A missing `docker`, or a network whose id cannot be read,
 #   skips that network's bridge rules with a warning naming the network, and
@@ -154,6 +159,14 @@ for br in "${BRIDGES[@]}"; do
   RULES+=("-i $br -o docker0 -p tcp -m multiport --dports $SANDBOX_CONTROL_PORTS -m comment --comment $TAG -j ACCEPT")
   RULES+=("-i docker0 -o $br -p tcp --dport $APP_WEB_PORT -m comment --comment $TAG -j ACCEPT")
 done
+
+# Sandbox -> resolver, port 53, both protocols. This must sit ABOVE the CIDR
+# DROPs below: the resolver's answer arrives from an address inside the dropped
+# RFC1918 space, so a later DROP would swallow it. The exception is deliberately
+# port-scoped, not destination-scoped: a sandbox can reach any resolver on
+# port 53. That is the accepted residual.
+RULES+=("-i docker0 -p udp --dport 53 -m comment --comment $TAG -j ACCEPT")
+RULES+=("-i docker0 -p tcp --dport 53 -m comment --comment $TAG -j ACCEPT")
 
 # Stack containment: one drop per app bridge. A blanket `! -o docker0` would
 # also cut the sandbox off from the internet, which agents require.

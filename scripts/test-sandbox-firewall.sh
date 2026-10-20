@@ -17,6 +17,11 @@ set -Eeuo pipefail
 #   * the dead pre-DNAT webhook rule (`-d <gateway> --dport 3001`) is not emitted
 #   * the blanket `! -o docker0` DROP that killed internet egress is not emitted
 #   * per-bridge DROPs and the LAN/tailnet CIDR DROPs are present
+#   * DNS: exactly two port-53 ACCEPTs (UDP and TCP), neither widened, both above
+#     every CIDR DROP; a sandbox packet to a resolver inside the dropped RFC1918
+#     space matches an ACCEPT on UDP/53 and TCP/53 and no DROP
+#   * a sandbox packet to the same address on TCP/443 and TCP/8080 still matches
+#     an owned DROP and no owned ACCEPT (fails if either DNS ACCEPT is widened)
 #   * migrated host: pre-existing foreign rules survive byte-untouched
 #   * idempotency: a second run adds nothing and reports "unchanged"
 #   * an unresolvable network warns by name, skips only its bridge, and exits 0
@@ -204,12 +209,17 @@ drop_stack() {
 drop_dest() {
   printf -- '-i docker0 -d %s -m comment --comment %s -j DROP' "$1" "$TAG"
 }
+# sandbox -> resolver ACCEPT, one per protocol
+accept_sandbox_dns() {
+  printf -- '-i docker0 -p %s --dport 53 -m comment --comment %s -j ACCEPT' "$1" "$TAG"
+}
 
 CONNTRACK="-m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment $TAG -j ACCEPT"
 INBOUND="! -i lo -o docker0 -m comment --comment $TAG -j DROP"
 
-# 1 conntrack + 2 per bridge + 2 per bridge + 4 CIDR + 1 inbound
-TOTAL=$(( 1 + 4 + 2 + 4 + 1 ))
+# 1 conntrack + 4 per-bridge ACCEPTs + 2 per-bridge DROPs + 4 CIDR + 2 DNS
+# + 1 inbound
+TOTAL=$(( 1 + 4 + 2 + 4 + 2 + 1 ))
 
 echo "== Running sandbox-firewall.sh tests =="
 
@@ -235,6 +245,9 @@ done
 for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
   have "the LAN/tailnet drop for $cidr is present" "$RULES1" "$(drop_dest "$cidr")"
 done
+
+have "the sandbox->resolver UDP/53 ACCEPT is present" "$RULES1" "$(accept_sandbox_dns udp)"
+have "the sandbox->resolver TCP/53 ACCEPT is present" "$RULES1" "$(accept_sandbox_dns tcp)"
 
 # The two defects this change fixes.
 absent "the dead pre-DNAT webhook rule is not emitted" "$RULES1" "--dport 3001"
@@ -401,39 +414,103 @@ cidr_matches() { # ip cidr
   (( (ipn & mask) == (netn & mask) ))
 }
 
-# Model a packet against the DROP rules: does any of them match (in, out, dst)?
+# Model a packet against one rule line. Result is the exit status.
 # The token list is walked in order so `! -o docker0` would never be read as `-o`.
-drop_matches() { # in out dst
-  local in="$1" out="$2" dst="$3" rule
-  local -a t
-  local i iface val neg matched
+# An unspecified proto/dport makes a rule that constrains it undecidable, not a
+# match: the older in/out/dst-only call sites keep working, and a port-53 ACCEPT
+# never counts as an ACCEPT for a packet of unknown protocol. A rule with no port
+# match matches every port; `--dport A:B` is a range and `--dports a,b,c` a list,
+# so a widened rule is judged on the concrete port the packet uses.
+tokens_match() { # rule-line in out dst [proto] [dport]
+  local rule="$1" in="$2" out="$3" dst="$4" proto="${5:-}" dport="${6:-}"
+  local -a t plist
+  local i iface val neg matched undecidable=0 ports p ok
+  read -r -a t <<< "$rule"
+  matched=1
+  for (( i = 0; i < ${#t[@]}; i++ )); do
+    case "${t[i]}" in
+      -i|-o)
+        iface="${t[i+1]}"
+        neg=0
+        (( i > 0 )) && [[ "${t[i-1]}" == "!" ]] && neg=1
+        val="$in"
+        [[ "${t[i]}" == "-o" ]] && val="$out"
+        if (( neg )); then
+          [[ "$val" == "$iface" ]] && matched=0
+        else
+          [[ "$val" != "$iface" ]] && matched=0
+        fi
+        ;;
+      -d)
+        cidr_matches "$dst" "${t[i+1]}" || matched=0
+        ;;
+      -p|--protocol)
+        if [[ -z "$proto" ]]; then
+          undecidable=1 # the modelled packet names no protocol
+        elif [[ "${t[i+1]}" != "$proto" ]]; then
+          matched=0
+        fi
+        ;;
+      --dport|--dports)
+        if [[ -z "$dport" ]]; then
+          undecidable=1 # the modelled packet names no port
+        else
+          ports="${t[i+1]}"
+          read -r -a plist <<< "${ports//,/ }"
+          ok=0
+          for p in "${plist[@]}"; do
+            if [[ "$p" == *:* ]]; then
+              (( dport >= ${p%%:*} && dport <= ${p##*:} )) && ok=1
+            elif [[ "$p" == "$dport" ]]; then
+              ok=1
+            fi
+          done
+          (( ok )) || matched=0
+        fi
+        ;;
+    esac
+  done
+  (( matched && ! undecidable ))
+}
+
+# Walk the chain in order and report the verdict of the first owned rule that
+# matches (iptables semantics: first match wins). Prints ACCEPT, DROP or NONE.
+# The stateful return-path ACCEPT is skipped: the modelled packet is a NEW flow.
+first_match() { # in out dst [proto] [dport]
+  local rule
   while IFS= read -r rule; do
-    [[ "$rule" == *"-j DROP"* ]] || continue
-    read -r -a t <<< "$rule"
-    matched=1
-    for (( i = 0; i < ${#t[@]}; i++ )); do
-      case "${t[i]}" in
-        -i|-o)
-          iface="${t[i+1]}"
-          neg=0
-          (( i > 0 )) && [[ "${t[i-1]}" == "!" ]] && neg=1
-          val="$in"
-          [[ "${t[i]}" == "-o" ]] && val="$out"
-          if (( neg )); then
-            [[ "$val" == "$iface" ]] && matched=0
-          else
-            [[ "$val" != "$iface" ]] && matched=0
-          fi
-          ;;
-        -d)
-          cidr_matches "$dst" "${t[i+1]}" || matched=0
-          ;;
-      esac
-    done
-    (( matched )) && return 0
+    [[ "$rule" == *"$TAG"* ]] || continue
+    [[ "$rule" == *"--ctstate"* ]] && continue
+    tokens_match "$rule" "$@" || continue
+    if [[ "$rule" == *"-j ACCEPT"* ]]; then
+      printf 'ACCEPT'
+    else
+      printf 'DROP'
+    fi
+    return 0
+  done < "$S1/rules"
+  printf 'NONE'
+}
+
+# Model a packet against the owned rules of one verdict: does any of them match?
+# The matching rule line is left in $MATCHED_RULE.
+MATCHED_RULE=""
+rule_matches() { # in out dst [proto] [dport] [verdict]
+  local verdict="${6:-DROP}" rule
+  while IFS= read -r rule; do
+    [[ "$rule" == *"-j $verdict"* ]] || continue
+    [[ "$rule" == *"$TAG"* ]] || continue
+    [[ "$rule" == *"--ctstate"* ]] && continue
+    if tokens_match "$rule" "$1" "$2" "$3" "${4:-}" "${5:-}"; then
+      MATCHED_RULE="$rule"
+      return 0
+    fi
   done < "$S1/rules"
   return 1
 }
+
+drop_matches() { rule_matches "$1" "$2" "$3" "${4:-}" "${5:-}" DROP; }
+accept_matches() { rule_matches "$1" "$2" "$3" "${4:-}" "${5:-}" ACCEPT; }
 
 if drop_matches lo docker0 127.0.0.1; then
   bad "a loopback packet matches a DROP rule (the SSH-tunnel path would break)"
@@ -485,6 +562,93 @@ if drop_matches lo lo 127.0.0.1; then
 else
   ok "no loopback packet matches any drop"
 fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== the DNS exception is exact, and is not wider than port 53 =="
+check "exactly two port-53 ACCEPTs exist" "2" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -c -- '-j ACCEPT')"
+check "one of them is UDP" "1" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -c -- '-p udp')"
+check "one of them is TCP" "1" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -c -- '-p tcp')"
+check "no port-53 ACCEPT was widened into --dports" "0" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -c -- '--dports' || true)"
+check "no port-53 ACCEPT names a port range" "0" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -c -- ':' || true)"
+check "no port-53 ACCEPT is destination-scoped" "0" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -cE -- '(^| )-d ' || true)"
+check "no port-53 ACCEPT names an output interface" "0" \
+  "$(grep -- '--dport 53' "$S1/rules" | grep -cE -- '(^| )-o ' || true)"
+check "each port-53 ACCEPT carries exactly one input interface" "1|1" \
+  "$(grep -- '--dport 53' "$S1/rules" \
+     | awk '{ n = 0; for (i = 1; i < NF; i++) if ($i == "-i") n++; print n }' | paste -sd'|' -)"
+
+check "both DNS ACCEPTs sit above all four CIDR DROPs" "ok" \
+  "$(awk -v udp="$(accept_sandbox_dns udp)" -v tcp="$(accept_sandbox_dns tcp)" '
+       $0 == udp { u = NR }
+       $0 == tcp { t = NR }
+       /-i docker0 -d / && /-j DROP/ { d = NR; n++ }
+       END { print (n == 4 && u && t && u < d && t < d) ? "ok" : "bad" }' "$S1/rules")"
+
+# The resolver sits inside the dropped RFC1918 space, so a packet to it is only
+# allowed on port 53. Built field-by-field, like the other fixtures.
+RESOLVER="$(printf -- '%s.%s.%s.%s' 192 168 1 1)"
+
+# CASE A: DNS to the resolver is allowed, on both protocols. This models the
+# whole chain, first match wins, so the CIDR DROPs below are in play: the packet
+# does match those DROPs, and is only saved because the DNS ACCEPT sits above them.
+line_of() { grep -nxF -m1 -- "$1" "$S1/rules" | cut -d: -f1 || true; }
+for proto in udp tcp; do
+  check "a $proto/53 packet from the sandbox to the resolver is ACCEPTed by the chain" \
+    "ACCEPT" "$(first_match docker0 eth0 "$RESOLVER" "$proto" 53)"
+  if accept_matches docker0 eth0 "$RESOLVER" "$proto" 53; then
+    ok "a $proto/53 packet to the resolver matches an owned ACCEPT"
+  else
+    bad "a $proto/53 packet from the sandbox to the resolver matches no ACCEPT (sandbox DNS breaks)"
+  fi
+  if drop_matches docker0 eth0 "$RESOLVER" "$proto" 53; then
+    accept_line="$(line_of "$(accept_sandbox_dns "$proto")")"
+    drop_line="$(line_of "$MATCHED_RULE")"
+    if [[ -n "$accept_line" && -n "$drop_line" ]] && (( accept_line < drop_line )); then
+      ok "the DROP that would swallow a $proto/53 answer sits below the DNS ACCEPT"
+    else
+      bad "the DROP for $proto/53 (line ${drop_line:-?}) is not below the DNS ACCEPT (line ${accept_line:-?})"
+    fi
+  else
+    ok "no DROP rule matches a $proto/53 packet to the resolver"
+  fi
+done
+
+# CASE B: anything else to the same address is still dropped. This is the case
+# that fails if either DNS ACCEPT loses its port match or is widened to a range.
+for dport in 443 8080; do
+  check "a tcp/$dport packet from the sandbox to the resolver is DROPped by the chain" \
+    "DROP" "$(first_match docker0 eth0 "$RESOLVER" tcp "$dport")"
+  if accept_matches docker0 eth0 "$RESOLVER" tcp "$dport"; then
+    bad "a tcp/$dport packet to the resolver matches an ACCEPT ($MATCHED_RULE)"
+  else
+    ok "a tcp/$dport packet to the resolver matches no ACCEPT"
+  fi
+done
+
+# The matcher must be able to spot a widened rule, or the two cases above would
+# pass for the wrong reason: a `--dports` list and a `--dport` range that reach
+# 443 must both match a 443 packet, which is what makes Case B fail on a widened
+# rule.
+check "a --dports list containing 443 matches a 443 packet" "match" \
+  "$(tokens_match "-i docker0 -p tcp -m multiport --dports 53,443 -m comment --comment $TAG -j ACCEPT" \
+     docker0 eth0 "$RESOLVER" tcp 443 && echo match || echo no-match)"
+check "a --dports list without 443 does not match a 443 packet" "no-match" \
+  "$(tokens_match "-i docker0 -p tcp -m multiport --dports 53,853 -m comment --comment $TAG -j ACCEPT" \
+     docker0 eth0 "$RESOLVER" tcp 443 && echo match || echo no-match)"
+check "a --dport range reaching 443 matches a 443 packet" "match" \
+  "$(tokens_match "-i docker0 -p tcp --dport 0:65535 -m comment --comment $TAG -j ACCEPT" \
+     docker0 eth0 "$RESOLVER" tcp 443 && echo match || echo no-match)"
+check "a -p udp rule does not match a tcp packet" "no-match" \
+  "$(tokens_match "-i docker0 -p udp --dport 53 -m comment --comment $TAG -j ACCEPT" \
+     docker0 eth0 "$RESOLVER" tcp 53 && echo match || echo no-match)"
+
 
 # ---------------------------------------------------------------------------
 echo
