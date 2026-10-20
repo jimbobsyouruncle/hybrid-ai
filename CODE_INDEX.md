@@ -526,6 +526,7 @@
 - bad()
 - check()
 - run_install()
+- firewall_sudo()
 
 ## scripts/test-read-probe.sh
 - ok()
