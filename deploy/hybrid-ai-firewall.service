@@ -6,20 +6,24 @@
 #   install time; they have to be re-added after Docker is up. This unit does
 #   that after every reboot.
 #
-#   It installs the three tagged rules scripts/sandbox-firewall.sh owns: one
-#   ACCEPT for the docker0-gateway webhook path on the OpenHands port, and two
-#   DROPs that keep sandbox ports off the LAN and keep sandboxes off the other
-#   Docker networks. The script is idempotent and never touches a foreign rule,
-#   so running it again after a manual apply is a no-op.
+#   It installs the tagged rule set scripts/sandbox-firewall.sh owns: the
+#   control-path ACCEPTs, the two DNS ACCEPTs (UDP/53 and TCP/53) that sit above
+#   the CIDR DROPs, and the DROPs that keep sandbox ports off the LAN, keep
+#   sandboxes off the RFC1918 supernets, the Tailscale/CGNAT range and the other
+#   Docker networks. The script owns 14 rules in total and is idempotent: it
+#   never touches a foreign rule, so running it again after a manual apply is a
+#   no-op.
 #
 #   It runs AFTER docker.service and Wants= it, so DOCKER-USER exists. If Docker
 #   still has not created the chain, the script exits 4 with a clear message and
 #   the unit fails loudly rather than pretending the host is protected. That is
 #   deliberate: a silent success here would leave the sandbox ports open.
 #
-#   BOOT-ONLY. The unit is enabled by scripts/bootstrap.sh and by nothing else.
-#   The privileged deploy path (install.sh, scripts/deploy-remote.sh) calls the
-#   script directly, after the compose stack is up.
+#   BOOT PERSISTENCE ONLY: nothing here starts the rules during a deploy. The
+#   unit is installed and enabled by scripts/bootstrap.sh and by install.sh on
+#   every deploy. The deploy path (install.sh, scripts/deploy-remote.sh) also
+#   calls the script directly, after the compose stack is up, to apply the rules
+#   for that run.
 #
 #   NO Restart= AT ALL, for the same reason as the deploy unit: a retry loop on
 #   a firewall unit can flap the host's filter table. A failure stays visible in

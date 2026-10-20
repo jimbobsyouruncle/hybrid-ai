@@ -789,9 +789,13 @@ sudo ./scripts/sandbox-firewall.sh apply
 ```
 
 The script is idempotent — it adds only what is missing and leaves every other rule
-untouched. Re-running `./install.sh` also applies it, and so does a deploy. For the boot unit,
-either re-run `install.sh` or reboot: `hybrid-ai-firewall.service` re-applies the rules after
-`docker.service` on every boot. If the unit is not enabled yet:
+untouched. Re-running `./install.sh` also applies it, and so does a deploy.
+
+For the boot unit, `install.sh` installs and enables `hybrid-ai-firewall.service` on
+every deploy, so a normal deploy leaves it enabled and it re-applies the rules after
+`docker.service` on every boot. Re-run `./install.sh` as root (or reboot) to pick that up.
+The manual command below is the fallback for a host that has not deployed since the
+unit was added, or where the install step warned (for example it ran without root):
 
 ```bash
 sudo systemctl enable --now hybrid-ai-firewall.service
