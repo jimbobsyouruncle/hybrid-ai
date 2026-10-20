@@ -425,16 +425,24 @@ run_parent_apply() { # state-file
 }
 
 STATE_PRESENT="$FIXDIR/chain.present"
-: > "$STATE_PRESENT"
+# Two pre-DNAT rules a previous release installed. The parent script prepends
+# and never deletes, so this is exactly the chain an upgraded host carries, and
+# it is the chain doctor.sh's 5a2 check still keys on. Seeded first, then the
+# real parent run prepends today's rules above them.
+LEGACY_ACCEPT="-i docker0 -p tcp -d 172.17.0.1 --dport 3001 -m comment --comment hybrid-ai-sandbox-egress -j ACCEPT"
+LEGACY_STACK_DROP="-i docker0 ! -o docker0 -m comment --comment hybrid-ai-sandbox-egress -j DROP"
+LEGACY=2
+printf '%s\n%s\n' "$LEGACY_ACCEPT" "$LEGACY_STACK_DROP" > "$STATE_PRESENT"
 run_parent_apply "$STATE_PRESENT"
 if [[ "$RC" != "0" ]]; then
   fail "scripts/sandbox-firewall.sh apply exited ${RC}: $(tail -1 "$WORK/parent-apply.log")"
 fi
+
 CHAIN_LINES="$(grep -c . "$STATE_PRESENT" 2>/dev/null || true)"
-if [[ "${CHAIN_LINES:-0}" == "3" ]]; then
-  pass "parent script applied 3 rules to the stubbed DOCKER-USER chain"
+if [[ "${CHAIN_LINES:-0}" == "$(( 6 + LEGACY ))" ]]; then
+  pass "parent script added 6 rules above the 2 legacy rules in the stub chain"
 else
-  fail "parent script recorded ${CHAIN_LINES:-0} rules, expected 3"
+  fail "parent script left ${CHAIN_LINES:-0} rules, expected $(( 6 + LEGACY ))"
 fi
 
 # Two "missing" fixtures derived from the real recording, so their shape is the
@@ -443,7 +451,8 @@ STATE_NONE="$FIXDIR/chain.none"
 : > "$STATE_NONE"
 STATE_NOACCEPT="$FIXDIR/chain.noaccept"
 grep -Fv -- ' -j ACCEPT' "$STATE_PRESENT" > "$STATE_NOACCEPT" 2>/dev/null || : > "$STATE_NOACCEPT"
-if [[ "$(grep -c . "$STATE_NOACCEPT" 2>/dev/null || echo 0)" == "2" ]]; then
+ACCEPTS="$(grep -c -- ' -j ACCEPT' "$STATE_PRESENT" || true)"
+if [[ "$(grep -c . "$STATE_NOACCEPT" 2>/dev/null || echo 0)" == "$(( CHAIN_LINES - ACCEPTS ))" ]]; then
   pass "derived an 'only the webhook ACCEPT missing' fixture from the recorded chain"
 else
   fail "could not derive the 'ACCEPT missing' fixture from the recorded chain"

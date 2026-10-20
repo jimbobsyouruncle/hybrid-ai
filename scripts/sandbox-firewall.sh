@@ -4,27 +4,41 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 # FILE: scripts/sandbox-firewall.sh
 # PURPOSE (plain English):
-#   Closes the sandbox port exposure. OpenHands publishes each sandbox agent
-#   server on a random host port, and those ports currently answer on every
-#   interface. This script puts two DROP rules in Docker's DOCKER-USER chain so
-#   the sandbox ports are reachable from the Docker bridge only:
+#   Keeps the agent sandbox ports closed to the LAN and the tailnet while
+#   leaving every control path the stack actually uses open.
 #
-#     1. Traffic forwarded INTO docker0 from any interface other than loopback
-#        is dropped, so a LAN or tailnet client cannot reach a sandbox port.
-#     2. Traffic FROM docker0 to any other Docker network is dropped, so a
-#        sandbox cannot pivot onto the stack networks.
+#   THE TOPOLOGY. The OpenHands app is a container (hybrid-ai-openhands) joined
+#   to two Docker networks, `hybrid-ai` and `coder-net` (see
+#   openhands/docker-compose.openhands.yml). Each network shows up on the host
+#   as a bridge interface `br-<first 12 hex of the network id>`. Agent sandboxes
+#   run on `docker0`. DOCKER-USER sees forwarded packets AFTER DNAT, so a
+#   sandbox call to the app arrives with the app container's address and the
+#   container port 3000 -- never the docker0 gateway and never the published
+#   host port 3001.
 #
-#   THE ONE EXCEPTION. The OpenHands app server is published on the docker0
-#   gateway at 172.17.0.1:${OPENHANDS_PORT:-3001} for sandbox webhooks (see
-#   openhands/docker-compose.openhands.yml). Exactly one ACCEPT rule keeps that
-#   path open. It is inserted immediately before the docker0-to-networks DROP,
-#   so the DROP cannot swallow it. Nothing else is excepted.
+#   THE PATHS THAT MUST WORK:
+#     1. app -> sandbox: the control ports in SANDBOX_CONTROL_PORTS, from each
+#        app bridge into docker0 (agent-server, VSCode and the workers).
+#     2. sandbox -> app: TCP 3000 from docker0 to each app bridge, for webhooks
+#        and for the secret fetch (/api/v1/webhooks/secrets) that conversation
+#        creation performs.
+#     3. sandbox -> internet: the model endpoint, git and package mirrors. This
+#        egress is DELIBERATELY PERMITTED. It is required, not an oversight:
+#        without it a sandbox boots, reaches READY, then records
+#        `prompt_tokens: 0` with no actions.
+#     4. the stateful return path for all of the above.
 #
-#   LOOPBACK IS UNTOUCHED. Every rule that could match loopback carries
-#   `! -i lo`, and no rule matches `-o lo`. The SSH-tunnel and Tailscale path to
-#   the loopback-only OpenHands UI (127.0.0.1:${OPENHANDS_PORT:-3001}) therefore
-#   keeps working. The only rule without an `! -i lo` guard is the docker0-to-
-#   networks DROP, which matches `-i docker0` and so can never match loopback.
+#   THE PATHS THAT MUST NOT WORK:
+#     * LAN and tailnet clients reaching a sandbox port (the inbound drop into
+#       docker0, unchanged).
+#     * a sandbox pivoting onto the stack networks that host the app.
+#     * a sandbox reaching the LAN or the tailnet, closed explicitly by
+#       destination rather than as a side effect of the stack drops.
+#
+#   LOOPBACK IS UNTOUCHED. No owned rule matches `-o lo`, and the only rule
+#   without a positive `-i` match carries `! -i lo`. The SSH-tunnel and Tailscale
+#   path to the loopback-only OpenHands UI keeps working, and its return traffic
+#   is covered by the stateful ACCEPT.
 #
 #   IDEMPOTENT, AND IT NEVER TOUCHES A FOREIGN RULE. Each rule this script owns
 #   carries the comment tag below. Before inserting, the script checks for the
@@ -32,9 +46,14 @@ set -Eeuo pipefail
 #   flush, no delete and no chain removal anywhere. Rules inserted by Docker,
 #   by another tool, or by hand survive byte-untouched.
 #
-#   WHY `-I DOCKER-USER 1`. Rules are prepended rather than appended so a
-#   foreign `-j RETURN` earlier in the chain cannot bypass the drops. Docker
-#   keeps DOCKER-USER for rules it does not manage, so this is safe to repeat.
+#   ORDERING. Every owned ACCEPT is kept strictly above every owned DROP, so no
+#   drop can swallow an accepted path. Rules are prepended, which also keeps
+#   them above a foreign `-j RETURN`. After applying, the script reads
+#   DOCKER-USER back and exits non-zero if that invariant does not hold.
+#
+#   DEGRADED PATHS. A missing `docker`, or a network whose id cannot be read,
+#   skips that network's bridge rules with a warning naming the network, and
+#   still exits 0: this script must never block a boot.
 #
 #   PERSISTENCE. This script is not persistent on its own. It is applied by the
 #   privileged deploy path (install.sh and scripts/deploy-remote.sh) after the
@@ -49,6 +68,7 @@ set -Eeuo pipefail
 #
 # EXIT CODES:
 #   0  rules present (some added, or all already present)
+#   1  the ordering self-check found an owned ACCEPT below an owned DROP
 #   2  bad usage
 #   3  iptables is not installed
 #   4  the DOCKER-USER chain does not exist (Docker is not up yet)
@@ -57,9 +77,24 @@ set -Eeuo pipefail
 
 readonly TAG="hybrid-ai-sandbox-egress"
 readonly CHAIN="DOCKER-USER"
-readonly DOCKER0_GATEWAY="172.17.0.1"
-readonly SANDBOX_PORT="${OPENHANDS_PORT:-3001}"
 readonly IPT_LOCK_WAIT="5"
+
+# The Docker networks the app container is attached to. Each resolves to a host
+# bridge interface: `br-` + the first 12 hex characters of its network id.
+readonly APP_NETWORKS=(hybrid-ai coder-net)
+
+# Sandbox ports the app must reach: 8000 is the agent-server (doctor.sh:854),
+# 8001 is VSCode, and 8011 / 8012 are the workers (live observation on the host).
+readonly SANDBOX_CONTROL_PORTS="8000,8001,8011,8012"
+
+# The app container's own HTTP port, as DOCKER-USER sees it after DNAT.
+readonly APP_WEB_PORT="3000"
+
+# Destinations a sandbox may never reach. The three RFC1918 supernets cover
+# docker0, both app bridges, the LAN and any operator subnet; 100.64.0.0/10 is
+# the Tailscale/CGNAT range, i.e. the tailnet. Everything else -- the model
+# endpoint, GitHub, package mirrors -- is deliberately allowed.
+readonly SANDBOX_BLOCKED_DESTS=("10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10")
 
 usage() {
   printf 'usage: %s apply\n' "${0##*/}" >&2
@@ -75,7 +110,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 if ! command -v iptables >/dev/null 2>&1; then
-  printf 'sandbox-firewall: iptables is not installed; cannot apply the sandbox drops.\n' >&2
+  printf 'sandbox-firewall: iptables is not installed; cannot apply the sandbox rules.\n' >&2
   exit 3
 fi
 
@@ -86,17 +121,55 @@ if ! "${IPT[@]}" -S "$CHAIN" >/dev/null 2>&1; then
   exit 4
 fi
 
-# External interfaces into docker0. `-i docker0` cannot be added as a second
-# negative interface match (iptables allows one -i), and docker0 to docker0 is
-# not a routable path, so `! -i lo` is the whole guard.
-RULE_EXTERNAL_TO_DOCKER0=(! -i lo -o docker0 -m comment --comment "$TAG" -j DROP)
+# -- Bridge discovery -------------------------------------------------------
+# A degraded resolution is a warning, never a failure: the rest of the rules
+# are still worth installing, and a boot must not stop here.
+resolve_bridge() { # network-name -> bridge interface on stdout, non-zero if unknown
+  local net="$1" id
+  id="$(docker network inspect -f '{{.Id}}' "$net" 2>/dev/null)" || return 1
+  [[ -n "$id" ]] || return 1
+  printf 'br-%s\n' "${id:0:12}"
+}
 
-# The single webhook exception: the docker0 gateway on the OpenHands port.
-RULE_WEBHOOK_ACCEPT=(-i docker0 -p tcp -d "$DOCKER0_GATEWAY" --dport "$SANDBOX_PORT"
-                     -m comment --comment "$TAG" -j ACCEPT)
+BRIDGES=()
+for net in "${APP_NETWORKS[@]}"; do
+  if ! command -v docker >/dev/null 2>&1; then
+    printf 'sandbox-firewall: docker is not installed; skipping the bridge rules for network %s.\n' "$net" >&2
+    continue
+  fi
+  br="$(resolve_bridge "$net" || true)"
+  if [[ -z "$br" ]]; then
+    printf 'sandbox-firewall: could not resolve network %s; skipping its bridge rules.\n' "$net" >&2
+    continue
+  fi
+  BRIDGES+=("$br")
+done
 
-# docker0 out to any bridge that is not docker0.
-RULE_DOCKER0_TO_NETWORKS=(-i docker0 ! -o docker0 -m comment --comment "$TAG" -j DROP)
+# -- Rule set, top to bottom ------------------------------------------------
+# The stateful ACCEPT is first: it is the return path for every accepted flow.
+RULES=("-m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment $TAG -j ACCEPT")
+
+# App -> sandbox control ports, and sandbox -> app webhooks and secret fetches.
+for br in "${BRIDGES[@]}"; do
+  RULES+=("-i $br -o docker0 -p tcp -m multiport --dports $SANDBOX_CONTROL_PORTS -m comment --comment $TAG -j ACCEPT")
+  RULES+=("-i docker0 -o $br -p tcp --dport $APP_WEB_PORT -m comment --comment $TAG -j ACCEPT")
+done
+
+# Stack containment: one drop per app bridge. A blanket `! -o docker0` would
+# also cut the sandbox off from the internet, which agents require.
+for br in "${BRIDGES[@]}"; do
+  RULES+=("-i docker0 -o $br -m comment --comment $TAG -j DROP")
+done
+
+# Sandbox -> LAN and sandbox -> tailnet, closed explicitly.
+for dest in "${SANDBOX_BLOCKED_DESTS[@]}"; do
+  RULES+=("-i docker0 -d $dest -m comment --comment $TAG -j DROP")
+done
+
+# Inbound into docker0 from anywhere but loopback. `-i docker0` cannot be added
+# as a second negative interface match (iptables allows one -i), and docker0 to
+# docker0 is not a routable path, so `! -i lo` is the whole guard.
+RULES+=("! -i lo -o docker0 -m comment --comment $TAG -j DROP")
 
 added=0
 present=0
@@ -114,13 +187,51 @@ apply_rule() {
   added=$(( added + 1 ))
 }
 
-# Insert in reverse so the final order is:
-#   1. ACCEPT docker0 gateway:${SANDBOX_PORT}
-#   2. DROP docker0 -> other networks
-#   3. DROP external -> docker0
-apply_rule "${RULE_EXTERNAL_TO_DOCKER0[@]}"
-apply_rule "${RULE_DOCKER0_TO_NETWORKS[@]}"
-apply_rule "${RULE_WEBHOOK_ACCEPT[@]}"
+# Insert bottom-up, so the chain ends in the order RULES was written.
+for (( idx = ${#RULES[@]} - 1; idx >= 0; idx-- )); do
+  read -r -a rule <<< "${RULES[idx]}"
+  apply_rule "${rule[@]}"
+done
+
+# -- Ordering self-check ----------------------------------------------------
+# Read the chain back: no ACCEPT this run installed may sit below a DROP it
+# installed, because a drop above an accept silently swallows the path the
+# accept was there to open. Only rules in the current set count: a tagged rule
+# left by a previous release is not ours to judge and is never deleted, so it is
+# reported for hand removal instead of failing every boot.
+is_owned() { # rule-line with the "-A CHAIN " prefix already stripped
+  local candidate="$1" own
+  for own in "${RULES[@]}"; do
+    [[ "$candidate" == "$own" ]] && return 0
+  done
+  return 1
+}
+
+listing="$("${IPT[@]}" -S "$CHAIN" 2>/dev/null || true)"
+pos=0
+first_drop=0
+last_accept=0
+line_prefix="-A $CHAIN "
+while IFS= read -r line; do
+  pos=$(( pos + 1 ))
+  [[ "$line" == *"$TAG"* ]] || continue
+  body="${line#"$line_prefix"}"
+  if ! is_owned "$body"; then
+    printf 'sandbox-firewall: note: stale tagged rule left in %s by a previous release (this script never deletes; remove it by hand if unwanted): %s\n' "$CHAIN" "$body"
+    continue
+  fi
+  if [[ "$body" == *"-j ACCEPT"* ]]; then
+    last_accept=$pos
+  elif [[ "$body" == *"-j DROP"* ]] && (( first_drop == 0 )); then
+    first_drop=$pos
+  fi
+done <<< "$listing"
+
+if (( first_drop > 0 && last_accept > first_drop )); then
+  printf 'sandbox-firewall: ordering self-check FAILED: an ACCEPT tagged %s sits at position %d, below a DROP tagged %s at position %d.\n' \
+    "$TAG" "$last_accept" "$TAG" "$first_drop" >&2
+  exit 1
+fi
 
 total=$(( added + present ))
 if (( added == 0 )); then

@@ -143,6 +143,17 @@ jobs:
         # the check.
         run: bash scripts/test-doctor-sandbox-firewall.sh
 
+      - name: Sandbox firewall tests
+        # Offline. RUNS scripts/sandbox-firewall.sh against stubbed docker and
+        # iptables to prove the bridge-scoped rule set: the stateful conntrack
+        # ACCEPT above every owned DROP, app->sandbox control ports and
+        # sandbox->app tcp/3000 per app bridge resolved from `docker network
+        # inspect`, one stack DROP per bridge, LAN/tailnet destination DROPs,
+        # no dead pre-DNAT 3001 rule and no blanket `! -o docker0`, idempotency,
+        # foreign rules preserved, an unresolvable network warned about and
+        # still exit 0, and the ordering self-check failing loudly.
+        run: bash scripts/test-sandbox-firewall.sh
+
       - name: Deploy-remote tests
         # Offline. Proves scripts/deploy-remote.sh refuses a wrong revision
         # before running install.sh, and maps doctor.sh's exit code correctly.
