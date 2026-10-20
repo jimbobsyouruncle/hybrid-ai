@@ -140,3 +140,4 @@
 - status/Caddyfile
 - status/README.md - status/ — Status Page
 - status/app.py - FILE: status/app.py
+<!-- spike 2026-10-20: deliberate staleness -->
