@@ -385,9 +385,11 @@ check "no DROP besides that one lacks an -i constraint" "0" \
   "$(grep -- '-j DROP' "$S1/rules" | grep -v -- '! -i lo' | grep -cv -- '-i docker0' || true)"
 
 ip_to_int() {
-  local IFS=. a b c d
-  read -r a b c d <<< "$1"
-  printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+  local octets="$1" a b c d
+  a="${octets%%.*}"; octets="${octets#*.}"
+  b="${octets%%.*}"; octets="${octets#*.}"
+  c="${octets%%.*}"; d="${octets#*.}"
+  printf '%s' "$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))"
 }
 
 cidr_matches() { # ip cidr
