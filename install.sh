@@ -26,7 +26,8 @@
 #      true) in .env, or pass --wake-runpod for a single run. Off by default.
 #   8. Creates the data folders if they do not exist (never overwrites them).
 #   9. Writes the .env file with locked-down permissions.
-#  10. Starts the core stack, OpenHands, Hermes Agent, and status reverse proxy.
+#  10. Starts the core stack, OpenHands, Hermes Agent, and status reverse proxy,
+#      then closes the sandbox port exposure with DOCKER-USER drops.
 #  11. Verifies local DNS resolution for your subdomains and gives exact Pi-hole rules.
 #
 # HOW TO RUN IT:
@@ -157,6 +158,7 @@ ok "tailscale $(tailscale version 2>/dev/null | head -n1 || echo '?')"
 
 # --- Make our own helper scripts executable --------------------------------
 for _s in scripts/setup-agent-workspace.sh scripts/sync-agent-repos.sh \
+          scripts/sandbox-firewall.sh \
           openhands/scripts/openhands-control.sh \
           doctor.sh collect-diagnostics.sh backup/backup.sh backup/restore.sh \
           runpod/start.sh; do
@@ -805,7 +807,9 @@ prepare_openhands_workspace() {
 prepare_openhands_workspace || warn "OpenHands workspace ACLs not applied (needs sudo). Re-run ./install.sh interactively, then check with ./doctor.sh"
 
 if (( NO_START )); then
-  hr; ok "--no-start requested. Environment prepared; Docker untouched."; hr
+  hr; ok "--no-start requested. Environment prepared; Docker untouched."
+  warn "Sandbox firewall rules not applied: DOCKER-USER does not exist until Docker starts. hybrid-ai-firewall.service applies them at boot."
+  hr
   exit 0
 fi
 
@@ -856,6 +860,35 @@ if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
   die "Control plane did not start."
 fi
 event "stack_started"
+
+# ---------------------------------------------------------------------------
+# STEP 9b. Close the sandbox port exposure
+# ---------------------------------------------------------------------------
+# Docker only creates DOCKER-USER once the daemon is up, so this runs after the
+# stack starts. install.sh already runs as root in the deploy path, so the
+# script is called directly and never through sudo. A host without the chain
+# (for example Docker present but not running) is a warning, not a failure:
+# hybrid-ai-firewall.service applies the same rules at the next boot.
+log "Applying sandbox firewall rules..."
+FIREWALL_RC=0
+if [[ -x "${APP_DIR}/scripts/sandbox-firewall.sh" ]]; then
+  "${APP_DIR}/scripts/sandbox-firewall.sh" apply || FIREWALL_RC=$?
+else
+  FIREWALL_RC=127
+fi
+case "$FIREWALL_RC" in
+  0)
+    event "sandbox_firewall_applied"
+    ;;
+  4)
+    event "sandbox_firewall_skipped" "reason=no-docker-user"
+    warn "DOCKER-USER does not exist yet, so the sandbox firewall rules were not applied. hybrid-ai-firewall.service applies them at boot."
+    ;;
+  *)
+    event "sandbox_firewall_failed" "rc=${FIREWALL_RC}"
+    warn "scripts/sandbox-firewall.sh exited ${FIREWALL_RC}; sandbox ports may still be reachable. Re-run it by hand as root."
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # STEP 10. Verify service health and check local DNS resolution

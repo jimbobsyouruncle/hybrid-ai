@@ -77,6 +77,30 @@ sleep 20
 echo "==> Post-deploy verification"
 "${COMPOSE[@]}" ps
 
+# --- Sandbox firewall --------------------------------------------------------
+# Docker has created DOCKER-USER by now (the stack is up), so the sandbox drops
+# can be re-applied. This deploy path runs as root, so the script is called
+# directly; it needs no sudo. The script is idempotent, so a host that already
+# carries the rules (the boot unit put them there) changes nothing.
+echo "==> Applying sandbox firewall rules"
+firewall_rc=0
+if [[ -x "${APP_DIR}/scripts/sandbox-firewall.sh" ]]; then
+  "${APP_DIR}/scripts/sandbox-firewall.sh" apply || firewall_rc=$?
+else
+  echo "::warning::scripts/sandbox-firewall.sh is missing or not executable; the sandbox drops were not applied."
+  firewall_rc=127
+fi
+case "$firewall_rc" in
+  0)
+    ;;
+  4)
+    echo "::warning::DOCKER-USER does not exist yet; hybrid-ai-firewall.service applies the sandbox drops at boot."
+    ;;
+  *)
+    echo "::warning::sandbox-firewall.sh exited ${firewall_rc}; sandbox ports may still be reachable on the LAN."
+    ;;
+esac
+
 # Poll the health endpoint for up to two minutes. If it never comes back, dump
 # the last 50 log lines so the failure is diagnosable from the Actions output.
 for i in $(seq 1 12); do

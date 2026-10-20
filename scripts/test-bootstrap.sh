@@ -268,6 +268,8 @@ exit "${PREFLIGHT_RC:-0}"
 EOF
 printf '# fixture deploy unit\n[Service]\nUser=root\n' > "$GIT_FIXTURE_SRC/deploy/hybrid-ai-deploy@.service"
 printf '// fixture polkit rule\n' > "$GIT_FIXTURE_SRC/deploy/50-hybrid-ai-deploy.rules"
+printf '# fixture firewall unit\n[Service]\nExecStart=/opt/hybrid-ai/scripts/sandbox-firewall.sh apply\n' \
+  > "$GIT_FIXTURE_SRC/deploy/hybrid-ai-firewall.service"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$GIT_FIXTURE_SRC/scripts/deploy-forced-command.sh"
 chmod +x "$GIT_FIXTURE_SRC/install.sh" "$GIT_FIXTURE_SRC/doctor.sh" \
          "$GIT_FIXTURE_SRC/scripts/check-hermes-nonroot.sh" \
@@ -363,6 +365,9 @@ check "etc dir mode" "755" "$(stat -c '%a' "$R1/etc/hybrid-ai" 2>/dev/null)"
 check "credstore mode" "700" "$(stat -c '%a' "$R1/etc/credstore/hybrid-ai-backup" 2>/dev/null)"
 check "deploy unit installed" "yes" "$([[ -f "$R1/etc/systemd/system/hybrid-ai-deploy@.service" ]] && echo yes)"
 check "polkit rule installed" "yes" "$([[ -f "$R1/etc/polkit-1/rules.d/50-hybrid-ai-deploy.rules" ]] && echo yes)"
+check "firewall unit installed" "yes" "$([[ -f "$R1/etc/systemd/system/hybrid-ai-firewall.service" ]] && echo yes)"
+have "bootstrap enabled the firewall unit" "$(cat "$EVENTS")" \
+  "systemctl enable hybrid-ai-firewall.service"
 check "authorized_keys mode" "600" "$(stat -c '%a' "$R1/var/lib/hybrid-ai-deploy/.ssh/authorized_keys" 2>/dev/null)"
 check "authorized_keys line is the forced command" "1" \
   "$(grep -c "restrict,command=\"$R1/opt/hybrid-ai/scripts/deploy-forced-command.sh\"" "$R1/var/lib/hybrid-ai-deploy/.ssh/authorized_keys" 2>/dev/null)"
@@ -1146,11 +1151,31 @@ if grep -qE 'ssh-keygen|openssl[[:space:]]+rand' "$REPO/deploy/hybrid-ai-deploy@
 else
   ok "the deploy unit contains no key generation command"
 fi
-# The deploy unit is installed but never enabled by the bootstrap.
-if grep -qE 'systemctl[[:space:]]+enable' "$BOOTSTRAP"; then
-  bad "scripts/bootstrap.sh enables a unit (the deploy unit must never be enabled)"
+# The deploy unit is installed but NEVER enabled by the bootstrap. The firewall
+# unit is the deliberate exception: it must run at every boot, after Docker has
+# created DOCKER-USER.
+if grep -qE 'systemctl[[:space:]]+enable[[:space:]]+hybrid-ai-deploy' "$BOOTSTRAP"; then
+  bad "scripts/bootstrap.sh enables the deploy unit (it must never be enabled)"
 else
-  ok "scripts/bootstrap.sh never enables a unit"
+  ok "scripts/bootstrap.sh never enables the deploy unit"
+fi
+if grep -qE 'systemctl[[:space:]]+enable[[:space:]]+hybrid-ai-firewall\.service' "$BOOTSTRAP"; then
+  ok "scripts/bootstrap.sh enables the firewall unit"
+else
+  bad "scripts/bootstrap.sh does not enable hybrid-ai-firewall.service"
+fi
+# Count only the executed command, not the warning text that quotes it.
+check "bootstrap enables exactly one unit (the firewall)" "1" \
+  "$(grep -E 'systemctl[[:space:]]+enable' "$BOOTSTRAP" | grep -cv 'run: systemctl')"
+if grep -qE '^ExecStart=-' "$REPO/deploy/hybrid-ai-firewall.service"; then
+  bad "the firewall unit hides failures with a leading - on ExecStart"
+else
+  ok "the firewall unit does not hide ExecStart failures"
+fi
+if grep -qE '^Restart=' "$REPO/deploy/hybrid-ai-firewall.service"; then
+  bad "the firewall unit has a Restart= policy"
+else
+  ok "the firewall unit has no Restart= policy"
 fi
 # The bootstrap must never call ssh-keygen or write an sshd_config.
 if grep -qE 'sshd_config' "$BOOTSTRAP" && ! grep -q 'does not edit' "$BOOTSTRAP"; then

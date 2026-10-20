@@ -472,6 +472,28 @@ install -m 0644 "$APP_DIR/deploy/50-hybrid-ai-deploy.rules" \
   || die 1 "could not install the polkit rule"
 ok "Installed 50-hybrid-ai-deploy.rules into ${POLKIT_DIR} (0644)."
 
+# --- 8b. Sandbox firewall unit ---------------------------------------------
+# Unlike the deploy unit above, this one IS enabled: Docker recreates the
+# DOCKER-USER chain on every boot, so the sandbox drops have to be re-applied
+# after docker.service starts. The script is idempotent, so the boot unit and
+# the deploy path can both run it.
+install -m 0644 "$APP_DIR/deploy/hybrid-ai-firewall.service" \
+  "${SYSTEMD_DIR}/hybrid-ai-firewall.service" \
+  || die 1 "could not install the sandbox firewall unit"
+ok "Installed hybrid-ai-firewall.service (0644)."
+
+# Guarded like the systemctl calls below: a host without systemd still gets the
+# file, and the warning says how to finish the job by hand.
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl enable hybrid-ai-firewall.service >/dev/null 2>&1; then
+    ok "Enabled hybrid-ai-firewall.service (applies the drops at every boot)."
+  else
+    warn "Could not enable hybrid-ai-firewall.service; run: systemctl enable hybrid-ai-firewall.service"
+  fi
+else
+  warn "systemctl not found; hybrid-ai-firewall.service is installed but not enabled."
+fi
+
 command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reload polkit >/dev/null 2>&1 || systemctl restart polkit >/dev/null 2>&1 || \
   warn "Could not reload polkit; reload it by hand: systemctl reload polkit"
@@ -758,6 +780,21 @@ if ! run_install; then
   die 7 "install.sh failed; nothing was cut over"
 fi
 ok "install.sh finished."
+
+# install.sh has started Docker by now, so DOCKER-USER exists and the sandbox
+# drops can be applied once here. bootstrap is already root and must not call
+# sudo. A failure is a warning, not a stop: the enabled boot unit re-applies the
+# same idempotent rules, and "never weaken the rules" cuts the other way -- a
+# silent skip would be worse than a loud warning.
+if [[ -x "${APP_DIR}/scripts/sandbox-firewall.sh" ]]; then
+  if "${APP_DIR}/scripts/sandbox-firewall.sh" apply; then
+    ok "Sandbox firewall rules applied."
+  else
+    warn "Sandbox firewall rules were not applied; hybrid-ai-firewall.service will apply them at the next boot."
+  fi
+else
+  warn "scripts/sandbox-firewall.sh is missing or not executable; the boot unit cannot apply the rules either."
+fi
 
 log "Running the health gate (${APP_DIR}/doctor.sh --no-cloud)..."
 # Map doctor.sh's documented exit-code contract (0 healthy, 1 warnings only,
