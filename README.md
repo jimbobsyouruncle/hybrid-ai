@@ -105,7 +105,11 @@ Host ports, and who can reach them:
 | OpenHands | `172.17.0.1:${OPENHANDS_PORT:-3001}` | Docker sandboxes only, for webhooks |
 | Status page, proxy | none (behind Caddy) | the proxy |
 
-The Hermes binds on all interfaces and the OpenHands sandbox ports are pre-existing gaps, recorded in [SECURITY.md](SECURITY.md) and [hermes/README.md](hermes/README.md); a later phase narrows them. This change adds no host binds.
+The Hermes binds on all interfaces are a pre-existing gap, recorded in [SECURITY.md](SECURITY.md) and [hermes/README.md](hermes/README.md); a later phase narrows them. This change adds no host binds.
+
+**Sandbox port containment.** OpenHands gives each sandbox agent server a random host port. Those ports used to answer on every interface. `scripts/sandbox-firewall.sh` closes them with two DROP rules in Docker's `DOCKER-USER` chain: external traffic into `docker0` is dropped, and traffic from `docker0` to the other Docker networks is dropped, so a sandbox cannot pivot onto the stack networks either. The single exception is the webhook path — one ACCEPT for the `docker0` gateway on `${OPENHANDS_PORT:-3001}` — and nothing else is excepted. Loopback is untouched: the external-to-`docker0` DROP carries `! -i lo`, and the `docker0`-to-networks DROP matches `-i docker0`, so neither can match the loopback path. The SSH tunnel and Tailscale route to the OpenHands UI on `[IP_ADDRESS]:${OPENHANDS_PORT:-3001}` keep working.
+
+The rules are re-applied on every boot by `hybrid-ai-firewall.service` and on every deploy by `install.sh` and `scripts/deploy-remote.sh`. `./doctor.sh` warns, never fails, when a rule is missing. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#sandbox-ports-reachable-from-the-lan).
 
 ---
 

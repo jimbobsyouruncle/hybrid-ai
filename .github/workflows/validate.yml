@@ -132,6 +132,17 @@ jobs:
         # check.
         run: bash scripts/test-doctor-startup-grace.sh
 
+      - name: Doctor sandbox-firewall tests
+        # Offline. RUNS doctor.sh (stubbed iptables and a recorded DOCKER-USER
+        # chain) to prove the new warning-only sandbox-firewall check: a chain
+        # applied by the REAL scripts/sandbox-firewall.sh passes, a missing rule
+        # (all three, or only the webhook ACCEPT) warns naming it and exits 1
+        # (never 2), and no iptables / an unreadable chain / an empty listing /
+        # a non-Linux host each print a skip note and leave every summary count
+        # as the baseline had it. The harness fails against a doctor.sh without
+        # the check.
+        run: bash scripts/test-doctor-sandbox-firewall.sh
+
       - name: Deploy-remote tests
         # Offline. Proves scripts/deploy-remote.sh refuses a wrong revision
         # before running install.sh, and maps doctor.sh's exit code correctly.

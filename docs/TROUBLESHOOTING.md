@@ -752,6 +752,80 @@ the host's local zone and count stale rows as recent.
 
 ---
 
+## Sandbox ports reachable from the LAN
+
+OpenHands publishes each sandbox agent server on a random host port. Without rules in
+Docker's `DOCKER-USER` chain, Docker forwards those ports from every interface, so a client
+on the LAN or the tailnet can reach a running sandbox. `scripts/sandbox-firewall.sh` closes
+that with two tagged DROP rules and keeps one ACCEPT for the webhook path.
+
+**What the doctor warning means.** A line like
+
+```
+! Sandbox firewall: DOCKER-USER is missing the DROP from external interfaces into docker0, so sandbox ports may be reachable from the LAN
+```
+
+means at least one of the three tagged rules is not in the chain. The rule that is missing
+breaks the containment that rule provided:
+
+- a missing DROP from external interfaces into `docker0` leaves the sandbox ports open;
+- a missing DROP from `docker0` to other Docker networks lets a sandbox pivot onto the stack
+  networks;
+- a missing webhook ACCEPT is not an exposure — it means sandboxes cannot deliver events,
+  usually because the `docker0` gateway in `scripts/sandbox-firewall.sh` no longer matches
+  this host.
+
+`doctor.sh` counts this as a warning, so the run exits 1, never 2. It is read-only: it never
+inserts, appends, deletes or flushes a rule.
+
+**The remedy.** As root, on the host:
+
+```bash
+sudo ./scripts/sandbox-firewall.sh apply
+```
+
+The script is idempotent — it adds only what is missing and leaves every other rule
+untouched. Re-running `./install.sh` also applies it, and so does a deploy. For the boot unit,
+either re-run `install.sh` or reboot: `hybrid-ai-firewall.service` re-applies the rules after
+`docker.service` on every boot. If the unit is not enabled yet:
+
+```bash
+sudo systemctl enable --now hybrid-ai-firewall.service
+```
+
+**Verify by hand.** The chain is root-owned, so this needs `sudo`:
+
+```bash
+sudo iptables -S DOCKER-USER
+```
+
+You should see three rules carrying `--comment "hybrid-ai-sandbox-egress"`: an ACCEPT for the
+`docker0` gateway on the OpenHands port, and two DROPs. `hybrid-ai-firewall.service` exits
+non-zero when the script cannot apply them (for example, Docker has not created
+`DOCKER-USER` yet), so a failure stays visible in `systemctl status hybrid-ai-firewall`
+rather than passing silently.
+
+**What a SKIPPED check means.** A dim line such as
+
+```
+- sandbox firewall check skipped (iptables not installed)
+```
+
+is not a failure and not a warning. It means the check could not read the chain, so it
+counted nothing and left the exit code exactly as it would have been. The reasons are:
+
+| Skip reason | Meaning |
+|---|---|
+| `not a Linux host` | `uname -s` is not Linux, so there is no iptables to read. |
+| `iptables not installed` | No `iptables` binary on `PATH`. Install it, or check on the Pi itself. |
+| `cannot read DOCKER-USER (needs root, or Docker is not up)` | The probe was refused — usually a non-root run, or Docker has not created the chain yet. Re-run with `sudo`, or start Docker. |
+| `empty DOCKER-USER listing` / `unexpected DOCKER-USER listing` | The output could not be parsed, so the check declines to guess. |
+
+To read the chain on a host where the check skipped, use `sudo iptables -S DOCKER-USER`
+directly.
+
+---
+
 ## `fatal: detected dubious ownership in repository at '/workspace/project/...'`
 
 Git inside an OpenHands sandbox refuses the mounted workspace and exits 128.
