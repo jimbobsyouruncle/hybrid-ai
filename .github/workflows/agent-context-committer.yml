@@ -1,0 +1,294 @@
+# ---------------------------------------------------------------------------
+# FILE: .github/workflows/agent-context-committer.yml
+# PURPOSE (plain English):
+#   Keeps REPO_MAP.md and CODE_INDEX.md fresh on main with no human in the
+#   loop. When a merge lands on main this job regenerates the maps with the
+#   pinned generator. If they changed it pushes a bot branch, opens a PR,
+#   waits for the two required checks, then squash-merges and deletes the
+#   branch. If they did not change it stops without touching anything.
+#
+# WHY IT DISPATCHES THE CHECKS ITSELF:
+#   A pull request opened with GITHUB_TOKEN does not trigger other workflows.
+#   GitHub suppresses those events to stop one workflow from spawning another
+#   in a loop. The required `pull_request` checks would therefore never start,
+#   so this job dispatches them explicitly at the PR head ref.
+#
+# WHY THE LOOP GUARD EXISTS:
+#   The squash-merge below is itself a push to main. Without the guard this
+#   workflow would fire again on the map-only refresh it just merged. The
+#   guard exits early when every changed path is a map file.
+#
+# WHY THE LATER STEPS CHECK THE FRESHNESS FLAG:
+#   In Actions `exit 0` only ends the current step, not the job. The guard
+#   steps record their decision in $GITHUB_ENV and every later step refuses to
+#   run unless the maps were stale. That keeps the "already fresh" and
+#   "map-only push" paths from opening a PR.
+#
+# SECRETS:
+#   None beyond the built-in GITHUB_TOKEN.
+# ---------------------------------------------------------------------------
+name: Agent context committer
+
+on:
+  push:
+    branches: [ main ]
+
+# contents: write        push the bot branch and delete it after merge
+# pull-requests: write   open and merge the refresh PR
+# actions: write         dispatch the two required workflows
+# checks: read           poll the check-runs API for the required contexts
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  checks: read
+
+# One in-flight committer run. Never cancel one mid-merge.
+concurrency:
+  group: agent-context-committer
+  cancel-in-progress: false
+
+jobs:
+  committer:
+    name: Refresh agent context maps
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Check out the generator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jimbobsyouruncle/shared-actions
+          ref: 3156ad16725e149a9baebeb71862a8d1d341418c
+          path: .shared-actions
+          persist-credentials: false
+
+      # A push that only refreshed the maps is our own merge coming back. Exit
+      # before regenerating so we cannot open a second PR for the same work.
+      - name: Loop guard
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "STALE=1" >> "$GITHUB_ENV"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "No usable 'before' SHA; skipping loop guard."
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BEFORE" "$SHA" || true)"
+          if [ -z "$changed" ]; then
+            echo "No paths changed between $BEFORE and $SHA; nothing to guard."
+            exit 0
+          fi
+          only_maps=1
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            if [ "$path" != "REPO_MAP.md" ] && [ "$path" != "CODE_INDEX.md" ]; then
+              only_maps=0
+              break
+            fi
+          done <<< "$changed"
+          if [ "$only_maps" -eq 1 ]; then
+            echo "Push touched only the agent context maps; that is our own refresh, not a new PR."
+            echo "STALE=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+      - name: Regenerate the maps in place
+        if: env.STALE == '1'
+        run: |
+          set -euo pipefail
+          if ! python3 .shared-actions/agent-context/generate.py --root . --output-dir . --max-bytes 20480; then
+            echo "::warning::agent-context committer: generator failed"
+            exit 1
+          fi
+
+      # Nothing changed means the maps were already fresh. No branch, no
+      # commit, no PR.
+      - name: No-op guard
+        if: env.STALE == '1'
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- REPO_MAP.md CODE_INDEX.md; then
+            echo "Agent context maps are already fresh; nothing to do."
+            echo "STALE=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+      - name: Commit and push the refresh
+        if: env.STALE == '1'
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short=12 "$SHA")"
+          branch="bot/agent-context-$short_sha"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add REPO_MAP.md CODE_INDEX.md
+          git commit -m "chore(agent-context): refresh maps for ${SHA}"
+          if ! git push origin "HEAD:refs/heads/$branch"; then
+            echo "::warning::agent-context committer: push failed"
+            exit 1
+          fi
+          echo "BRANCH=$branch" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$short_sha" >> "$GITHUB_ENV"
+
+      - name: Open the pull request
+        if: env.STALE == '1'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          BODY="Refresh of REPO_MAP.md and CODE_INDEX.md after merge of commit ${SHA} to main.\nGenerated by the pinned agent-context generator; required checks were dispatched at this branch's head."
+          printf '{"title": "chore(agent-context): refresh maps for %s", "head": "%s", "base": "main", "body": "%s"}' \
+            "$SHORT_SHA" "$BRANCH" "$BODY" > /tmp/pr_payload.json
+          printf '%s\n' \
+            'import json, sys' \
+            'data = json.load(open(sys.argv[1]))' \
+            'print(data.get("number", ""))' > /tmp/pr_number.py
+          code="$(curl -sS -o /tmp/pr_response.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$REPO/pulls" \
+            --data @/tmp/pr_payload.json)"
+          case "$code" in
+            2*) ;;
+            *)
+              echo "::warning::agent-context committer: PR creation failed"
+              exit 1
+              ;;
+          esac
+          pr="$(python3 /tmp/pr_number.py /tmp/pr_response.json)"
+          if [ -z "$pr" ]; then
+            echo "::warning::agent-context committer: PR creation failed"
+            exit 1
+          fi
+          echo "PR=$pr" >> "$GITHUB_ENV"
+
+      # The PR was opened with GITHUB_TOKEN, so its pull_request events are
+      # suppressed and the required checks would never start. Dispatch both
+      # workflows at the bot branch head so the ruleset contexts exist.
+      - name: Dispatch the required workflows
+        if: env.STALE == '1'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for workflow in agent-context.yml sast-checks.yml; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$workflow/dispatches" \
+              --data "{\"ref\": \"$BRANCH\"}")"
+            if [ "$code" != "204" ]; then
+              echo "::warning::agent-context committer: dispatch failed for $workflow (http $code)"
+              exit 1
+            fi
+          done
+
+      - name: Poll the required checks
+        if: env.STALE == '1'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'import json, sys' \
+            'required = ["Check agent context maps", "Security & SAST gate"]' \
+            'failures = ["failure", "cancelled", "timed_out", "action_required"]' \
+            'data = json.load(open(sys.argv[1]))' \
+            'by_name = {r.get("name"): r for r in data.get("check_runs", [])}' \
+            'for n in required:' \
+            '    r = by_name.get(n)' \
+            '    if r is not None and r.get("status") == "completed" and r.get("conclusion") in failures:' \
+            '        print("FAIL|" + n + "|" + str(r.get("conclusion")))' \
+            '        sys.exit(10)' \
+            'for n in required:' \
+            '    r = by_name.get(n)' \
+            '    if r is None or r.get("status") != "completed" or r.get("conclusion") != "success":' \
+            '        print("PENDING")' \
+            '        sys.exit(20)' \
+            'print("GREEN")' \
+            'sys.exit(0)' > /tmp/check_state.py
+          head_sha="$(git rev-parse "$BRANCH")"
+          green=0
+          attempt=0
+          while [ "$attempt" -lt 40 ]; do
+            attempt=$((attempt + 1))
+            code="$(curl -sS -o /tmp/check_runs.json -w '%{http_code}' \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPO/commits/$head_sha/check-runs?per_page=100")"
+            if [ "$code" != "200" ]; then
+              echo "::warning::agent-context committer: check-runs query failed (http $code)"
+              exit 1
+            fi
+            rc=0
+            out="$(python3 /tmp/check_state.py /tmp/check_runs.json)" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              green=1
+              break
+            fi
+            if [ "$rc" -eq 10 ]; then
+              rest="${out#FAIL|}"
+              echo "::warning::agent-context committer: required check ${rest%%|*} concluded ${rest#*|}"
+              exit 1
+            fi
+            echo "attempt $attempt/40: required checks not complete yet"
+            if [ "$attempt" -lt 40 ]; then
+              sleep 30
+            fi
+          done
+          if [ "$green" -ne 1 ]; then
+            echo "::warning::agent-context committer: timed out waiting for required checks"
+            exit 1
+          fi
+
+      - name: Squash-merge and delete the branch
+        if: env.STALE == '1'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'import json, sys' \
+            'data = json.load(open(sys.argv[1]))' \
+            'sys.exit(0 if data.get("merged") is True else 1)' > /tmp/merged.py
+          code="$(curl -sS -o /tmp/merge_response.json -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$REPO/pulls/$PR/merge" \
+            --data '{"merge_method": "squash"}')"
+          if [ "$code" != "200" ] || ! python3 /tmp/merged.py /tmp/merge_response.json; then
+            echo "::warning::agent-context committer: merge failed (http $code)"
+            exit 1
+          fi
+          del_code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$REPO/git/refs/heads/$BRANCH")"
+          if [ "$del_code" != "204" ]; then
+            echo "::warning::agent-context committer: branch deletion failed"
+          fi

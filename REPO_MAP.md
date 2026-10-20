@@ -25,6 +25,7 @@
 - .github/dependabot.yml
 ## .github/workflows
 
+- .github/workflows/agent-context-committer.yml
 - .github/workflows/agent-context.yml
 - .github/workflows/deploy.yml
 - .github/workflows/sandbox-image.yml
