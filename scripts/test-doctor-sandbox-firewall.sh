@@ -439,10 +439,10 @@ if [[ "$RC" != "0" ]]; then
 fi
 
 CHAIN_LINES="$(grep -c . "$STATE_PRESENT" 2>/dev/null || true)"
-if [[ "${CHAIN_LINES:-0}" == "$(( 6 + LEGACY ))" ]]; then
-  pass "parent script added 6 rules above the 2 legacy rules in the stub chain"
+if [[ "${CHAIN_LINES:-0}" == "$(( 8 + LEGACY ))" ]]; then
+  pass "parent script added 8 rules above the 2 legacy rules in the stub chain"
 else
-  fail "parent script left ${CHAIN_LINES:-0} rules, expected $(( 6 + LEGACY ))"
+  fail "parent script left ${CHAIN_LINES:-0} rules, expected $(( 8 + LEGACY ))"
 fi
 
 # Two "missing" fixtures derived from the real recording, so their shape is the

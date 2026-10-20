@@ -547,9 +547,15 @@
 - accept_sandbox_to_app()
 - drop_stack()
 - drop_dest()
+- accept_sandbox_dns()
 - ip_to_int()
 - cidr_matches()
+- tokens_match()
+- first_match()
+- rule_matches()
 - drop_matches()
+- accept_matches()
+- line_of()
 
 ## scripts/test-sync-agent-repos.sh
 - pass()

@@ -757,7 +757,9 @@ the host's local zone and count stale rows as recent.
 OpenHands publishes each sandbox agent server on a random host port. Without rules in
 Docker's `DOCKER-USER` chain, Docker forwards those ports from every interface, so a client
 on the LAN or the tailnet can reach a running sandbox. `scripts/sandbox-firewall.sh` closes
-that with two tagged DROP rules and keeps one ACCEPT for the webhook path.
+that with a tagged rule set: an inbound DROP into `docker0`, four CIDR DROPs for the RFC1918
+supernets and the tailnet/CGNAT range, a per-bridge DROP onto the stack networks, the
+per-bridge ACCEPTs the app and the sandboxes need, and two port-53 ACCEPTs for sandbox DNS.
 
 **What the doctor warning means.** A line like
 
@@ -765,15 +767,17 @@ that with two tagged DROP rules and keeps one ACCEPT for the webhook path.
 ! Sandbox firewall: DOCKER-USER is missing the DROP from external interfaces into docker0, so sandbox ports may be reachable from the LAN
 ```
 
-means at least one of the three tagged rules is not in the chain. The rule that is missing
-breaks the containment that rule provided:
+means at least one of the tagged rules is not in the chain. What a missing rule costs:
 
 - a missing DROP from external interfaces into `docker0` leaves the sandbox ports open;
+- a missing CIDR DROP lets a sandbox reach the LAN or the tailnet;
 - a missing DROP from `docker0` to other Docker networks lets a sandbox pivot onto the stack
   networks;
-- a missing webhook ACCEPT is not an exposure — it means sandboxes cannot deliver events,
-  usually because the `docker0` gateway in `scripts/sandbox-firewall.sh` no longer matches
-  this host.
+- a missing ACCEPT on the app path (the control ports, or sandbox to app on TCP 3000) breaks
+  conversation creation: the secret fetch and the webhook delivery both fail;
+- a missing DNS ACCEPT is not an exposure. It breaks sandbox DNS: the resolver answer comes
+  from inside the dropped RFC1918 space, so without that ACCEPT the sandbox still reaches
+  READY, then records `prompt_tokens: 0` with no actions.
 
 `doctor.sh` counts this as a warning, so the run exits 1, never 2. It is read-only: it never
 inserts, appends, deletes or flushes a rule.
@@ -799,11 +803,14 @@ sudo systemctl enable --now hybrid-ai-firewall.service
 sudo iptables -S DOCKER-USER
 ```
 
-You should see three rules carrying `--comment "hybrid-ai-sandbox-egress"`: an ACCEPT for the
-`docker0` gateway on the OpenHands port, and two DROPs. `hybrid-ai-firewall.service` exits
-non-zero when the script cannot apply them (for example, Docker has not created
-`DOCKER-USER` yet), so a failure stays visible in `systemctl status hybrid-ai-firewall`
-rather than passing silently.
+You should see 14 rules for the two bridges carrying `--comment "hybrid-ai-sandbox-egress"`:
+one conntrack ACCEPT, four per-bridge ACCEPTs (control ports and TCP 3000), two per-bridge
+DROPs, four CIDR DROPs, the two `--dport 53` ACCEPTs, and the final inbound `! -i lo -o
+docker0` DROP. The two `--dport 53` ACCEPTs must appear above all four CIDR DROPs; if they
+do not, sandbox DNS is broken and the script's ordering self-check will fail once it runs.
+`hybrid-ai-firewall.service` exits non-zero when the script cannot apply them (for example,
+Docker has not created `DOCKER-USER` yet), so a failure stays visible in `systemctl status
+hybrid-ai-firewall` rather than passing silently.
 
 **What a SKIPPED check means.** A dim line such as
 

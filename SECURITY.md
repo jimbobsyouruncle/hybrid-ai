@@ -146,8 +146,9 @@ Do not widen this bind, and do not change the webhook path. It is required by th
 OpenHands release; removing the need for it is a separate change.
 
 The sandbox ports themselves no longer answer on the LAN. `scripts/sandbox-firewall.sh`
-drops external traffic into `docker0` and traffic from `docker0` to the other Docker
-networks, keeping exactly this webhook path open. See
+drops external traffic into `docker0`, traffic from `docker0` to the other Docker networks,
+and traffic from `docker0` to the LAN and tailnet destinations, while keeping the webhook
+path and the other paths the stack uses open. See
 [Sandbox port containment](#sandbox-port-containment).
 
 ### The internal `coder-net` network
@@ -198,7 +199,7 @@ later phase.
 | Hermes ports bind all interfaces | `HERMES_PORT` (default `8501`) and `HERMES_API_PORT` (default `8642`) are published on `0.0.0.0`. |
 | Hermes mounts the data directory read-write | `${HYBRID_AI_DATA_DIR}/hermes_data` is writable at `/root/.hermes`. With the default layout that directory is inside the deployment directory. |
 | Hermes runs as root | **Fixed in the image**; active on a host once `HYBRID_AI_UID` is set. `hermes/Dockerfile` now creates a dedicated `hermes` group/user and adds `USER ${HYBRID_AI_UID}:${HYBRID_AI_GID}` (default `10001`), and the compose overlay passes the ids through and pins `no-new-privileges`. A host keeps the legacy uid 0 until the account migration sets `HYBRID_AI_UID` in `.env`. Verbatim proof: the `hermes-nonroot-smoke` CI job builds the image as `10001` and runs it there. That job runs on every pull request that can change the image (its `changes` job diffs the PR base for `hermes/` and the workflow), and unconditionally on the weekly schedule and manual dispatch. |
-| OpenHands sandbox ports publish on all interfaces | **Fixed** by `scripts/sandbox-firewall.sh`: two tagged DROP rules in `DOCKER-USER` close the random sandbox ports to the LAN and keep sandboxes off the other Docker networks, with one named ACCEPT exception for the webhook path (`docker0` gateway on `${OPENHANDS_PORT:-3001}`). See [Sandbox port containment](#sandbox-port-containment) below. |
+| OpenHands sandbox ports publish on all interfaces | **Fixed** by `scripts/sandbox-firewall.sh`: a tagged rule set in `DOCKER-USER` closes the random sandbox ports to the LAN and keeps sandboxes off the other Docker networks, with two named ACCEPT exceptions — the app control path (per-bridge control ports and TCP 3000) and a port-scoped sandbox-to-resolver ACCEPT on UDP/TCP 53 that sits above the CIDR DROPs. See [Sandbox port containment](#sandbox-port-containment) below. |
 | Hermes has no Docker socket | Good — listed for contrast: the read-only mount gives Hermes code visibility, not control. |
 
 ---
@@ -209,19 +210,33 @@ OpenHands publishes each sandbox agent server on a random host port. Docker's de
 forwarding answered those ports on every interface, so a client on the LAN or the tailnet
 could reach a running sandbox's agent server.
 
-That exposure is now closed by default. `scripts/sandbox-firewall.sh apply` installs three
-rules in Docker's `DOCKER-USER` chain, each carrying the comment tag
-`hybrid-ai-sandbox-egress`:
+That exposure is now closed by default. `scripts/sandbox-firewall.sh apply` installs a
+tagged rule set in Docker's `DOCKER-USER` chain. Every rule carries the comment tag
+`hybrid-ai-sandbox-egress`. With both app bridges resolvable the set is 14 rules:
 
-| Rule | Effect |
-|---|---|
-| `! -i lo -o docker0 … -j DROP` | Traffic from any non-loopback interface into `docker0` is dropped, so a LAN or tailnet client cannot reach a sandbox port. |
-| `-i docker0 ! -o docker0 … -j DROP` | A sandbox cannot pivot from `docker0` onto the other Docker networks. |
-| `-i docker0 -p tcp -d <docker0 gateway> --dport ${OPENHANDS_PORT:-3001} … -j ACCEPT` | The one exception: sandboxes still deliver webhooks to the OpenHands app server on the `docker0` gateway. |
+| Count | Rule | Effect |
+|---|---|---|
+| 1 | `-m conntrack --ctstate ESTABLISHED,RELATED … -j ACCEPT` | The stateful return path for every accepted flow. |
+| 2 | `-i <app bridge> -o docker0 -p tcp -m multiport --dports 8000,8001,8011,8012 … -j ACCEPT` | The app reaches each sandbox's control ports (agent-server, VSCode, workers), one rule per bridge. |
+| 2 | `-i docker0 -o <app bridge> -p tcp --dport 3000 … -j ACCEPT` | Sandboxes deliver webhooks and fetch secrets from the app, one rule per bridge. DOCKER-USER sees the app container's address and port 3000 after DNAT. |
+| 2 | `-i docker0 -o <app bridge> … -j DROP` | A sandbox cannot pivot from `docker0` onto either stack network. |
+| 4 | `-i docker0 -d <blocked destination> … -j DROP` | The three RFC1918 supernets (10/8, 172.16/12, 192.168/16) and the Tailscale/CGNAT range (100.64/10). A sandbox reaches neither the LAN nor the tailnet. |
+| 2 | `-i docker0 -p udp --dport 53 … -j ACCEPT` and `-i docker0 -p tcp --dport 53 … -j ACCEPT` | Sandbox to resolver on both DNS protocols. Deliberate, and required: see below. |
+| 1 | `! -i lo -o docker0 … -j DROP` | Traffic from any non-loopback interface into `docker0` is dropped, so a LAN or tailnet client cannot reach a sandbox port. |
 
-Nothing else is excepted. Loopback is untouched — the external-to-`docker0` DROP carries
-`! -i lo` and the `docker0`-to-networks DROP matches `-i docker0` — so the loopback-only
-OpenHands UI stays reachable over an SSH tunnel or Tailscale.
+The two DNS ACCEPTs are a deliberate exception, and they must sit **above** the four CIDR
+DROPs. The sandbox's resolver answer arrives from an address inside the dropped RFC1918
+space, so a DROP placed above them would swallow it and the sandbox would lose name
+resolution. It would still reach READY, then record `prompt_tokens: 0` with no actions.
+
+The DNS exception is port-scoped, not destination-scoped. **Residual risk, stated
+honestly: a sandbox can reach any resolver on port 53, including a resolver on the LAN or
+the tailnet.** Every other port to those destinations stays dropped. Nothing else is
+excepted.
+
+Loopback is untouched — the external-to-`docker0` DROP carries `! -i lo` and the
+`docker0`-to-networks DROPs match `-i docker0` — so the loopback-only OpenHands UI stays
+reachable over an SSH tunnel or Tailscale.
 
 The script is idempotent and inserts nothing when a rule is already present. It never
 flushes, deletes or removes a chain, so rules owned by Docker or by an operator survive
@@ -233,13 +248,13 @@ is missing. The check is warning-only by design and never contributes to exit 2;
 dim `skipped` line and changes nothing when it cannot answer (non-Linux host, no `iptables`,
 or no permission to read the chain).
 
-**Residual risk, stated honestly.** The `docker0` gateway literal lives in
-`scripts/sandbox-firewall.sh` as `DOCKER0_GATEWAY`. A host that moved the `docker0` subnet off
-Docker's default (by setting `bip` or `default-address-pools` in `daemon.json`) must update
-that constant to match, and re-run the script. Until then the ACCEPT names an address that
-does not exist on that host: the webhook path breaks and sandboxes cannot deliver events,
-while the DROPs still contain the ports. `./doctor.sh` reports the missing ACCEPT in that
-case, so the mismatch is visible rather than silent.
+**Residual risk, stated honestly.** The rules name the app bridges by Docker-assigned
+interface (`br-` + the first 12 hex characters of the network id), resolved at apply time.
+A network that cannot be resolved is skipped with a warning naming it, and the rest of the
+rule set is still installed. The CIDR DROPs still contain the sandbox ports in that case,
+but that bridge's own ACCEPT and DROP are missing until the script runs again with the
+network up. `./doctor.sh` reports the missing rules, so the gap is visible rather than
+silent.
 
 ---
 
