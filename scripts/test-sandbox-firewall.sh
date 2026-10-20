@@ -20,8 +20,9 @@ set -Eeuo pipefail
 #   * DNS: exactly two port-53 ACCEPTs (UDP and TCP), neither widened, both above
 #     every CIDR DROP; a sandbox packet to a resolver inside the dropped RFC1918
 #     space matches an ACCEPT on UDP/53 and TCP/53 and no DROP
-#   * a sandbox packet to the same address on TCP/443 and TCP/8080 still matches
-#     an owned DROP and no owned ACCEPT (fails if either DNS ACCEPT is widened)
+#   * a sandbox packet to the same address on a non-53 port (443 and 8080, over
+#     both TCP and UDP) still matches an owned DROP and no owned ACCEPT (fails if
+#     either DNS ACCEPT is widened, whichever protocol it speaks)
 #   * migrated host: pre-existing foreign rules survive byte-untouched
 #   * idempotency: a second run adds nothing and reports "unchanged"
 #   * an unresolvable network warns by name, skips only its bridge, and exits 0
@@ -620,16 +621,19 @@ for proto in udp tcp; do
   fi
 done
 
-# CASE B: anything else to the same address is still dropped. This is the case
-# that fails if either DNS ACCEPT loses its port match or is widened to a range.
-for dport in 443 8080; do
-  check "a tcp/$dport packet from the sandbox to the resolver is DROPped by the chain" \
-    "DROP" "$(first_match docker0 eth0 "$RESOLVER" tcp "$dport")"
-  if accept_matches docker0 eth0 "$RESOLVER" tcp "$dport"; then
-    bad "a tcp/$dport packet to the resolver matches an ACCEPT ($MATCHED_RULE)"
-  else
-    ok "a tcp/$dport packet to the resolver matches no ACCEPT"
-  fi
+# CASE B: anything else to the same address is still dropped, on either
+# protocol. This is the case that fails if either DNS ACCEPT loses its port
+# match or is widened to a range.
+for proto in tcp udp; do
+  for dport in 443 8080; do
+    check "a $proto/$dport packet from the sandbox to the resolver is DROPped by the chain" \
+      "DROP" "$(first_match docker0 eth0 "$RESOLVER" "$proto" "$dport")"
+    if accept_matches docker0 eth0 "$RESOLVER" "$proto" "$dport"; then
+      bad "a $proto/$dport packet to the resolver matches an ACCEPT ($MATCHED_RULE)"
+    else
+      ok "a $proto/$dport packet to the resolver matches no ACCEPT"
+    fi
+  done
 done
 
 # The matcher must be able to spot a widened rule, or the two cases above would
