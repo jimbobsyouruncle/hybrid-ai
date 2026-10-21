@@ -1298,8 +1298,10 @@ summary: scanned=N kept-live=N kept-recent=N moved=N refused=N quarantine=<dir> 
 | `quarantine` | The per-run directory, `<root>/<UTC YYYYMMDD>`; `none` when the run refused to sweep |
 
 `refusals` names each reason: `symlink`, `unsafe-name`, `path-escape`,
-`lease-missing`, `lease-unreadable`, `lease-unparsable-json`, `lease-no-expiry-key`,
-`cap-reached`, `destination-exists`, `cross-device`, `move-failed`.
+`lease-missing`, `lease-unreadable`, `lease-empty`, `lease-unparsable-json`,
+`lease-not-an-object`, `lease-no-expiry-key`, `lease-expiry-unparsable`,
+`mtime-unreadable`, `cap-reached`, `destination-exists`, `cross-device`,
+`move-failed`.
 
 Read the common ones this way:
 

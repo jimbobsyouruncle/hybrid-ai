@@ -499,10 +499,11 @@ by the stack's own users. The data it walks was written by containers, so the
 script treats every directory name and every `owner_lease.json` as untrusted: a
 directory whose name is not a plain token, or that is a symlink, is refused and
 never followed; a path that does not canonicalise to its own name under the
-conversations root is refused; and an unreadable or unrecognised lease is treated
-as live forever, so it never authorises a move. The sweep never deletes anything —
-it moves a directory into a quarantine root, so a wrong decision is recoverable by
-moving it back.
+conversations root is refused; and a directory whose lease is missing, unreadable
+or unrecognised is REFUSED and never moved, counted as a refusal rather than as
+kept-live. An unreadable lease therefore still fails closed: it never authorises a
+move. The sweep never deletes anything — it moves a directory into a quarantine
+root, so a wrong decision is recoverable by moving it back.
 
 The quarantine root is created mode 0750 and root-owned, and the run refuses to
 move anything unless that root is proven outside `HYBRID_AI_DATA_DIR`,

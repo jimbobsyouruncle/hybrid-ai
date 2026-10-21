@@ -132,10 +132,12 @@ overrides the root and is still subject to the same assertion.
 
 Moving a directory back into `conversations/` restores it, because nothing was
 deleted. Permission to move it is checked before the move: a symlinked or
-non-plain-token directory name is refused and never followed, an unreadable or
-unrecognised lease is treated as live forever and kept, and a directory reached by
-a running container is skipped. The schedule, the knobs and the inspection steps
-are in [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
+non-plain-token directory name is refused and never followed, a directory whose
+lease is missing, unreadable or unrecognised is refused and never moved — reported
+as a refusal, not as kept-live, so an unreadable lease fails closed — and a
+directory reached by a running container is skipped. The schedule, the knobs and
+the inspection steps are in
+[`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
 
 ---
 
