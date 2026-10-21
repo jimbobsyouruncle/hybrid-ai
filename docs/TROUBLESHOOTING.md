@@ -364,8 +364,10 @@ HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./doctor.sh --no-cloud
 
 Two files matter here. `HYBRID_AI_ENV_FILE` is the LAYOUT file: it holds path
 and identity settings only, never a secret. `HYBRID_AI_STACK_ENV_FILE` is the
-STACK file: the one handed to `docker compose --env-file` and the one
-`install.sh` writes, holding the secrets. On a bootstrapped host the layout file
+STACK file: the one handed to `docker compose --env-file`, alongside the three
+compose files (`docker-compose.yml`, `openhands/docker-compose.openhands.yml`
+and `hermes/docker-compose.hermes.yml`); `install.sh` writes it, and it holds the
+secrets. On a bootstrapped host the layout file
 is `/etc/hybrid-ai/hybrid-ai.env` and the stack file is
 `/etc/hybrid-ai/stack.env`; they are separate files, and `install.sh` writes ONLY
 the stack file. When `HYBRID_AI_STACK_ENV_FILE` is unset the two resolve to the
@@ -381,8 +383,10 @@ legacy `.env` becomes the stack file and still carries the OLD values (an empty
 empty id would make the whole stack run as uid 0 and the old paths would point
 the containers at trees the migration had already moved away.
 
-If the whole stack unexpectedly runs as root (`docker compose ... ps` shows
-`root` for the Hermes or status container), check `HYBRID_AI_UID` in the layout
+If the whole stack unexpectedly runs as root (`docker compose --env-file .env -f
+docker-compose.yml -f openhands/docker-compose.openhands.yml -f
+hermes/docker-compose.hermes.yml ps` shows `root` for the Hermes or status
+container), check `HYBRID_AI_UID` in the layout
 file, then confirm the stack file's copy after the next `install.sh` run matches
 it.
 
@@ -422,9 +426,20 @@ not in the secrets file's permissions.
 
 If you prefer to check by hand, or `doctor.sh` itself will not run, these five commands isolate the failing layer. The first one that fails tells you which section to read.
 
+The stack is three compose files, always applied together and in this order:
+`docker-compose.yml`, `openhands/docker-compose.openhands.yml` and
+`hermes/docker-compose.hermes.yml`. Every compose command must pass all three,
+with `--env-file` naming the stack env file and `--project-directory` the repo
+root. A command that omits either overlay does not see those services, so an
+`up -d --remove-orphans` run DELETES the OpenHands and Hermes containers:
+compose treats them as orphans.
+
 ```bash
 # 1. Are the containers running?
-docker compose --env-file .env ps
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml ps
 
 # 2. Is the web UI responding?
 curl -fsS http://localhost:3000/health && echo " OK"
@@ -453,7 +468,7 @@ Step 5 failing with "connection refused" is **normal** when you have not used th
 
 ## Containers
 
-**Nothing listed by `docker compose ps`**
+**Nothing listed by `docker compose --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml ps`**
 
 You are probably in the wrong directory, or `.env` does not exist.
 
@@ -484,8 +499,14 @@ docker unpause open-webui
 **A container restarts in a loop**
 
 ```bash
-docker compose --env-file .env logs --tail 100 open-webui
-docker compose --env-file .env logs --tail 100 ollama
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml logs --tail 100 open-webui
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml logs --tail 100 ollama
 ```
 
 Most common causes: the disk is full, or `.env` is missing a required value.
@@ -504,7 +525,10 @@ Note `--volumes=false`. Your data is in bind mounts, not Docker volumes, so this
 **Full reset without losing data**
 
 ```bash
-docker compose --env-file .env down      # NEVER add -v
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml down      # NEVER add -v
 ./install.sh
 ```
 
@@ -566,7 +590,7 @@ Ensure you selected the document (`#` in the message box) or attached the collec
 du -sh webui_data/vector_db
 ```
 
-If it is empty after uploading, embedding is failing. Check `docker compose logs open-webui` for errors — on a 4 GB Pi this is usually memory pressure.
+If it is empty after uploading, embedding is failing. Check `docker compose --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml logs open-webui` for errors — on a 4 GB Pi this is usually memory pressure.
 
 **Embedding is extremely slow**
 
@@ -680,16 +704,19 @@ with `docker manifest inspect <repo>:<tag>` and re-run
 `./openhands/scripts/openhands-control.sh start`.
 
 **The container vanished after a deploy or re-install.** Almost certainly a
-`docker compose up -d --remove-orphans` that omitted the overlay file, which
-makes compose treat OpenHands as an orphan and delete it. State in
+`docker compose up -d --remove-orphans` that omitted one of the two overlay
+files (`openhands/docker-compose.openhands.yml` or
+`hermes/docker-compose.hermes.yml`), which makes compose treat OpenHands as an
+orphan and delete it. State in
 `~/.openhands` survives, so recovery is just a start:
 
 ```bash
 ./openhands/scripts/openhands-control.sh start
 ```
 
-Use that wrapper rather than bare `docker compose` — it always passes both
-files.
+Use that wrapper rather than bare `docker compose` — it always passes all three
+files (`docker-compose.yml`, `openhands/docker-compose.openhands.yml` and
+`hermes/docker-compose.hermes.yml`).
 
 **`OPENHANDS_WORKSPACE must be set`.** The overlay deliberately has no default
 for the workspace, so it fails loudly rather than silently mounting the
@@ -859,8 +886,10 @@ repository. `sudo git` fails the same way, because git compares the process uid.
 `SANDBOX_USER_ID` line in the overlay is inert — app-server 1.10.0 and agent-server 1.37.1 never
 read it.
 
-The shipped fix is a system git config, `openhands/sandbox-gitconfig`, mounted read-only at
-`/etc/gitconfig` in every new sandbox. It lists only the two workspace roots:
+The shipped fix is a system git config. `install.sh` copies the source file
+`openhands/sandbox-gitconfig` to `$OPENHANDS_WORKSPACE/.sandbox-gitconfig` with mode `0644`,
+chowned to the stack uid/gid, and the overlay bind-mounts it read-only at `/etc/gitconfig` in
+every new sandbox. It lists the two workspace roots and nothing else:
 
 ```ini
 [safe]
@@ -942,13 +971,21 @@ installs the pinned ShellCheck **0.11.0** binary to `/usr/local/bin/shellcheck` 
 the sandbox PATH matches the CI gate's version (`ludeeus/action-shellcheck` 2.0.0,
 track `stable`), and the pinned Semgrep **1.179.0** wheel so it matches the SAST
 gate (`semgrep/semgrep:1.179.0`); apt's older shellcheck package is deliberately
-not used. On upgrade, `install.sh` STEP 2b migrates a host still pinned to the OLD
-default pair (`docker.openhands.dev/openhands/agent-server` AND `1.37.1-python`)
-to the new defaults, and also bumps a host carrying the earlier hybrid tags
-(`1.37.1-python-hybrid.1` or `1.37.1-python-hybrid.2`) to the current hybrid.3
-default; if you customised either the repository or the tag, both are left
-untouched. A clone made before the upgrade can still carry a stale embedded
-credential, so rotate the token and re-check to confirm the old value is gone.
+not used.
+
+On upgrade, `install.sh` STEP 2b unsets one exact stale value at a time; STEP 8's
+`${VAR:-default}` then writes the current default in its place. It clears the
+stale app-server pin `docker.openhands.dev/openhands/openhands:1.8`, the stale
+agent tag `1.26.0-python` and the canonical agent repository
+`ghcr.io/openhands/agent-server`. Three migrations match the repository and tag
+as a PAIR, so a host that customised either half keeps its owner-chosen pin: the
+OLD default pair (`docker.openhands.dev/openhands/agent-server` AND
+`1.37.1-python`), and the earlier hybrid tags `1.37.1-python-hybrid.1` and
+`1.37.1-python-hybrid.2` (bumped to the current hybrid.3 default). Any other
+repository or tag is an owner pin and is left untouched, and STEP 8 preserves an
+explicit owner value too. A clone made before the upgrade can still carry a stale
+embedded credential, so rotate the token and re-check to confirm the old value is
+gone.
 
 ---
 
@@ -1633,7 +1670,7 @@ Both the installer and the pod emit structured, greppable records of what happen
 | Installer | `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/install.log` on the Pi (gitignored, mode 0600) | One entry per `install.sh` run |
 | Backup | `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/backup.log` on the Pi | One entry per backup/restore run |
 | Pod | `/var/log/hybrid-ai-events.log` and the RunPod console | Pod lifecycle, watchdog, vLLM health |
-| Pipe | `docker compose logs open-webui` | Per-request outcomes |
+| Pipe | `docker compose --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml logs open-webui` | Per-request outcomes |
 
 Each path is resolved by `scripts/lib/hybrid-ai-env.sh`. With no settings the
 helper default is the deployment directory. The compose bind sources are
@@ -1669,7 +1706,10 @@ The two to alert on are `watchdog_disabled` and `podstop_exhausted`. Both mean t
 ### Pipe events
 
 ```bash
-docker compose --env-file .env logs open-webui | grep runpod_pipe
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml logs open-webui | grep runpod_pipe
 ```
 
 Each request carries a `request_id`, so you can trace one conversation end to end:
@@ -1689,13 +1729,19 @@ Each request carries a `request_id`, so you can trace one conversation end to en
 Trace a single request:
 
 ```bash
-docker compose --env-file .env logs open-webui | grep 'request_id=a1b2c3d4'
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml logs open-webui | grep 'request_id=a1b2c3d4'
 ```
 
 Measure typical cold-start latency:
 
 ```bash
-docker compose --env-file .env logs open-webui \
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f openhands/docker-compose.openhands.yml \
+  -f hermes/docker-compose.hermes.yml logs open-webui \
   | grep -o 'wake_seconds=[0-9.]*' | cut -d= -f2 | sort -n | tail -5
 ```
 
