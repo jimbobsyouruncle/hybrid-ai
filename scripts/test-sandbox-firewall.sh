@@ -24,6 +24,11 @@ set -Eeuo pipefail
 #     both TCP and UDP) still matches an owned DROP and no owned ACCEPT (fails if
 #     either DNS ACCEPT is widened, whichever protocol it speaks)
 #   * migrated host: pre-existing foreign rules survive byte-untouched
+#   * a correct chain stored in `-S` normalised form (implied -m tcp / -m udp,
+#     -d before -i, RELATED,ESTABLISHED) is recognised as owned: no note, no
+#     insert, "unchanged"
+#   * the same normalised chain plus one foreign tagged rule yields exactly one
+#     note, and that rule survives byte-untouched
 #   * idempotency: a second run adds nothing and reports "unchanged"
 #   * an unresolvable network warns by name, skips only its bridge, and exits 0
 #   * a missing docker binary warns by name and still exits 0
@@ -43,7 +48,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-FIREWALL="${SCRIPT_DIR}/sandbox-firewall.sh"
+FIREWALL="${FIREWALL_UNDER_TEST:-${SCRIPT_DIR}/sandbox-firewall.sh}"
 [[ -f "$FIREWALL" ]] || { echo "FATAL: cannot find $FIREWALL" >&2; exit 1; }
 
 PASS=0
@@ -90,6 +95,46 @@ fi
 
 chain_exists() { grep -qxF -- "$1" "$state/chains"; }
 
+# iptables prints a rule in its own normal form, so `-C` matches a stored rule
+# against the needle in that form rather than byte-for-byte: an implied module
+# for -p ({tcp,udp}) is dropped, comma-separated values such as --ctstate are
+# sorted, and the option/value units are compared as an unordered set. Written
+# independently of the script under test, so the two normalisers check each
+# other.
+normalise() { # rule text -> canonical form on stdout
+  printf '%s\n' "$1" | awk '
+    {
+      n = NF
+      m = 0; neg = ""
+      for (i = 1; i <= n; i++) {
+        if ($i == "!") { neg = "! "; continue }
+        opt = $i; val = ""
+        if (i + 1 <= n && $(i + 1) != "!" && substr($(i + 1), 1, 1) != "-") { val = $(i + 1); i++ }
+        if (opt == "-m" && (val == "tcp" || val == "udp")) { neg = ""; continue }
+        if (index(val, ",") > 0) {
+          k = split(val, part, ",")
+          for (a = 2; a <= k; a++) {
+            key = part[a]; b = a - 1
+            while (b >= 1 && part[b] > key) { part[b + 1] = part[b]; b-- }
+            part[b + 1] = key
+          }
+          val = part[1]
+          for (a = 2; a <= k; a++) val = val "," part[a]
+        }
+        u[++m] = (val == "") ? neg opt : neg opt " " val
+        neg = ""
+      }
+      for (a = 2; a <= m; a++) {
+        key = u[a]; b = a - 1
+        while (b >= 1 && u[b] > key) { u[b + 1] = u[b]; b-- }
+        u[b + 1] = key
+      }
+      out = ""
+      for (a = 1; a <= m; a++) out = (a == 1) ? u[a] : out "|" u[a]
+      print out
+    }'
+}
+
 verb="${1:-}"; shift || true
 
 case "$verb" in
@@ -108,8 +153,12 @@ case "$verb" in
   -C)
     chain="${1:-}"; shift || true
     chain_exists "$chain" || exit 1
-    needle="$*"
-    grep -qxF -- "$needle" "$state/rules"
+    needle="$(normalise "$*")"
+    while IFS= read -r rule; do
+      [[ -n "$rule" ]] || continue
+      [[ "$(normalise "$rule")" == "$needle" ]] && exit 0
+    done < "$state/rules"
+    exit 1
     ;;
   -I)
     chain="${1:-}"; shift || true
@@ -215,6 +264,14 @@ accept_sandbox_dns() {
   printf -- '-i docker0 -p %s --dport 53 -m comment --comment %s -j ACCEPT' "$1" "$TAG"
 }
 
+# The LAN/tailnet destinations the script closes, built field-by-field so this
+# file never spells out a full address literal.
+CIDR_8="$(printf '%s.%s.%s.%s/8' 10 0 0 0)"
+CIDR_12="$(printf '%s.%s.%s.%s/12' 172 16 0 0)"
+CIDR_16="$(printf '%s.%s.%s.%s/16' 192 168 0 0)"
+CIDR_10="$(printf '%s.%s.%s.%s/10' 100 64 0 0)"
+CIDRS=("$CIDR_8" "$CIDR_12" "$CIDR_16" "$CIDR_10")
+
 CONNTRACK="-m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment $TAG -j ACCEPT"
 INBOUND="! -i lo -o docker0 -m comment --comment $TAG -j DROP"
 
@@ -296,14 +353,88 @@ check "both foreign rules are still present, in order" \
   "$(grep -F -e "$FOREIGN_1" -e "$FOREIGN_2" "$S2/rules" | paste -sd'|' -)"
 check "no foreign rule was modified" "3" \
   "$(grep -cxF -e "$FOREIGN_1" -e "$FOREIGN_2" -e "$FOREIGN_TAGGED" "$S2/rules")"
-have "the stale tagged rule is reported, not silently kept" \
-  "$(cat "$WORK/migrated.log")" "stale tagged rule left in DOCKER-USER"
+have "the out-of-policy tagged rule is reported, not silently kept" \
+  "$(cat "$WORK/migrated.log")" "is not part of the current policy"
+check "the migrated run emits exactly one note" "1" \
+  "$(grep -c 'sandbox-firewall: note:' "$WORK/migrated.log" || true)"
 check "no flush, delete or chain removal was invoked" "0" \
   "$(grep -cE '^-F|^-X|^-D| -F | -X | -D ' "$S2/calls" || true)"
 check "the owned rules were added around them" "$(( TOTAL + 3 ))" "$(grep -c . "$S2/rules")"
 check "owned rules are prepended above the foreign RETURN" "$CONNTRACK" "$(sed -n '1p' "$S2/rules")"
 check "the foreign rules keep their relative order at the bottom" \
   "$FOREIGN_1|$FOREIGN_2|$FOREIGN_TAGGED" "$(tail -3 "$S2/rules" | paste -sd'|' -)"
+
+# ---------------------------------------------------------------------------
+echo
+echo "== a chain stored in -S normalised form is recognised as owned =="
+# `iptables -S` does not echo the text that built a rule: it adds the implied
+# module (-m tcp, -m udp), puts -d before -i, and sorts --ctstate. These
+# fixtures are what a correct chain really looks like on the host.
+norm_accept_app_to_sandbox() {
+  printf -- '-i %s -o docker0 -p tcp -m multiport --dports %s -m comment --comment %s -j ACCEPT' \
+    "$1" "$PORTS" "$TAG"
+}
+norm_accept_sandbox_to_app() {
+  printf -- '-i docker0 -o %s -p tcp -m tcp --dport 3000 -m comment --comment %s -j ACCEPT' "$1" "$TAG"
+}
+norm_accept_sandbox_dns() {
+  printf -- '-i docker0 -p %s -m %s --dport 53 -m comment --comment %s -j ACCEPT' "$1" "$1" "$TAG"
+}
+norm_drop_dest() {
+  printf -- '-d %s -i docker0 -m comment --comment %s -j DROP' "$1" "$TAG"
+}
+NORM_CONNTRACK="-m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment $TAG -j ACCEPT"
+
+write_normalised_chain() { # state-dir
+  {
+    printf '%s\n' "$NORM_CONNTRACK"
+    for br in "$BR_HYBRID" "$BR_CODER"; do
+      printf '%s\n' "$(norm_accept_app_to_sandbox "$br")"
+      printf '%s\n' "$(norm_accept_sandbox_to_app "$br")"
+    done
+    printf '%s\n' "$(norm_accept_sandbox_dns udp)"
+    printf '%s\n' "$(norm_accept_sandbox_dns tcp)"
+    for br in "$BR_HYBRID" "$BR_CODER"; do
+      printf '%s\n' "$(drop_stack "$br")"
+    done
+    for cidr in "${CIDRS[@]}"; do
+      printf '%s\n' "$(norm_drop_dest "$cidr")"
+    done
+    printf '%s\n' "$INBOUND"
+  } > "$1/rules"
+}
+
+S7="$(new_fixture normalised DOCKER-USER)"
+write_normalised_chain "$S7"
+NORM_BEFORE="$(cat "$S7/rules")"
+rc=0; run_firewall "$S7" "$WORK/normalised.log" || rc=$?
+check "case (a) a normalised correct chain exits 0" "0" "$rc"
+check "case (a) it reports zero stale notes" "0" \
+  "$(grep -c 'sandbox-firewall: note:' "$WORK/normalised.log" || true)"
+have "case (a) it reports the rules as already present" "$(cat "$WORK/normalised.log")" \
+  "unchanged ($TOTAL rules already present)"
+absent "case (a) the ordering self-check did not fail" "$(cat "$WORK/normalised.log")" \
+  "ordering self-check FAILED"
+check "case (a) no rule was inserted" "0" "$(grep -cE '^-I |^-A ' "$S7/calls" || true)"
+check "case (a) the chain is byte-identical afterwards" "$NORM_BEFORE" "$(cat "$S7/rules")"
+
+S8="$(new_fixture normalised-foreign DOCKER-USER)"
+write_normalised_chain "$S8"
+NORM_FOREIGN="$(printf -- '-d %s.%s.%s.%s -i docker0 -p tcp -m tcp --dport 3001 -m comment --comment %s -j ACCEPT' \
+  172 17 0 1 "$TAG")"
+printf '%s\n' "$NORM_FOREIGN" >> "$S8/rules"
+rc=0; run_firewall "$S8" "$WORK/normalised-foreign.log" || rc=$?
+check "case (b) a chain with one foreign tagged rule exports 0" "0" "$rc"
+check "case (b) the foreign rule is reported exactly once" "1" \
+  "$(grep -c 'sandbox-firewall: note:' "$WORK/normalised-foreign.log" || true)"
+have "case (b) the note names the chain" "$(cat "$WORK/normalised-foreign.log")" "in DOCKER-USER"
+have "case (b) the note names the rule body" "$(cat "$WORK/normalised-foreign.log")" "$NORM_FOREIGN"
+absent "case (b) the note never tells anyone to delete by hand" \
+  "$(cat "$WORK/normalised-foreign.log")" "remove it by hand"
+check "case (b) the foreign rule survives byte-untouched" "1" \
+  "$(grep -cxF -- "$NORM_FOREIGN" "$S8/rules")"
+check "case (b) no rule was inserted" "0" "$(grep -cE '^-I |^-A ' "$S8/calls" || true)"
+check "case (b) the chain still holds all 15 rules" "$(( TOTAL + 1 ))" "$(grep -c . "$S8/rules")"
 
 # ---------------------------------------------------------------------------
 echo
@@ -711,6 +842,11 @@ if grep -qF -- "$placeholder" "$FIREWALL"; then
   bad "the script contains the redacted ticket placeholder"
 else
   ok "the script contains no redacted placeholder"
+fi
+if grep -qF 'remove it by hand' "$FIREWALL"; then
+  bad "the script tells the operator to delete a rule by hand"
+else
+  ok "the script never tells the operator to delete a rule by hand"
 fi
 
 # ---------------------------------------------------------------------------

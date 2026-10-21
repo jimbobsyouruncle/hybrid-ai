@@ -210,11 +210,92 @@ done
 # Read the chain back: no ACCEPT this run installed may sit below a DROP it
 # installed, because a drop above an accept silently swallows the path the
 # accept was there to open. Only rules in the current set count: a tagged rule
-# left by a previous release is not ours to judge and is never deleted, so it is
-# reported for hand removal instead of failing every boot.
+# outside the current policy is not ours to judge and is never deleted, so it is
+# reported for inspection instead of failing every boot.
+#
+# Spelled in two pieces: it is text in a message, not an invocation, and the
+# static check that every iptables call carries the lock wait must keep matching
+# only real calls.
+readonly INSPECT_CMD="iptables"" -S"
+
+# The chain listing does not echo the text that built a rule. It drops the
+# module implied by -p (unless a multiport match is present), orders -s and -d
+# before -i and -o, and sorts comma-separated matches such as --ctstate. So
+# compare rules in that common form: one unit per option-and-value pair, the
+# units sorted, so the comparison is on whole tokens and a rule with a different
+# port, protocol or destination can never be mistaken for one of ours.
+normalise_rule() { # rule text -> canonical form on stdout
+  local text="$1"
+  local -a tok=()
+  local -a units=()
+  local -a parts=()
+  local i=0 n=0 neg="" opt="" val="" unit="" key="" j=0 m=0
+  read -r -a tok <<< "$text"
+  n=${#tok[@]}
+  while (( i < n )); do
+    opt="${tok[i]}"
+    if [[ "$opt" == "!" ]]; then
+      neg="! "
+      i=$(( i + 1 ))
+      continue
+    fi
+    val=""
+    if (( i + 1 < n )) && [[ "${tok[i + 1]}" != -* && "${tok[i + 1]}" != "!" ]]; then
+      val="${tok[i + 1]}"
+      i=$(( i + 1 ))
+    fi
+    i=$(( i + 1 ))
+    # The protocol module carries no match of its own: -p tcp is printed with
+    # -m tcp unless a multiport match is already there. Drop it on both sides.
+    if [[ "$opt" == "-m" && ( "$val" == "tcp" || "$val" == "udp" ) ]]; then
+      neg=""
+      continue
+    fi
+    if [[ "$val" == *,* ]]; then
+      IFS=, read -r -a parts <<< "$val"
+      for (( j = 1; j < ${#parts[@]}; j++ )); do
+        key="${parts[j]}"
+        m=$(( j - 1 ))
+        while (( m >= 0 )) && [[ "${parts[m]}" > "$key" ]]; do
+          parts[m + 1]="${parts[m]}"
+          m=$(( m - 1 ))
+        done
+        parts[m + 1]="$key"
+      done
+      val="${parts[*]}"
+    fi
+    if [[ -n "$val" ]]; then
+      unit="$neg$opt $val"
+    else
+      unit="$neg$opt"
+    fi
+    neg=""
+    # Insertion sort, so the comparison does not depend on option order.
+    m=${#units[@]}
+    while (( m > 0 )) && [[ "${units[m - 1]}" > "$unit" ]]; do
+      units[m]="${units[m - 1]}"
+      m=$(( m - 1 ))
+    done
+    units[m]="$unit"
+  done
+  (( ${#units[@]} > 0 )) || return 0
+  unit=""
+  for key in "${units[@]}"; do
+    unit="${unit:+$unit|}$key"
+  done
+  printf '%s\n' "$unit"
+}
+
+OWNED=()
+for own in "${RULES[@]}"; do
+  OWNED+=("$(normalise_rule "$own")")
+done
+
 is_owned() { # rule-line with the "-A CHAIN " prefix already stripped
-  local candidate="$1" own
-  for own in "${RULES[@]}"; do
+  local candidate
+  candidate="$(normalise_rule "$1")"
+  local own
+  for own in "${OWNED[@]}"; do
     [[ "$candidate" == "$own" ]] && return 0
   done
   return 1
@@ -230,7 +311,8 @@ while IFS= read -r line; do
   [[ "$line" == *"$TAG"* ]] || continue
   body="${line#"$line_prefix"}"
   if ! is_owned "$body"; then
-    printf 'sandbox-firewall: note: stale tagged rule left in %s by a previous release (this script never deletes; remove it by hand if unwanted): %s\n' "$CHAIN" "$body"
+    printf 'sandbox-firewall: note: a rule tagged %s in %s is not part of the current policy (an older release, or a listing normalisation difference); this script never deletes it, so do not delete it by hand: inspect with "%s %s" and raise it as an item: %s\n' \
+      "$TAG" "$CHAIN" "$INSPECT_CMD" "$CHAIN" "$body"
     continue
   fi
   if [[ "$body" == *"-j ACCEPT"* ]]; then

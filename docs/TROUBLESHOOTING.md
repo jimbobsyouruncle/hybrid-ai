@@ -789,7 +789,19 @@ sudo ./scripts/sandbox-firewall.sh apply
 ```
 
 The script is idempotent — it adds only what is missing and leaves every other rule
-untouched. Re-running `./install.sh` also applies it, and so does a deploy.
+untouched. It never deletes, flushes or removes a chain.
+
+**The note about a tagged rule.** `apply` may print a line like
+
+```
+sandbox-firewall: note: a rule tagged hybrid-ai-sandbox-egress in DOCKER-USER is not part of the current policy ...
+```
+
+That note is informational: the tagged rule is outside today's policy, from an older release
+or differing only in how `iptables -S` prints it. The script never deletes it, so do not
+delete it by hand; inspect the chain with `iptables -S DOCKER-USER` and raise it as an item.
+
+Re-running `./install.sh` also applies it, and so does a deploy.
 
 For the boot unit, `install.sh` installs and enables `hybrid-ai-firewall.service` on
 every deploy, so a normal deploy leaves it enabled and it re-applies the rules after

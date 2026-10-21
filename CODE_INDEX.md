@@ -338,6 +338,7 @@
 - usage()
 - resolve_bridge()
 - apply_rule()
+- normalise_rule()
 - is_owned()
 
 ## scripts/setup-agent-workspace.sh
@@ -573,6 +574,7 @@
 - have()
 - absent()
 - chain_exists()
+- normalise()
 - new_fixture()
 - run_firewall()
 - rules_of()
@@ -581,6 +583,11 @@
 - drop_stack()
 - drop_dest()
 - accept_sandbox_dns()
+- norm_accept_app_to_sandbox()
+- norm_accept_sandbox_to_app()
+- norm_accept_sandbox_dns()
+- norm_drop_dest()
+- write_normalised_chain()
 - ip_to_int()
 - cidr_matches()
 - tokens_match()
