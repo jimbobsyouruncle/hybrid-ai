@@ -1254,6 +1254,105 @@ curl -s -X POST "https://api.runpod.io/graphql" \
 
 ---
 
+## The disk keeps filling with conversation directories
+
+Every OpenHands conversation leaves its own directory under
+`${OPENHANDS_WORKSPACE}/conversations/`, each with an `owner_lease.json` lease
+file. Those directories are **invisible to the OpenHands conversation API**: a live
+host reported 0 conversations while 29 directories, about 8.3 GB, sat on disk. So
+neither the UI nor an API call will free the space, and `doctor.sh` only warns when
+the tree passes about 1 GiB or 10 directories.
+
+The fix is the quarantine sweep, `scripts/prune-conversations.sh`, run by
+`hybrid-ai-prune.timer` daily at 04:20. It **quarantines, it never deletes**: a
+stale directory is moved into a date-stamped quarantine root and a plain `mv`
+back restores it.
+
+### Did the timer run?
+
+```bash
+systemctl list-timers hybrid-ai-prune.timer     # last and next run
+systemctl status hybrid-ai-prune                # last service run, exit status
+journalctl -u hybrid-ai-prune --since '-2 days'
+```
+
+The service is `Type=oneshot` with no `Restart=`, so a failure does not loop. A
+`Failed` status is the place to start; the script itself always exits 0 and reports
+what it did in its summary line.
+
+### Read the summary line
+
+The last log line of every run is:
+
+```text
+summary: scanned=N kept-live=N kept-recent=N moved=N refused=N quarantine=<dir> refusals=<reasons>
+```
+
+| Field | Meaning |
+|---|---|
+| `scanned` | Directories seen at the top level of the conversations root |
+| `kept-live` | Kept: lease still valid, inside its grace period, or a running container mounts it |
+| `kept-recent` | Kept: mtime newer than `HYBRID_AI_PRUNE_AGE_SECONDS` |
+| `moved` | Moved into the quarantine |
+| `refused` | Refused, with the reasons listed in `refusals` |
+| `quarantine` | The per-run directory, `<root>/<UTC YYYYMMDD>`; `none` when the run refused to sweep |
+
+`refusals` names each reason: `symlink`, `unsafe-name`, `path-escape`,
+`lease-missing`, `lease-unreadable`, `lease-unparsable-json`, `lease-no-expiry-key`,
+`cap-reached`, `destination-exists`, `cross-device`, `move-failed`.
+
+Read the common ones this way:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `moved=0` and every entry `kept-live` | The leases are still valid, so the sweep is working as designed | Wait. Check again once the app has been idle for `HYBRID_AI_PRUNE_GRACE_SECONDS` |
+| `refused=... cap-reached` | More eligible directories than one run may move | Raise `HYBRID_AI_PRUNE_MAX_MOVES`, or let the next daily run continue |
+| `quarantine=none`, `moved=0` | The run refused to sweep: a path would not canonicalise, the root was missing, or the quarantine root was inside a backup-captured tree | Read the `[ ! ]` warning line above the summary; it names the setting |
+| `cross-device` | The quarantine root is on another filesystem | Point `HYBRID_AI_PRUNE_QUARANTINE_BASE` at the same filesystem as the conversations tree |
+| A `container-guard=unavailable` line | No usable `docker`, so only the lease and age guards decided | Not a failure; install or start Docker to enable the container check |
+
+A degraded run (missing conversations root, missing `python3`, no Docker) still
+logs and exits 0. The units call no `systemctl`, so the script runs by hand too.
+
+### Inspect and restore the quarantine
+
+The default root is `$(dirname "$HYBRID_AI_DATA_DIR")/hybrid-ai-conversation-quarantine`,
+created mode 0750 and root-owned, one subdirectory per UTC run date:
+
+```bash
+Q="$(dirname "$(grep -E '^HYBRID_AI_DATA_DIR=' /etc/hybrid-ai/hybrid-ai.env | cut -d= -f2-)")/hybrid-ai-conversation-quarantine"
+sudo ls -la "$Q"                 # one directory per run date
+sudo du -sh "$Q"/*               # space held per run
+```
+
+Restoring is a plain move back; nothing was deleted, so nothing has to be decoded:
+
+```bash
+sudo mv "$Q/20260101/<conversation-id>" "$OPENHANDS_WORKSPACE/conversations/"
+```
+
+The quarantine root is deliberately outside every tree the backup captures, so
+quarantined directories are **not** in a backup and will not be swept into the next
+snapshot. Keep what you want by hand, and delete from the quarantine yourself once
+you are sure; the script never does.
+
+### Tune the knobs
+
+Set these in `.env` (or the layout env file on a bootstrapped host) and re-run
+`./install.sh`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `HYBRID_AI_PRUNE_AGE_SECONDS` | `604800` | Seconds. A directory with a newer mtime is kept |
+| `HYBRID_AI_PRUNE_GRACE_SECONDS` | `86400` | Seconds. An expired lease is kept this long after expiry |
+| `HYBRID_AI_PRUNE_MAX_MOVES` | `20` | Count. Moves allowed in one run |
+| `HYBRID_AI_PRUNE_QUARANTINE_BASE` | unset | Quarantine root override; still asserted outside every captured tree |
+
+A non-numeric value in any of the three numeric knobs is a refusal: the run logs a
+warning and moves nothing.
+
+---
+
 ## Backup and recovery
 
 Backups are handled by restic to Cloudflare R2, encrypted on the Pi. Full documentation is in [`backup/README.md`](../backup/README.md); this section covers diagnosis.

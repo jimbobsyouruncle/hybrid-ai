@@ -64,6 +64,18 @@ Open WebUI stores essentially all of its state in SQLite, not in config files. T
 
 **Net effect:** a bare new Pi needs the prerequisites installed, the repo cloned, your backup credentials recreated, and one `restore.sh` run. Then `sudo tailscale up` and `./install.sh`. Everything else returns on its own.
 
+### The quarantine is deliberately outside every captured tree
+
+`scripts/prune-conversations.sh` moves stale OpenHands conversation directories
+into a quarantine root that is deliberately outside every tree this backup
+captures, because a quarantine inside a captured tree would be swept into the next
+snapshot and the later upload — growing the backup by the very data the sweep was
+meant to take off the disk. The script asserts this and refuses to move anything
+if the quarantine root is inside `HYBRID_AI_DATA_DIR`, `HYBRID_AI_APP_DIR`,
+`HYBRID_AI_WORK_DIR`, `HYBRID_AI_HERMES_DATA_DIR`, `HYBRID_AI_WEBUI_DATA_DIR` or
+`OPENHANDS_WORKSPACE`. Quarantined conversations are therefore **not** in a backup
+and are kept by hand, which is safe because the sweep never deletes anything.
+
 ## The thing that makes this actually work
 
 Open WebUI stores everything in SQLite. ChromaDB stores vectors in SQLite too.

@@ -188,6 +188,32 @@ The OpenHands controller uses the Docker socket to create sandboxes. Docker-sock
 
 The same clone is mounted read-only into Hermes at `/agent-repo`, and OpenHands joins the internal `coder-net` network so Hermes can call its API by service name. Neither change adds a host port.
 
+### Conversation directories and the quarantine sweep
+
+Every OpenHands conversation leaves its own directory under
+`${OPENHANDS_WORKSPACE}/conversations/<conversation-id>/` on the host, carrying an
+`owner_lease.json` lease file. The OpenHands conversation API does not see these
+directories once it has forgotten them — a live host has reported 0 conversations
+while 29 directories, about 8.3 GB, sat on disk — so the sweep walks the
+filesystem instead of the API.
+
+`scripts/prune-conversations.sh` **quarantines, and never deletes**. It moves stale
+conversation directories into a date-stamped quarantine root beside the data
+directory (default `<dirname of HYBRID_AI_DATA_DIR>/hybrid-ai-conversation-quarantine/<YYYYMMDD>/`,
+on the same filesystem, mode 0750 and root-owned). The root is asserted to be
+outside every tree the backup captures; if it is not, the sweep moves nothing.
+Moving a directory back into `conversations/` restores it.
+
+`hybrid-ai-prune.timer` is the primary mechanism and runs it daily at 04:20;
+`install.sh` installs and enables the units unconditionally and also runs the
+service once at deploy time as catch-up only. The sweep is configurable with
+`HYBRID_AI_PRUNE_AGE_SECONDS`, `HYBRID_AI_PRUNE_GRACE_SECONDS`,
+`HYBRID_AI_PRUNE_MAX_MOVES` and `HYBRID_AI_PRUNE_QUARANTINE_BASE`.
+
+To inspect it: `systemctl list-timers hybrid-ai-prune.timer` and
+`journalctl -u hybrid-ai-prune`. Full procedure and tuning in
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
+
 ## Prerequisites
 
 Work through this section completely before running anything. Roughly 45 minutes end to end, most of it waiting for downloads.

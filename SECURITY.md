@@ -491,6 +491,25 @@ Everything below is root-owned unless noted.
 The bootstrap refuses an existing `/opt/hybrid-ai` that is not a clone of the
 public remote, or whose origin carries a credential.
 
+### The conversation sweep runs as root over container-written data
+
+`deploy/hybrid-ai-prune.service` runs `scripts/prune-conversations.sh` as root,
+because the conversations tree under the OpenHands workspace is owned by root and
+by the stack's own users. The data it walks was written by containers, so the
+script treats every directory name and every `owner_lease.json` as untrusted: a
+directory whose name is not a plain token, or that is a symlink, is refused and
+never followed; a path that does not canonicalise to its own name under the
+conversations root is refused; and an unreadable or unrecognised lease is treated
+as live forever, so it never authorises a move. The sweep never deletes anything —
+it moves a directory into a quarantine root, so a wrong decision is recoverable by
+moving it back.
+
+The quarantine root is created mode 0750 and root-owned, and the run refuses to
+move anything unless that root is proven outside `HYBRID_AI_DATA_DIR`,
+`HYBRID_AI_APP_DIR`, `HYBRID_AI_WORK_DIR`, `HYBRID_AI_HERMES_DATA_DIR`,
+`HYBRID_AI_WEBUI_DATA_DIR` and `OPENHANDS_WORKSPACE`, which are the trees the backup
+captures. The unit carries no `Restart=` policy, so a failing run cannot loop.
+
 ### The deploy key moves off the login account
 
 The bootstrap writes exactly one line
