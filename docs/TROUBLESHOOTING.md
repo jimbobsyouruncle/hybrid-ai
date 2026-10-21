@@ -959,8 +959,10 @@ last sync time (UTC). The status is exactly one of:
 | `error` | A clone or fetch failed, or a git config could not be read. |
 | `stale` | Present on disk but no longer in the inventory (for example a repo you excluded in the manifest). Left in place; never deleted. |
 
-A normal run exits `0` when all is well, `1` when anything was skipped or is
-stale, and `2` on any error. Verify the tree without touching it or the network:
+A normal run exits `0` when all is well, `1` when anything was skipped, and `2`
+on any error. A `stale` row on its own does not change the exit code: the run
+warns and still exits `0`, because a stray clone is only informational there and
+is never deleted. Verify the tree without touching it or the network:
 
 ```bash
 ./scripts/sync-agent-repos.sh --check
@@ -990,7 +992,10 @@ URL is replaced.
 
 **`stale`.** The directory is on disk but is no longer in the inventory, usually
 because it was excluded in `agent-repos.local`. It is left in place and never
-deleted; remove it by hand if you no longer want it there.
+deleted; remove it by hand if you no longer want it there. A run that finds only
+stale directories prints the `stale:` warning, records the row and reports it in
+the totals, but still exits `0`. `--check` is what enforces staleness: it exits
+`1` while a `stale` row is present in a fresh inventory.
 
 ---
 

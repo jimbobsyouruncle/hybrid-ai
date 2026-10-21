@@ -24,8 +24,9 @@
 #   clone; fast-forward update; already-up-to-date; dirty skip; diverged skip
 #   (never clobbered); a symlink checked out as a plain file (core.symlinks
 #   false); a symlink planted in a tree -> skipped:symlinks; credential-remote
-#   skip; lock contention; inventory totals reconcile; --check ok, stale,
-#   skipped-row, missing dir and missing inventory.
+#   skip; lock contention; inventory totals reconcile; a stray clone (rc 0,
+#   warned, stale row, never deleted); an unclonable repo -> rc 2; --check ok,
+#   stale, skipped-row, stale-row, missing dir and missing inventory.
 #
 # USAGE:
 #   bash scripts/test-sync-agent-repos.sh
@@ -346,6 +347,51 @@ if (( SYNC_RC == 2 )); then
   pass "--check: missing inventory -> rc 2"
 else
   fail "--check missing-inventory: expected rc 2, got $SYNC_RC"
+fi
+
+# --- sync: a stray clone only warns and exits 0 ---------------------------
+# A real clone on disk that is not in the manifest is informational in sync
+# mode: the run warns, records a `stale` row and still exits 0. It is never
+# deleted. `--check` is what enforces staleness.
+R8="$ARCH/r8"; M8="$ARCH/m8.txt"; INV8="$ARCH/inv8.md"
+mkdir -p "$R8"; printf 'fixtureowner/foo\n' > "$M8"
+git clone -q "file://$BASE/foo.git" "$R8/zzzstray" 2>/dev/null
+run_sync "$R8" "$M8" "$INV8"          # first run: clones foo
+run_sync "$R8" "$M8" "$INV8"          # second run: foo up to date, stray only
+stale_n="$(awk -F'[^0-9]+' '/^- Totals:/ {print $8; exit}' "$INV8")"
+if (( SYNC_RC == 0 )) \
+   && grep -q 'stale: zzzstray' "$ARCH/out.txt" \
+   && grep -Eq '^\| zzzstray \| - \| [0-9a-f]+ \| stale \|' "$INV8" \
+   && [[ "$stale_n" == "1" ]] \
+   && [[ -d "$R8/zzzstray/.git" ]]; then
+  pass "sync: stray clone -> rc 0, warned, stale row, still on disk"
+else
+  fail "sync stale-only: expected rc 0 with a stale row and the stray kept, got rc=$SYNC_RC stale=${stale_n}: $(cat "$ARCH/out.txt")"
+fi
+
+# --- sync: a repo that cannot be cloned is still an error (rc 2) ----------
+# The bare repo still advertises a default branch, so the manifest accepts it,
+# but its objects are gone, so the clone itself fails.
+new_repo does-not-exist main
+commit_push does-not-exist main init
+rm -rf "${BASE:?}/does-not-exist.git/objects"/*
+R9="$ARCH/r9"; M9="$ARCH/m9.txt"; INV9="$ARCH/inv9.md"
+mkdir -p "$R9"; printf 'fixtureowner/does-not-exist\n' > "$M9"
+run_sync "$R9" "$M9" "$INV9"
+if (( SYNC_RC == 2 )) && grep -q '| error |' "$INV9"; then
+  pass "sync: unclonable repo -> rc 2 with an error row"
+else
+  fail "sync failure: expected rc 2 and an error row, got rc=$SYNC_RC: $(cat "$ARCH/out.txt")"
+fi
+
+# --- --check: a stale row in a fresh inventory -> rc 1 --------------------
+STALEROW="$ARCH/inv-stalerow.md"
+sed -E 's/\| up-to-date \|/| stale |/' "$INV1" > "$STALEROW"
+run_check "$STALEROW"
+if (( SYNC_RC == 1 )) && grep -q 'skipped/stale/errored row(s)' "$ARCH/out.txt"; then
+  pass "--check: stale row -> rc 1"
+else
+  fail "--check stale-row: expected rc 1 with the skipped/stale/errored warning, got $SYNC_RC: $(cat "$ARCH/out.txt")"
 fi
 
 echo "== done =="
