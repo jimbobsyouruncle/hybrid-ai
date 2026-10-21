@@ -1368,6 +1368,62 @@ if [[ "${LEFTOVER:-0}" -gt 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Conversation disk growth (WARNING-ONLY)
+#
+# Every conversation leaves its own directory under the conversations root, so
+# an old install can quietly grow past what the disk can hold. A doctor run is
+# a health report, not a cleanup, so this check only reports the measured size
+# and count and suggests the prune sweep: it never calls fail() and therefore
+# adds no path to exit 2.
+#
+# THE SKIP PATH EXISTS because the root lives on the host deployment: it may be
+# absent on a fresh clone, unreadable for a non-root run, or meaningless on a
+# non-Linux host. Those cases print one dim "skipped" line and leave the exit
+# code exactly as it would have been -- nothing below can leave a non-zero
+# status behind.
+#
+# Read-only: find, du, wc and tr only -- no mkdir, no chmod, no writes. Symlinks
+# at depth 1 are neither counted as directories nor followed.
+# ---------------------------------------------------------------------------
+CONV_SKIP=""
+CONV_ROOT=""
+if [[ "$(uname -s 2>/dev/null)" != "Linux" ]]; then
+  CONV_SKIP="not a Linux host"
+else
+  OH_WS_CRED="${OPENHANDS_WORKSPACE:-$(env_get OPENHANDS_WORKSPACE)}"
+  CONV_ROOT="${OH_WS_CRED}/conversations"
+  if [[ -z "$OH_WS_CRED" ]]; then
+    CONV_SKIP="OPENHANDS_WORKSPACE not set"
+  elif [[ ! -d "$CONV_ROOT" ]]; then
+    CONV_SKIP="conversations root not present"
+  elif [[ ! -r "$CONV_ROOT" || ! -x "$CONV_ROOT" ]]; then
+    CONV_SKIP="conversations root not readable"
+  fi
+fi
+
+if [[ -n "$CONV_SKIP" ]]; then
+  (( QUIET )) || printf '  %s-%s conversation growth check skipped (%s)\n' "$C_DIM" "$C_RST" "$CONV_SKIP"
+else
+  CONV_DIRS="$(find "$CONV_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+  CONV_DIRS="${CONV_DIRS:-0}"
+  CONV_KIB="$(du -sk "$CONV_ROOT" 2>/dev/null | cut -f1)"
+  CONV_KIB="${CONV_KIB:-0}"
+  # Render KiB as a human-readable unit without adding a dependency.
+  CONV_HUMAN="$(awk -v k="$CONV_KIB" 'BEGIN {
+    split("KiB MiB GiB TiB", u, " "); i = 1
+    while (k >= 1024 && i < 4) { k /= 1024; i++ }
+    printf (i == 1 ? "%d %s" : "%.1f %s"), k, u[i]
+    exit
+  }' </dev/null)"
+  if (( CONV_KIB > 1024 * 1024 || CONV_DIRS > 10 )); then
+    warn "conversations root holds ${CONV_DIRS} director(ies), ${CONV_HUMAN} (${CONV_ROOT})" \
+         "Consider the conversation prune sweep or the quarantine path to reclaim space."
+  else
+    pass "conversations root is ${CONV_HUMAN} across ${CONV_DIRS} director(ies)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "============================================================"
