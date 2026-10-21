@@ -429,8 +429,10 @@ If you prefer to check by hand, or `doctor.sh` itself will not run, these five c
 The stack is three compose files, always applied together and in this order:
 `docker-compose.yml`, `openhands/docker-compose.openhands.yml` and
 `hermes/docker-compose.hermes.yml`. Every compose command must pass all three,
-with `--env-file` naming the stack env file and `--project-directory` the repo
-root. A command that omits either overlay does not see those services, so an
+with `--env-file` naming the stack env file; the commands below run from the repo
+root. (The code passes `--project-directory` explicitly; compose otherwise uses
+the current directory.) A command that omits either overlay does not see those
+services, so an
 `up -d --remove-orphans` run DELETES the OpenHands and Hermes containers:
 compose treats them as orphans.
 
@@ -468,7 +470,9 @@ Step 5 failing with "connection refused" is **normal** when you have not used th
 
 ## Containers
 
-**Nothing listed by `docker compose --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml ps`**
+**Nothing listed by the three-file compose `ps`** (`docker-compose.yml` plus the
+`openhands/docker-compose.openhands.yml` and `hermes/docker-compose.hermes.yml`
+overlays)
 
 You are probably in the wrong directory, or `.env` does not exist.
 
