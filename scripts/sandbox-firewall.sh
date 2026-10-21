@@ -311,7 +311,7 @@ while IFS= read -r line; do
   [[ "$line" == *"$TAG"* ]] || continue
   body="${line#"$line_prefix"}"
   if ! is_owned "$body"; then
-    printf 'sandbox-firewall: note: a rule tagged %s in %s is not part of the current policy (an older release, or a listing normalisation difference); this script never deletes it, so do not delete it by hand: inspect with `%s %s` and raise it as an item: %s\n' \
+    printf 'sandbox-firewall: note: a rule tagged %s in %s is not part of the current policy (an older release, or a listing normalisation difference); this script never deletes it, so do not delete it by hand: inspect with "%s %s" and raise it as an item: %s\n' \
       "$TAG" "$CHAIN" "$INSPECT_CMD" "$CHAIN" "$body"
     continue
   fi
