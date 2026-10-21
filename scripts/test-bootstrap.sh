@@ -992,6 +992,8 @@ mkdir -p "$INST_APP/scripts/lib" "$INST_BIN" \
          "$INST/ws" "$INST/repos" "$INST/ohstate" "$INST/conf" "$INST/restic"
 cp "$REPO/install.sh" "$INST_APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$INST_APP/scripts/lib/"
+[ -f "$REPO/scripts/lib/build-gate.sh" ] || { echo "FATAL: scripts/lib/build-gate.sh is missing; the build gate does not exist in this tree." >&2; exit 2; }
+cp "$REPO/scripts/lib/build-gate.sh" "$INST_APP/scripts/lib/"
 cp "$REPO/scripts/setup-agent-workspace.sh" "$REPO/scripts/sync-agent-repos.sh" "$INST_APP/scripts/"
 
 for d in docker git jq curl openssl sqlite3 rsync tailscale; do

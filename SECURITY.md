@@ -16,7 +16,7 @@ This document records the threat model, the findings from a secure-code review a
 | Opportunistic internet scanner | Probes for exposed services | **Yes** — no public ports; loopback binds; no RunPod HTTP proxy |
 | Compromised process on the GPU pod | Reads memory, environment, process list, filesystem | **Partly** — keys are file-based and shredded, env scrubbed, logging off |
 | Malicious model weights | Arbitrary code execution on the pod | **Yes** — `--trust-remote-code` off by default |
-| Compromised upstream image or action | Supply-chain substitution | **Partly** — versions pinned; no digest pinning yet |
+| Compromised upstream image or action | Supply-chain substitution | **Partly** — versions pinned; the Hermes base image is pinned by digest, the compose images by tag |
 | Someone with repo read access | Harvests committed secrets | **Yes** — gitignore plus a CI assertion |
 | Cloudflare (backup storage operator) | Reads stored backup data | **Yes** — restic encrypts on the Pi; R2 holds ciphertext only |
 | Ransomware on the Pi | Deletes backups, then encrypts live data | **Partly** — credentials are scoped to one bucket; full mitigation needs Object Lock (see below) |
@@ -115,7 +115,7 @@ Accepted, with rationale:
 | `curl \| sh` installs Tailscale | Vendor-recommended install path | Prefer a custom image (option C in `runpod/README.md`), which removes runtime fetching |
 | Provider can inspect pod memory | Inherent to rented compute | Keep sensitive work on the local model |
 | No encryption at rest on the Pi | Out of scope for the default setup | Enable LUKS if the physical device is a concern |
-| Images pinned by tag, not digest | Tags are mutable in principle | Digest pinning is the stronger option if you want it |
+| Compose images pinned by tag, not digest | Tags are mutable in principle. `hermes/Dockerfile` pins its base image by digest (`FROM python:3.11-slim@sha256:...`); the compose images are still tags | Digest-pin the compose images too if you want it |
 
 ---
 

@@ -17,6 +17,8 @@
 #   * an unhealthy hermes-agent -> install.sh exits 1 and logs install_failed
 #     reason=healthcheck, with no install_success
 #   * the Hermes wait window is 300 s (raised from 120 s for a cold first start)
+#   * every log() line carries a UTC timestamp, and the run prints the
+#     per-phase duration summary (the deploy build-phase card)
 #
 # USAGE:
 #   bash scripts/test-install-health.sh
@@ -58,6 +60,8 @@ mkdir -p "$APP/scripts/lib" "$APP/deploy" "$BIN" "$BIN_ROOT" "$SYSD" "$WORK/data
          "$WORK/etc/hybrid-ai"
 cp "$REPO/install.sh" "$APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$APP/scripts/lib/"
+[ -f "$REPO/scripts/lib/build-gate.sh" ] || { echo "FATAL: scripts/lib/build-gate.sh is missing; the build gate does not exist in this tree." >&2; exit 2; }
+cp "$REPO/scripts/lib/build-gate.sh" "$APP/scripts/lib/"
 cp "$REPO/deploy/hybrid-ai-firewall.service" "$APP/deploy/"
 # The sandbox git config is shipped by install.sh; copy it so the install path
 # can run, and give the scratch workspace a git dir so install writes the exclude.
@@ -259,6 +263,24 @@ if grep -q 'EVENT .*event=install_failed' "$INSTALL_LOG"; then
   bad "install_failed was logged on a healthy run"
 else
   ok "no install_failed event on a healthy run"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== the deploy log is timestamped and timed per phase =="
+if grep -q '^\[ \* \] ' "$WORK/healthy.log"; then
+  ok "the healthy run printed log() lines"
+else
+  bad "the healthy run printed no log() lines"
+fi
+unstamped="$(grep '^\[ \* \] ' "$WORK/healthy.log" \
+  | grep -cvE '^\[ \* \] [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z ' || true)"
+check "every log() line carries a UTC timestamp" "0" "${unstamped:-0}"
+if grep -q 'Phase durations (s): pull=' "$WORK/healthy.log"; then
+  ok "the per-phase duration summary was printed"
+else
+  bad "the per-phase duration summary was not printed"
+  sed 's/^/      /' "$WORK/healthy.log" >&2
 fi
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,8 @@ cd "$SCRIPT_DIR"
 # resolved paths are exactly today's.
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
+# shellcheck source=scripts/lib/build-gate.sh
+source "${SCRIPT_DIR}/scripts/lib/build-gate.sh"
 
 APP_DIR="$HYBRID_AI_APP_DIR"
 # The stack's env file: the one handed to `docker compose --env-file` and the
@@ -94,7 +96,7 @@ if [[ -t 1 ]]; then
 else
   C_RST=""; C_INF=""; C_OK=""; C_WRN=""; C_ERR=""; C_DIM=""
 fi
-log()  { printf '%s[ * ]%s %s\n'  "$C_INF" "$C_RST" "$*"; }
+log()  { printf '%s[ * ]%s %s %s\n' "$C_INF" "$C_RST" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 ok()   { printf '%s[ OK ]%s %s\n' "$C_OK"  "$C_RST" "$*"; }
 warn() { printf '%s[ ! ]%s %s\n'  "$C_WRN" "$C_RST" "$*" >&2; }
 die()  { printf '%s[ X ]%s %s\n'  "$C_ERR" "$C_RST" "$*" >&2; exit 1; }
@@ -110,6 +112,8 @@ touch "$INSTALL_LOG" 2>/dev/null && chmod 600 "$INSTALL_LOG" 2>/dev/null || true
 event "install_start" "args=$*" "user=${USER:-unknown}"
 
 trap 'event "install_aborted" "line=${LINENO}"; die "Failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
+# The progress heartbeat must never outlive the run that started it.
+trap 'hybrid_progress_stop' EXIT
 
 hr
 printf '  hybrid-ai :: local control plane bootstrap\n'
@@ -1036,7 +1040,15 @@ COMPOSE=(
 export COMPOSE_HTTP_TIMEOUT=600
 export DOCKER_CLIENT_TIMEOUT=600
 
+# Per-phase wall-clock, printed as a summary at the end. `SECONDS` is bash's
+# own counter, so nothing has to be timed by hand.
+PHASE_PULL=0
+PHASE_BUILD=0
+PHASE_UP=0
+_phase_mark=$SECONDS
+
 log "Pulling container images..."
+hybrid_progress_start "pull"
 MAX_RETRIES=5
 ATTEMPT=1
 
@@ -1050,6 +1062,8 @@ while [ $ATTEMPT -le $MAX_RETRIES ]; do
         ATTEMPT=$((ATTEMPT + 1))
     fi
 done
+hybrid_progress_stop
+PHASE_PULL=$(( SECONDS - _phase_mark )); _phase_mark=$SECONDS
 
 if [ $ATTEMPT -gt $MAX_RETRIES ]; then
     die "Failed to pull images after $MAX_RETRIES attempts. Please check network routing."
@@ -1063,14 +1077,54 @@ if ! "${APP_DIR}/scripts/check-hermes-nonroot.sh"; then
   die "Refusing to start: the Hermes non-root uid is not usable (see above)."
 fi
 
+# ---------------------------------------------------------------------------
+# Deciding whether the Hermes image has to be rebuilt
+# ---------------------------------------------------------------------------
+# The image carries the sha of the inputs it was built from. Rebuild only when
+# that sha differs from the sha of the inputs now. Every uncertain case -- no
+# image, no label, an unreadable label, any error -- rebuilds, so the gate can
+# never leave a stale image serving.
+#
+# The gate lives in scripts/lib/build-gate.sh. The pinned BUILD_INPUTS_SHA is
+# exported around the build so compose can pass it as the build arg; without
+# it the label would be the Dockerfile default and every deploy would rebuild.
+build_gate_decide "$APP_DIR" "$ENV_FILE"
+if [[ "$BUILD_GATE_DECISION" == "cache" ]]; then
+  log "build-gate: cache hit (${BUILD_GATE_SHA})"
+  event "build_gate_cache_hit" "sha=${BUILD_GATE_SHA}"
+else
+  log "build-gate: rebuild (${BUILD_GATE_REASON})"
+  event "build_gate_rebuild" "reason=${BUILD_GATE_REASON}" "sha=${BUILD_GATE_SHA}"
+fi
+
 log "Starting full Hybrid-AI control plane stack..."
-if ! "${COMPOSE[@]}" up -d --build --remove-orphans; then
+# Build, then start. `compose build` builds every service with a `build:`
+# section -- today only hermes -- which is exactly what `up --build` did, but
+# as its own phase so its time is visible and so a cache hit can skip it.
+if [[ "$BUILD_GATE_DECISION" != "cache" ]]; then
+  log "Building images..."
+  hybrid_progress_start "build"
+  if ! BUILD_INPUTS_SHA="$BUILD_GATE_SHA" "${COMPOSE[@]}" build; then
+    hybrid_progress_stop
+    PHASE_BUILD=$(( SECONDS - _phase_mark ))
+    event "stack_build_failed"
+    warn "docker compose build failed."
+    die "Control plane image build did not complete."
+  fi
+  hybrid_progress_stop
+fi
+PHASE_BUILD=$(( SECONDS - _phase_mark )); _phase_mark=$SECONDS
+
+if ! "${COMPOSE[@]}" up -d --remove-orphans; then
+  PHASE_UP=$(( SECONDS - _phase_mark ))
   event "stack_start_failed"
   warn "docker compose up failed. Recent logs:"
   "${COMPOSE[@]}" logs --tail 40 2>/dev/null || true
   die "Control plane did not start."
 fi
+PHASE_UP=$(( SECONDS - _phase_mark )); _phase_mark=$SECONDS
 event "stack_started"
+
 
 # ---------------------------------------------------------------------------
 # STEP 9b. Close the sandbox port exposure
@@ -1104,7 +1158,16 @@ esac
 # ---------------------------------------------------------------------------
 # STEP 10. Verify service health and check local DNS resolution
 # ---------------------------------------------------------------------------
+# Per-phase summary. Printed once the deploy phases are done, and again on the
+# health-failure exit, so a slow phase is always attributable.
+print_phase_summary() {
+  log "Phase durations (s): pull=${PHASE_PULL} build=${PHASE_BUILD} up=${PHASE_UP} verify=$(( SECONDS - _phase_mark ))"
+  event "phase_durations" "pull=${PHASE_PULL}" "build=${PHASE_BUILD}" \
+    "up=${PHASE_UP}" "verify=$(( SECONDS - _phase_mark ))"
+}
+
 log "Verifying service health..."
+hybrid_progress_start "verify"
 
 wait_for() {
   local label="$1" url="$2" max="$3" waited=0
@@ -1148,6 +1211,8 @@ wait_for "open-webui"   "http://127.0.0.1:3000/health"    600 || HEALTH_FAILED=1
 wait_for "hermes-agent" "http://127.0.0.1:${HERMES_PORT:-8501}" 300 || HEALTH_FAILED=1
 wait_for "openhands"    "http://127.0.0.1:${OPENHANDS_PORT:-3001}" 240 || warn "OpenHands initializing..."
 wait_for "status page"  "http://127.0.0.1:80/status/healthz" 60 || warn "Status reverse proxy initializing..."
+hybrid_progress_stop
+print_phase_summary
 
 hr
 "${COMPOSE[@]}" ps

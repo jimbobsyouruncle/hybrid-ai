@@ -158,7 +158,12 @@ jobs:
         # validated. scripts/deploy-trigger.sh validates the sha, verifies the
         # Pi's host key fingerprint BEFORE authenticating, writes the private
         # key mode 0600 under $RUNNER_TEMP, and removes it on every exit path.
-        timeout-minutes: 20   # matches the old appleboy "command_timeout: 20m"
+        #
+        # 60 min is STRICTLY longer than the deploy unit's TimeoutStartSec
+        # (45 min, deploy/hybrid-ai-deploy@.service). Keep that order: the unit
+        # gives up first, so this step outlives it and reports the real
+        # Result= instead of being killed mid-deploy.
+        timeout-minutes: 60
         env:
           PI_HOST: ${{ secrets.PI_TAILSCALE_IP }}
           PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}

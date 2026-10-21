@@ -119,7 +119,7 @@
 - grace_epoch()
 
 ## hermes/Dockerfile
-- FROM python:3.11-slim
+- FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8
 
 ## hermes/docker-compose.hermes.yml
 - hermes
@@ -137,6 +137,7 @@
 - install_firewall_unit()
 - install_prune_scheduler()
 - run_prune_catch_up()
+- print_phase_summary()
 - wait_for()
 - install_backup_scheduler_system()
 - install_backup_scheduler()
@@ -302,6 +303,18 @@
 ## scripts/deploy-trigger.sh
 - (no symbols)
 
+## scripts/lib/build-gate.sh
+- build_gate_file_sha()
+- build_gate_stream_sha()
+- build_gate_arg_default()
+- build_gate_envfile_value()
+- build_gate_arg_value()
+- build_gate_base_digest()
+- build_gate_inputs_sha()
+- build_gate_decide()
+- hybrid_progress_start()
+- hybrid_progress_stop()
+
 ## scripts/lib/hybrid-ai-env.sh
 - _hybrid_ai_canon()
 - _hybrid_ai_expand_tilde()
@@ -452,6 +465,14 @@
 - mk_repo()
 - run_check()
 - no_leak()
+
+## scripts/test-deploy-build-gate.sh
+- ok()
+- bad()
+- check()
+- decide()
+- current_sha()
+- log()
 
 ## scripts/test-deploy-forced-command.sh
 - ok()

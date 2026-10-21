@@ -574,6 +574,12 @@ neither the `docker` nor the `systemd-journal` group. Full detail, including the
 `authorized_keys` line and the refusal exit codes, is in
 [`deploy/README.md`](deploy/README.md).
 
+A deploy rebuilds the Hermes image only when its build inputs changed, and its
+log is timestamped per line with a per-phase duration summary. The deploy unit
+gives up after 45 min, inside the 60 min workflow step, so the step reports the
+real `Result=`. See
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md), "The build phase of a deploy".
+
 ---
 
 ## Host paths (relocation)

@@ -9,6 +9,10 @@ services:
         # (10001) applies.
         HYBRID_AI_UID: ${HYBRID_AI_UID:-10001}
         HYBRID_AI_GID: ${HYBRID_AI_GID:-10001}
+        # The sha of the build inputs this image was built from, recorded on the
+        # image as a label. install.sh exports it around the build; the deploy
+        # reads it back to decide whether a rebuild is needed at all.
+        BUILD_INPUTS_SHA: ${BUILD_INPUTS_SHA:-unknown}
     container_name: hermes-agent
     restart: unless-stopped
     # Run as the dedicated non-root service uid. The `:-0` default is the

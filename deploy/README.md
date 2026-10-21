@@ -140,9 +140,20 @@ after the reset.
    an ancestor of `origin/main`, resets to it, asserts `HEAD == <sha>`, and
    `exec`s the existing `scripts/deploy-remote.sh`.
 5. `scripts/deploy-remote.sh` re-asserts `HEAD`, runs `install.sh`, and gates on
-   `doctor.sh`.
+   `doctor.sh`. `install.sh` rebuilds the Hermes image only when its build
+   inputs changed, and prints a per-phase duration summary
+   (see `docs/TROUBLESHOOTING.md`, "The build phase of a deploy").
 6. The forced command reads back the unit's result and prints the run log from
    `$HYBRID_AI_LOG_DIR/deploy/<sha>.log`.
+
+---
+
+## Timeouts
+
+The unit's `TimeoutStartSec=` is 45 min and the workflow's `Trigger deploy` step
+is 60 min. The step must stay strictly longer than the unit, so the unit gives
+up first and the step is still alive to report the real `Result=`. Do not invert
+them.
 
 ---
 
