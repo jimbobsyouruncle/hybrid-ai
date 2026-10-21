@@ -67,10 +67,15 @@
 #                        Also read from AGENT_REPOS_MAX_AGE_HOURS.
 #
 # EXIT CODES (a normal run):
-#   0  every repo cloned, refreshed or already up to date; none skipped/stale.
-#   1  the run finished but something was skipped (skipped:<reason>) or stale.
+#   0  every repo cloned, refreshed or already up to date; none skipped. A
+#      stale-only run also exits 0: a stray clone is informational here.
+#   1  the run finished but something was skipped (skipped:<reason>).
 #   2  an error: usage error, safety refusal, concurrent run, a failed
 #      clone/fetch, or an unreadable inventory.
+# A stale clone (on disk but no longer in the inventory) never changes the exit
+# code of a normal run -- it is only reported, never deleted. It still shows up
+# as a `warn` line, as a `stale` inventory row, and in the summary/totals, and
+# `--check` still fails on it.
 # EXIT CODES (--check):
 #   0  ok
 #   1  the inventory is older than the max age, or a skipped/stale row exists
@@ -757,10 +762,12 @@ printf '    Repos     : %d total, %d cloned, %d updated, %d up-to-date, %d skipp
 printf '    Mounted in the Hermes container READ-ONLY at /agent-repos\n'
 printf '\n'
 
+# Stale rows do not affect this exit code on purpose: a stray clone is
+# informational in sync mode, and `--check` is what enforces staleness.
 exit_code=0
 if (( n_failed > 0 )); then
   exit_code=2
-elif (( n_skipped > 0 || n_stale > 0 )); then
+elif (( n_skipped > 0 )); then
   exit_code=1
 fi
 exit "$exit_code"
