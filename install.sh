@@ -894,7 +894,128 @@ install_firewall_unit() {
   event "sandbox_firewall_unit_installed"
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# STEP 9a-2. Install and enable the conversation prune units
+# ---------------------------------------------------------------------------
+# hybrid-ai-prune.timer is the primary mechanism: it runs the prune daily so the
+# OpenHands conversations tree cannot grow without bound. The prune QUARANTINES
+# stale conversations and never deletes them. install.sh also runs the script
+# once after the stack is up (run_prune_catch_up), but that is catch-up only.
+#
+# UNCONDITIONAL: this is not gateable and must never appear inside the backup
+# gate, because pruning is unrelated to whether backups are configured. It sits
+# before the --no-start exit so both deploy paths install the timer.
+#
+# Fail-safe, never fail-closed: it never calls sudo, never dies and never
+# changes this script's exit status. Without root, systemctl or the unit
+# template it warns and records an event.
+#
+# HYBRID_AI_SYSTEMD_UNIT_DIR is the same HARNESS-ONLY override the firewall step
+# uses for scripts/test-install-health.sh; it is not documented anywhere else.
+install_prune_scheduler() {
+  local unit
+  local unit_dir="${HYBRID_AI_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+  local units=(hybrid-ai-prune.service hybrid-ai-prune.timer)
+
+  if [[ "$(id -u)" != "0" ]]; then
+    warn "The prune units need root to install into ${unit_dir}; not calling sudo."
+    warn "Re-run ./install.sh as root so the daily conversation prune is scheduled."
+    event "prune_schedule_failed" "reason=not_root"
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl is unavailable; install and enable hybrid-ai-prune.timer by hand."
+    event "prune_schedule_failed" "reason=systemctl_missing"
+    return 0
+  fi
+
+  for unit in "${units[@]}"; do
+    if [[ ! -f "${APP_DIR}/deploy/${unit}" ]]; then
+      warn "Missing prune unit file: ${APP_DIR}/deploy/${unit}"
+      event "prune_schedule_failed" "reason=template_missing" "unit=${unit}"
+      return 0
+    fi
+  done
+
+  for unit in "${units[@]}"; do
+    local source_file="${APP_DIR}/deploy/${unit}"
+    local target_file="${unit_dir}/${unit}"
+    if ! install -m 0644 "$source_file" "${target_file}.tmp"; then
+      rm -f "${target_file}.tmp"
+      warn "Could not stage ${unit} in ${unit_dir}."
+      event "prune_schedule_failed" "reason=copy_failed" "unit=${unit}"
+      return 0
+    fi
+    if ! mv -f "${target_file}.tmp" "$target_file"; then
+      warn "Could not move ${unit} into ${unit_dir}."
+      event "prune_schedule_failed" "reason=move_failed" "unit=${unit}"
+      return 0
+    fi
+  done
+
+  if ! systemctl daemon-reload; then
+    warn "system daemon reload failed; the prune units may not be visible yet."
+    event "prune_schedule_failed" "reason=daemon_reload"
+    return 0
+  fi
+
+  # enable and start are separate calls on purpose: scripts/test-install-health.sh
+  # asserts that no "enable --now" appears in this script's systemctl argv.
+  if ! systemctl enable hybrid-ai-prune.timer >/dev/null 2>&1; then
+    warn "Could not enable hybrid-ai-prune.timer; the daily prune is not scheduled."
+    event "prune_schedule_failed" "reason=enable"
+    return 0
+  fi
+  if ! systemctl start hybrid-ai-prune.timer >/dev/null 2>&1; then
+    warn "Could not start hybrid-ai-prune.timer; the daily prune is enabled but not running."
+    event "prune_schedule_failed" "reason=start"
+    return 0
+  fi
+
+  if [[ "$(systemctl is-enabled hybrid-ai-prune.timer 2>/dev/null)" != "enabled" ]]; then
+    warn "hybrid-ai-prune.timer is installed but not enabled."
+    event "prune_schedule_failed" "reason=not_enabled"
+    return 0
+  fi
+  if [[ "$(systemctl is-active hybrid-ai-prune.timer 2>/dev/null)" != "active" ]]; then
+    warn "hybrid-ai-prune.timer is enabled but not active."
+    event "prune_schedule_failed" "reason=not_active"
+    return 0
+  fi
+
+  ok "Installed and enabled hybrid-ai-prune.timer (daily conversation prune)."
+  event "prune_schedule_installed"
+  return 0
+}
+
+# Catch-up prune: the timer above is the primary mechanism. This one-shot call
+# exists only for a host that was off or had not re-deployed for a while, so the
+# tree is swept once after the stack comes up. It never dies and never changes
+# this script's exit status.
+run_prune_catch_up() {
+  local script="${APP_DIR}/scripts/prune-conversations.sh"
+
+  if [[ ! -f "$script" ]]; then
+    warn "Catch-up prune skipped: ${script} is not installed."
+    event "prune_catch_up_skipped" "reason=script_missing"
+    return 0
+  fi
+
+  if ! bash "$script"; then
+    warn "Catch-up prune failed; the daily timer will retry. Nothing was deleted."
+    event "prune_catch_up_failed"
+    return 0
+  fi
+
+  ok "Catch-up conversation prune completed (quarantine only)."
+  event "prune_catch_up_completed"
+  return 0
+}
+
 install_firewall_unit || true
+install_prune_scheduler || true
 
 if (( NO_START )); then
   hr; ok "--no-start requested. Environment prepared; Docker untouched."
@@ -1479,6 +1600,9 @@ event "install_success" \
 
 hr
 ok "Control plane stack is up."
+
+run_prune_catch_up || true
+
 printf '\n    Service Hub  : http://%s/hub\n' "${LOCAL_DOMAIN}"
 printf '    Open WebUI   : http://%s\n' "${LOCAL_DOMAIN}"
 printf '    OpenHands    : SSH tunnel to http://127.0.0.1:%s\n' "${OPENHANDS_PORT:-3001}"

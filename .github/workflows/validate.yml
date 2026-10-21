@@ -212,6 +212,18 @@ jobs:
         # stubbed on PATH; the Hermes wait window is asserted at 300 s.
         run: bash scripts/test-install-health.sh
 
+      - name: Conversation prune lease-guard tests
+        # Offline, no root, no Docker, no network. RUNS
+        # scripts/prune-conversations.sh against throwaway fixture trees under
+        # mktemp -d to prove the lease guard in BOTH directions: a live lease
+        # keeps a directory, an expired lease past grace with an old mtime
+        # moves it into quarantine with its files intact, a recent directory
+        # is kept, a missing lease is kept (refused lease-missing), a symlink
+        # is refused and not followed, the per-run move cap is honoured, a
+        # second run moves nothing, and the quarantine never escapes the
+        # workspace. The harness fails against a tree without the script.
+        run: bash scripts/test-prune-conversations.sh
+
       - name: Env pin migration tests
         # Offline. Proves install.sh's STEP 2b migration moves a stale
         # :1.8 / 1.26.0-python pin in an existing .env to the current defaults,

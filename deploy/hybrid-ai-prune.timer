@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/hybrid-ai-prune.timer
+# PURPOSE (plain English):
+#   Runs the conversation prune daily at 04:20. This timer is the PRIMARY
+#   mechanism: it keeps the quarantined conversation tree from growing without
+#   bound on a host that stays up.
+#
+#   Persistent=true means a run missed while the host was off fires once the
+#   host is back up. install.sh also runs hybrid-ai-prune.service once at deploy
+#   time, but that call is catch-up only, not the schedule.
+#
+#   The prune QUARANTINES and never deletes; only the script decides what to
+#   move aside.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Run the hybrid-ai conversation prune daily
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+Persistent=true
+Unit=hybrid-ai-prune.service
+
+[Install]
+WantedBy=timers.target

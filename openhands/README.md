@@ -94,6 +94,53 @@ and to branch from `origin/<default>` rather than a local `main` or `master`.
 
 ---
 
+## Conversation directories and the quarantine
+
+The workspace is bind-mounted read-write into the sandbox as `/workspace`, so the
+agent's conversations live on the host at:
+
+```text
+${OPENHANDS_WORKSPACE}/conversations/<conversation-id>/     one directory per conversation
+${OPENHANDS_WORKSPACE}/conversations/<conversation-id>/owner_lease.json
+```
+
+`owner_lease.json` is the lease that says whether a conversation is still owned by
+a running process. Fields observed on a live host: `owner_instance_id`,
+`generation`, `expires_at`, `owner_host`, `owner_pid`. `expires_at` carries the
+deadline; the sweep reads it as epoch seconds (a value above 1e12 is read as
+milliseconds) or as an ISO-8601 string, and an ISO-8601 value without a zone is
+read as UTC.
+
+These directories are **invisible to the OpenHands conversation API**: a live host
+reported 0 conversations while 29 directories, about 8.3 GB, sat on disk. The app
+forgets a conversation long before its directory leaves the workspace, so an
+API-driven cleanup cannot see them. `scripts/prune-conversations.sh` therefore
+walks the directory tree.
+
+The sweep QUARANTINES, it never deletes. A stale directory is moved to:
+
+```text
+<dirname of HYBRID_AI_DATA_DIR>/hybrid-ai-conversation-quarantine/<YYYYMMDD>/<conversation-id>/
+```
+
+That root is on the same filesystem as the conversations tree, is created mode
+0750 and root-owned, and is asserted to sit outside every tree the backup captures
+(`HYBRID_AI_DATA_DIR`, `HYBRID_AI_APP_DIR`, `HYBRID_AI_WORK_DIR`,
+`HYBRID_AI_HERMES_DATA_DIR`, `HYBRID_AI_WEBUI_DATA_DIR`, `OPENHANDS_WORKSPACE`).
+If it does not, the sweep refuses to move anything. `HYBRID_AI_PRUNE_QUARANTINE_BASE`
+overrides the root and is still subject to the same assertion.
+
+Moving a directory back into `conversations/` restores it, because nothing was
+deleted. Permission to move it is checked before the move: a symlinked or
+non-plain-token directory name is refused and never followed, a directory whose
+lease is missing, unreadable or unrecognised is refused and never moved — reported
+as a refusal, not as kept-live, so an unreadable lease fails closed — and a
+directory reached by a running container is skipped. The schedule, the knobs and
+the inspection steps are in
+[`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
+
+---
+
 ## Sandbox git ownership and `/etc/gitconfig`
 
 Git inside the sandbox needs a nudge, and this is why.

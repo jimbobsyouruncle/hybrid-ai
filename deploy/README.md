@@ -185,6 +185,42 @@ These are also listed in [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md)
 
 ---
 
+## Conversation prune units
+
+Two units run the conversation quarantine sweep. They are ordinary system units,
+not part of the headless deploy, and `hybrid-ai-prune.service` names
+`/opt/hybrid-ai/deploy/README.md` as its `Documentation=` target — this section.
+
+| Unit | What it does |
+|---|---|
+| `hybrid-ai-prune.service` | `Type=oneshot`, `User=root`, `ExecStart=/opt/hybrid-ai/scripts/prune-conversations.sh` |
+| `hybrid-ai-prune.timer` | `OnCalendar=*-*-* 04:20:00`, `Persistent=true`, `Unit=hybrid-ai-prune.service` |
+
+It runs as root because the conversations tree under the OpenHands workspace is
+owned by root and by the stack's own users; a non-root run could not move those
+directories.
+
+`install.sh` installs and enables both units **unconditionally** — not gated on
+`HYBRID_AI_BACKUP_MODE`, because pruning is unrelated to whether backups are
+configured. It warns and records an event rather than failing if it is not root,
+if `systemctl` is unavailable, or if a unit template is missing, so the schedule
+can never fail a deploy. It also runs the service once at deploy time as
+**catch-up only**, for a host that was off or had not re-deployed for a while; a
+missing script there is a warning too. The timer is the primary mechanism.
+
+`hybrid-ai-prune.service` carries no `Restart=` line at all, deliberately. A
+failing prune must not loop; the failure stays visible in
+`systemctl status hybrid-ai-prune`. For the same reason neither unit sets
+filesystem sandboxing directives (`ProtectSystem=`, `PrivateTmp=`,
+`ReadOnlyPaths=`, `InaccessiblePaths=`): the service has to move directories
+under the workspace, and those flags would break the move.
+
+The prune QUARANTINES and never deletes. The knobs and the inspection and restore
+steps are in the root `README.md` and
+[`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
+
+---
+
 ## No retry policy
 
 `hybrid-ai-deploy@.service` has **no `Restart=` policy at all**. An earlier

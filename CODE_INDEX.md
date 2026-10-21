@@ -135,6 +135,8 @@
 - query_tailnet()
 - prepare_openhands_workspace()
 - install_firewall_unit()
+- install_prune_scheduler()
+- run_prune_catch_up()
 - wait_for()
 - install_backup_scheduler_system()
 - install_backup_scheduler()
@@ -316,6 +318,21 @@
 ## scripts/lib/read-probe.sh
 - probe_can_read()
 - find_unreadable()
+
+## scripts/prune-conversations.sh
+- log()
+- warn()
+- refuse()
+- summary()
+- finish()
+- deny()
+- is_uint()
+- canon()
+- path_within()
+- backup_assert_ok()
+- lease_verdict()
+- container_uses_dir()
+- container_verdict()
 
 ## scripts/sandbox-firewall.sh
 - usage()
@@ -527,6 +544,20 @@
 - check()
 - run_install()
 - firewall_sudo()
+
+## scripts/test-prune-conversations.sh
+- ok()
+- bad()
+- skip()
+- check()
+- case_begin()
+- case_end()
+- new_tree()
+- write_lease()
+- age_dir()
+- run_prune()
+- counter()
+- refusals_of()
 
 ## scripts/test-read-probe.sh
 - ok()
