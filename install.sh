@@ -806,6 +806,96 @@ prepare_openhands_workspace() {
 }
 prepare_openhands_workspace || warn "OpenHands workspace ACLs not applied (needs sudo). Re-run ./install.sh interactively, then check with ./doctor.sh"
 
+# ---------------------------------------------------------------------------
+# STEP 9a. Install and enable the boot firewall unit
+# ---------------------------------------------------------------------------
+# STEP 9b applies the DOCKER-USER rules for this run, but Docker recreates an
+# empty DOCKER-USER chain on every boot, so those rules are gone after a reboot.
+# hybrid-ai-firewall.service re-applies them at boot. scripts/bootstrap.sh has
+# always installed and enabled it; the deploy path did not, so a host deployed
+# for weeks could reboot with an empty chain. Install it on every deploy.
+#
+# This sits before the --no-start exit so both paths install the unit. Enable
+# ONLY: STEP 9b already applied the rules, this is boot persistence, so no
+# --now, no start and no restart.
+#
+# Fail-safe, never fail-closed: it never calls sudo, never dies and never
+# changes this script's exit status. Without root, systemctl or the unit
+# template it warns and records an event.
+#
+# HYBRID_AI_SYSTEMD_UNIT_DIR is a HARNESS-ONLY override for
+# scripts/test-install-health.sh, which installs into a scratch directory. Do
+# not document it: it is not in .env.example and not in STEP 8's .env template.
+install_firewall_unit() {
+  local unit="hybrid-ai-firewall.service"
+  local unit_dir="${HYBRID_AI_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+  local source_file="${APP_DIR}/deploy/${unit}"
+  local target_file="${unit_dir}/${unit}"
+  local was_enabled=0
+
+  if [[ "$(id -u)" != "0" ]]; then
+    warn "hybrid-ai-firewall.service needs root to install into ${unit_dir}; not calling sudo."
+    warn "Re-run ./install.sh as root so the boot firewall unit is installed and enabled."
+    event "sandbox_firewall_unit_failed" "reason=not_root"
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl is unavailable; install and enable ${unit} by hand."
+    event "sandbox_firewall_unit_failed" "reason=systemctl_missing"
+    return 0
+  fi
+
+  if [[ ! -f "$source_file" ]]; then
+    warn "Missing firewall unit file: ${source_file}"
+    event "sandbox_firewall_unit_failed" "reason=template_missing"
+    return 0
+  fi
+
+  if ! install -m 0644 "$source_file" "${target_file}.tmp"; then
+    rm -f "${target_file}.tmp"
+    warn "Could not stage ${unit} in ${unit_dir}."
+    event "sandbox_firewall_unit_failed" "reason=copy_failed"
+    return 0
+  fi
+  if ! mv -f "${target_file}.tmp" "$target_file"; then
+    warn "Could not move ${unit} into ${unit_dir}."
+    event "sandbox_firewall_unit_failed" "reason=move_failed"
+    return 0
+  fi
+
+  if ! systemctl daemon-reload; then
+    warn "system daemon reload failed; ${unit} is installed but may not be visible yet."
+    event "sandbox_firewall_unit_failed" "reason=daemon_reload"
+    return 0
+  fi
+
+  if systemctl is-enabled "$unit" >/dev/null 2>&1; then
+    was_enabled=1
+  fi
+
+  if ! systemctl enable "$unit" >/dev/null 2>&1; then
+    warn "Could not enable ${unit}; boot firewall persistence is not in place."
+    event "sandbox_firewall_unit_failed" "reason=enable"
+    return 0
+  fi
+
+  if [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" != "enabled" ]]; then
+    warn "${unit} is installed but not enabled; the boot firewall rules stay off."
+    event "sandbox_firewall_unit_failed" "reason=not_enabled"
+    return 0
+  fi
+
+  if (( was_enabled )); then
+    ok "${unit} already enabled (boot firewall persistence in place)."
+  else
+    ok "Installed and enabled ${unit} (boot firewall persistence)."
+  fi
+  event "sandbox_firewall_unit_installed"
+  return 0
+}
+install_firewall_unit || true
+
 if (( NO_START )); then
   hr; ok "--no-start requested. Environment prepared; Docker untouched."
   warn "Sandbox firewall rules not applied: DOCKER-USER does not exist until Docker starts. hybrid-ai-firewall.service applies them at boot."

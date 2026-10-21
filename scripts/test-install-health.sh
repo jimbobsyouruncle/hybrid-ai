@@ -51,11 +51,14 @@ fi
 # --- scratch app + layout ----------------------------------------------------
 APP="$WORK/app"
 BIN="$WORK/bin"
-mkdir -p "$APP/scripts/lib" "$BIN" "$WORK/data" "$WORK/log" "$WORK/work" \
+BIN_ROOT="$WORK/bin-root"
+SYSD="$WORK/systemd"
+mkdir -p "$APP/scripts/lib" "$APP/deploy" "$BIN" "$BIN_ROOT" "$SYSD" "$WORK/data" "$WORK/log" "$WORK/work" \
          "$WORK/ws" "$WORK/repos" "$WORK/ohstate" "$WORK/conf" "$WORK/restic" \
          "$WORK/etc/hybrid-ai"
 cp "$REPO/install.sh" "$APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$APP/scripts/lib/"
+cp "$REPO/deploy/hybrid-ai-firewall.service" "$APP/deploy/"
 # The sandbox git config is shipped by install.sh; copy it so the install path
 # can run, and give the scratch workspace a git dir so install writes the exclude.
 mkdir -p "$APP/openhands" "$WORK/ws/.git/info"
@@ -91,10 +94,18 @@ chmod 644 "$LAYOUT"
 
 # --- stubs -------------------------------------------------------------------
 for d in docker git jq openssl sqlite3 rsync tailscale hostname nproc \
-         loginctl setfacl apt-get sudo restic; do
+         loginctl setfacl apt-get restic; do
   # shellcheck disable=SC2016  # $0 must expand inside the generated stub
   printf '#!/usr/bin/env bash\nprintf "%%s stub\\n" "$0"\nexit 0\n' > "$BIN/$d"
 done
+# sudo logs its argv and then swallows the call, exactly as before. The rest of
+# install.sh does use sudo (prepare_openhands_workspace), so this asserts about
+# the firewall step only, never "sudo was never called".
+cat > "$BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SUDO_ARGV_LOG:-/dev/null}"
+exit 0
+EOF
 # `id` answers without a real account; chown is a no-op.
 # shellcheck disable=SC2016  # $@ must expand inside the generated stub
 printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "1000\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$BIN/id"
@@ -121,18 +132,90 @@ case "$url" in
   *) exit 0 ;;
 esac
 EOF
+# install: record the argv, then do the real copy so the mode and the bytes are
+# genuine (the .sandbox-gitconfig assertions depend on that).
+cat > "$BIN/install" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${INSTALL_ARGV_LOG:-/dev/null}"
+exec /usr/bin/install "$@"
+EOF
+# systemctl: record the argv and answer from a scratch state directory. It also
+# has to satisfy the backup scheduler's system-mode calls (daemon-reload, cat,
+# enable --now, is-enabled, is-active) or that step starts failing.
+cat > "$BIN/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+[[ "${1:-}" == "--user" ]] && shift
+cmd="${1:-}"; unit="${2:-}"
+state="${SYSTEMCTL_STATE:-/nonexistent}"
+case "$cmd" in
+  daemon-reload|reload|start|restart|stop|disable) exit 0 ;;
+  cat)
+    [[ -f "${SYSTEMCTL_UNIT_DIR:-/nonexistent}/${unit}" ]] && exit 0
+    case "$unit" in hybrid-ai-backup*|hybrid-ai-check*) exit 0 ;; esac
+    exit 1 ;;
+  enable)
+    [[ "$unit" == "--now" ]] && unit="${3:-}"
+    [[ -n "$unit" ]] && : > "${state}/${unit}.enabled"
+    exit 0 ;;
+  is-enabled)
+    if [[ -e "${state}/${unit}.enabled" ]]; then printf 'enabled\n'; exit 0; fi
+    printf 'disabled\n'; exit 1 ;;
+  is-active) printf 'active\n'; exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
 chmod +x "$BIN"/*
 
-run_install() { # hermes_health log
+# Root variant: only `id` differs, so it must win on PATH ahead of $BIN.
+# shellcheck disable=SC2016  # $@ must expand inside the generated stub
+printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "0\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$BIN_ROOT/id"
+chmod +x "$BIN_ROOT/id"
+
+# A PATH with no systemctl anywhere: symlink farm over the real bin dirs, with
+# the stubs layered on top and systemctl left out.
+BIN_NOSYS="$WORK/bin-nosystemctl"
+mkdir -p "$BIN_NOSYS" "$WORK/sysstate"
+for d in /usr/bin /usr/local/bin /usr/sbin; do
+  for f in "$d"/*; do
+    b="${f##*/}"
+    [[ "$b" == "systemctl" ]] && continue
+    [[ -e "$BIN_NOSYS/$b" ]] && continue
+    ln -s "$f" "$BIN_NOSYS/$b"
+  done
+done
+for f in "$BIN"/*; do
+  b="${f##*/}"
+  [[ "$b" == "systemctl" ]] && continue
+  ln -sfn "$f" "$BIN_NOSYS/$b"
+done
+ln -sfn "$BIN_ROOT/id" "$BIN_NOSYS/id"
+
+INSTALL_ARGV="$WORK/install-argv.log"
+SYSTEMCTL_ARGV="$WORK/systemctl-argv.log"
+SUDO_ARGV="$WORK/sudo-argv.log"
+
+# run_install hermes_health log [unit_dir] [install_argv_log] [path]
+# The path argument picks the variant: ROOT_PATH for the privileged runs and
+# BIN_NOSYS for the no-systemctl run. The default is the unprivileged stubs.
+run_install() {
   local health="$1" log="$2" rc=0
+  local unit_dir="${3:-$SYSD}" argv_log="${4:-$INSTALL_ARGV}"
+  local run_path="${5:-$BIN:$PATH}"
   env -u HYBRID_AI_APP_DIR -u HYBRID_AI_DATA_DIR -u HYBRID_AI_LOG_DIR \
       -u HYBRID_AI_WORK_DIR -u HYBRID_AI_STACK_ENV_FILE \
       -u OPENHANDS_WORKSPACE -u AGENT_REPOS_DIR -u OPENHANDS_STATE_DIR \
       -u BACKUP_CONF_DIR -u RESTIC_CACHE_DIR -u HYBRID_AI_HERMES_HOME_DIR \
       -u HYBRID_AI_BACKUP_MODE -u BACKUP_CONTAINER_CONTROL \
       -u HYBRID_AI_UID -u HYBRID_AI_GID -u HYBRID_AI_LAYOUT_UID -u HYBRID_AI_LAYOUT_GID \
-      PATH="$BIN:$PATH" \
+      PATH="$run_path" \
       HYBRID_AI_ENV_FILE="$LAYOUT" \
+      HYBRID_AI_SYSTEMD_UNIT_DIR="$unit_dir" \
+      INSTALL_ARGV_LOG="$argv_log" \
+      SUDO_ARGV_LOG="$SUDO_ARGV" \
+      SYSTEMCTL_LOG="$SYSTEMCTL_ARGV" \
+      SYSTEMCTL_STATE="$WORK/sysstate" \
+      SYSTEMCTL_UNIT_DIR="$unit_dir" \
       HERMES_HEALTH="$health" \
       LOCAL_DOMAIN=example.test OPENROUTER_API_KEY=stub RUNPOD_API_KEY=stub \
       RUNPOD_POD_ID=stub RUNPOD_HOST=stub PI_HOST=stub \
@@ -141,6 +224,7 @@ run_install() { # hermes_health log
       bash "$APP/install.sh" --non-interactive >> "$log" 2>&1 || rc=$?
   return "$rc"
 }
+ROOT_PATH="$BIN_ROOT:$BIN:$PATH"
 
 INSTALL_LOG="$WORK/log/install.log"
 
@@ -276,6 +360,179 @@ if grep -F 'chown -R' "$REPO/install.sh" | grep -qF '.sandbox-gitconfig'; then
   ok "install.sh hands .sandbox-gitconfig to the stack owner"
 else
   bad "install.sh leaves .sandbox-gitconfig root-owned (doctor fails the workspace check)"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== the deploy path installs and enables the boot firewall unit =="
+UNIT="hybrid-ai-firewall.service"
+UNIT_SRC="$REPO/deploy/hybrid-ai-firewall.service"
+UNIT_INSTALLED="$SYSD/$UNIT"
+
+# The firewall step must not shell out through sudo at all. install.sh does use
+# sudo legitimately elsewhere (prepare_openhands_workspace: setfacl, chown,
+# apt-get), so match only the argv that would belong to this step: the unit,
+# systemctl, or an install of the unit.
+firewall_sudo() {
+  grep -E "hybrid-ai-firewall|systemctl|(^|[[:space:]])install([[:space:]].*/)?hybrid-ai" \
+    "$SUDO_ARGV" 2>/dev/null || true
+}
+
+# (a) fresh root run: install the unit 0644 into the scratch unit dir, reload,
+# enable, verify. The installer must not start it, and must never use sudo.
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"; : > "$SUDO_ARGV"
+rm -rf "${WORK:?}/sysstate"; mkdir -p "$WORK/sysstate"
+: > "$INSTALL_LOG"
+rc=0
+run_install ok "$WORK/fw-fresh.log" "$SYSD" "$INSTALL_ARGV" "$ROOT_PATH" || rc=$?
+check "root run with the firewall unit exits 0" "0" "$rc"
+
+if grep -F -- "-m 0644" "$INSTALL_ARGV" | grep -qF "$APP/deploy/$UNIT $UNIT_INSTALLED.tmp"; then
+  ok "install recorded -m 0644 of the unit into the scratch unit dir"
+else
+  bad "install did not record a -m 0644 copy of the unit into the scratch unit dir"
+  sed 's/^/      /' "$INSTALL_ARGV" >&2
+fi
+if [[ -f "$UNIT_INSTALLED" ]]; then
+  ok "the unit file exists in the scratch unit dir"
+else
+  bad "the unit file was not written to the scratch unit dir"
+fi
+check "the installed unit has mode 0644" "644" "$(stat -c '%a' "$UNIT_INSTALLED" 2>/dev/null)"
+if cmp -s "$UNIT_SRC" "$UNIT_INSTALLED"; then
+  ok "the installed unit matches the shipped unit"
+else
+  bad "the installed unit differs from the shipped unit"
+fi
+if grep -qxF 'daemon-reload' "$SYSTEMCTL_ARGV"; then
+  ok "systemctl daemon-reload was recorded"
+else
+  bad "systemctl daemon-reload was not recorded"
+fi
+if grep -qxF "enable $UNIT" "$SYSTEMCTL_ARGV"; then
+  ok "systemctl enable $UNIT was recorded"
+else
+  bad "systemctl enable $UNIT was not recorded"
+fi
+if grep -qxF "is-enabled $UNIT" "$SYSTEMCTL_ARGV"; then
+  ok "systemctl is-enabled $UNIT verified the result"
+else
+  bad "systemctl is-enabled $UNIT was not run"
+fi
+if grep -E '^(enable|start|restart|disable) ' "$SYSTEMCTL_ARGV" | grep -q -- '--now'; then
+  bad "the firewall unit was enabled with --now (rules must not be re-applied here)"
+else
+  ok "the firewall unit was enabled without --now"
+fi
+if grep -Eq '^(start|restart|disable) '"$UNIT"'$' "$SYSTEMCTL_ARGV"; then
+  bad "the firewall unit was started, restarted or disabled"
+else
+  ok "the firewall unit was not started, restarted or disabled"
+fi
+if grep -q 'EVENT .*event=sandbox_firewall_unit_installed' "$INSTALL_LOG"; then
+  ok "sandbox_firewall_unit_installed was logged"
+else
+  bad "sandbox_firewall_unit_installed was not logged"
+fi
+if grep -Eq '(^|[[:space:]])sudo([[:space:]]|$)' "$INSTALL_ARGV" "$SYSTEMCTL_ARGV"; then
+  bad "sudo appears in a recorded install/systemctl argv"
+else
+  ok "no sudo in any recorded install/systemctl argv"
+fi
+if firewall_sudo | grep -q .; then
+  bad "the firewall step shelled out through sudo"
+  firewall_sudo | sed 's/^/      sudo /' >&2
+else
+  ok "the firewall step made no sudo call"
+fi
+
+# (b) rerun: byte-identical unit, still enabled, exit 0.
+snapshot="$WORK/unit-first.bin"
+cp "$UNIT_INSTALLED" "$snapshot" 2>/dev/null || true
+: > "$SYSTEMCTL_ARGV"
+rc=0
+run_install ok "$WORK/fw-rerun.log" "$SYSD" "$INSTALL_ARGV" "$ROOT_PATH" || rc=$?
+check "a second root run exits 0" "0" "$rc"
+if cmp -s "$snapshot" "$UNIT_INSTALLED"; then
+  ok "a second run leaves the unit byte-identical"
+else
+  bad "a second run changed the unit file"
+fi
+if [[ -e "$WORK/sysstate/$UNIT.enabled" ]]; then
+  ok "the unit stays enabled after the rerun"
+else
+  bad "the unit is no longer enabled after the rerun"
+fi
+if grep -q 'already enabled' "$WORK/fw-rerun.log"; then
+  ok "the rerun reports the unit as already enabled"
+else
+  bad "the rerun did not report the unit as already enabled"
+fi
+if grep -qxF "is-enabled $UNIT" "$SYSTEMCTL_ARGV"; then
+  ok "the rerun still verifies is-enabled"
+else
+  bad "the rerun did not verify is-enabled"
+fi
+
+# (c) non-root: warn, exit 0, no install of the unit and no mutating systemctl.
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"; : > "$SUDO_ARGV"
+rm -rf "${WORK:?}/sysstate"; mkdir -p "$WORK/sysstate"
+: > "$INSTALL_LOG"
+rc=0
+run_install ok "$WORK/fw-nonroot.log" "$SYSD" "$INSTALL_ARGV" || rc=$?
+check "a non-root run still exits 0" "0" "$rc"
+if grep -q 'needs root to install' "$WORK/fw-nonroot.log"; then
+  ok "the non-root run warns about the firewall unit"
+else
+  bad "the non-root run did not warn about the firewall unit"
+fi
+if grep -q 'EVENT .*event=sandbox_firewall_unit_failed .*reason=not_root' "$INSTALL_LOG"; then
+  ok "sandbox_firewall_unit_failed reason=not_root was logged"
+else
+  bad "sandbox_firewall_unit_failed reason=not_root was not logged"
+fi
+if grep -qF "$UNIT" "$INSTALL_ARGV"; then
+  bad "the non-root run recorded an install of the firewall unit"
+else
+  ok "the non-root run recorded no install of the firewall unit"
+fi
+if grep -Eq "^(enable|start|restart|disable|daemon-reload)" "$SYSTEMCTL_ARGV"; then
+  bad "the non-root run recorded a mutating systemctl call"
+else
+  ok "the non-root run recorded no mutating systemctl call"
+fi
+if [[ -e "$UNIT_INSTALLED" ]]; then
+  bad "the non-root run wrote the unit file"
+else
+  ok "the non-root run wrote no unit file"
+fi
+if firewall_sudo | grep -q .; then
+  bad "the non-root run shelled out through sudo for the firewall step"
+  firewall_sudo | sed 's/^/      sudo /' >&2
+else
+  ok "the non-root run made no sudo call for the firewall step"
+fi
+
+# (d) systemctl absent: warn, exit 0, and the unit is not installed.
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"; : > "$SUDO_ARGV"
+: > "$INSTALL_LOG"
+rc=0
+run_install ok "$WORK/fw-nosystemctl.log" "$SYSD" "$INSTALL_ARGV" "$BIN_NOSYS" || rc=$?
+check "a run without systemctl still exits 0" "0" "$rc"
+if grep -q 'systemctl is unavailable' "$WORK/fw-nosystemctl.log"; then
+  ok "the run without systemctl warns"
+else
+  bad "the run without systemctl did not warn"
+fi
+if grep -q 'EVENT .*event=sandbox_firewall_unit_failed .*reason=systemctl_missing' "$INSTALL_LOG"; then
+  ok "sandbox_firewall_unit_failed reason=systemctl_missing was logged"
+else
+  bad "sandbox_firewall_unit_failed reason=systemctl_missing was not logged"
+fi
+if [[ -e "$UNIT_INSTALLED" ]]; then
+  bad "the run without systemctl installed the unit anyway"
+else
+  ok "the run without systemctl installed nothing"
 fi
 
 # ---------------------------------------------------------------------------

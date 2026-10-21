@@ -134,6 +134,7 @@
 - prompt_secret()
 - query_tailnet()
 - prepare_openhands_workspace()
+- install_firewall_unit()
 - wait_for()
 - install_backup_scheduler_system()
 - install_backup_scheduler()
@@ -525,6 +526,7 @@
 - bad()
 - check()
 - run_install()
+- firewall_sudo()
 
 ## scripts/test-read-probe.sh
 - ok()
