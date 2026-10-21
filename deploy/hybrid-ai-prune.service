@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/hybrid-ai-prune.service
+# PURPOSE (plain English):
+#   Runs the conversation prune once, on demand, as root. The script sweeps the
+#   OpenHands conversations tree and moves stale conversations into a quarantine
+#   directory. It QUARANTINES ONLY: it never deletes anything, so an operator can
+#   always inspect and restore what the sweep moved aside.
+#
+#   It runs as root because the conversations tree is owned by root and the
+#   stack's own users; a non-root run could not move those directories.
+#
+#   SCHEDULE: the timer hybrid-ai-prune.timer is the primary mechanism and runs
+#   this unit daily. install.sh also runs it once at deploy time, which is
+#   catch-up only, for a host that was off or had not re-deployed for a while.
+#
+#   NO Restart= AT ALL, deliberately: a failing prune must not loop. A failure
+#   stays visible in `systemctl status hybrid-ai-prune`.
+#
+#   No filesystem sandboxing directives (ProtectSystem=, PrivateTmp=,
+#   ReadOnlyPaths=, InaccessiblePaths=) on purpose: the unit has to move
+#   directories under the OpenHands workspace, and those flags would break it.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai conversation prune (quarantine stale OpenHands conversations)
+Documentation=file:///opt/hybrid-ai/deploy/README.md
+
+[Service]
+Type=oneshot
+# The conversations tree is root/stack-owned; moving entries needs root.
+User=root
+WorkingDirectory=/opt/hybrid-ai
+ExecStart=/opt/hybrid-ai/scripts/prune-conversations.sh
+
+# Deliberately NO Restart= policy: a failing prune must not loop. See the header.
+
+[Install]
+WantedBy=multi-user.target
