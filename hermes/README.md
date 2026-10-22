@@ -19,6 +19,19 @@ cleans the apt lists — so they are baked in. `scripts/test-backup.sh` needs `s
 `rsync`, `backup/backup.sh` and `backup/restore.sh` need `restic`, and `collect-diagnostics.sh`
 needs `jq`.
 
+The image also ships the **GitHub CLI (`gh`)** at a pinned version, `2.103.0`, installed from the
+upstream release tarball and verified by sha256 before extraction. The kanban PR-acceptance gate
+(`hermes_cli/kanban_pr_acceptance.py`) shells out to `gh api ...` when a card completes, so `gh`
+must be callable by the runtime uid inside the container. It cannot be installed at runtime — the
+runtime uid has no root and the image cleans the apt lists — and `gh` is not in the Debian repos,
+so it is a pinned tarball layer, root-owned at `/usr/local/bin/gh`. The gate authenticates with a
+`GH_TOKEN` (or `GITHUB_TOKEN`) key supplied in the **assignee profile's `.env`**
+(`hermes_data/profiles/<profile>/.env`); that value is an owner-supplied secret entered through a
+masked prompt and is never baked into the image or any tracked file. With no token the gate fails
+closed ("GitHub acceptance evidence unavailable"), which is the intended behaviour. Key names
+only are documented here; see [`../SECURITY.md`](../SECURITY.md#github-credential-separation) and
+[`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md).
+
 The service is defined only in the overlay. Compose must always run with all three files —
 `docker-compose.yml`, `openhands/docker-compose.openhands.yml`,
 `hermes/docker-compose.hermes.yml` — because a run that omits an overlay treats its service
