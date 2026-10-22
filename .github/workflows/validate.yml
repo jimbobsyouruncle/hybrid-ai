@@ -224,6 +224,18 @@ jobs:
         # workspace. The harness fails against a tree without the script.
         run: bash scripts/test-prune-conversations.sh
 
+      - name: Docker build-cache prune tests
+        # Offline, no root, no Docker, no network. Proves
+        # scripts/prune-docker-cache.sh caps the build cache and degrades
+        # safely: docker absent -> exit 0, daemon down -> exit 0, success ->
+        # the probed cap flag and cap reach the docker argv, the
+        # HYBRID_AI_BUILD_CACHE_CAP override is honoured, a --keep-storage-only
+        # Docker falls back, prune failure -> exit 1, and no supported flag ->
+        # exit 0 without invoking prune. docker/df/date are stubbed on PATH.
+        # Also greps the unit files for their key lines and proves install.sh
+        # writes the 15GB default and preserves an owner value across a re-run.
+        run: bash scripts/test-prune-docker-cache.sh
+
       - name: Env pin migration tests
         # Offline. Proves install.sh's STEP 2b migration moves a stale
         # :1.8 / 1.26.0-python pin in an existing .env to the current defaults,

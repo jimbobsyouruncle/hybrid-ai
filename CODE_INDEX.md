@@ -347,6 +347,11 @@
 - container_uses_dir()
 - container_verdict()
 
+## scripts/prune-docker-cache.sh
+- log()
+- warn()
+- log_free_space()
+
 ## scripts/sandbox-firewall.sh
 - usage()
 - resolve_bridge()
@@ -582,6 +587,18 @@
 - run_prune()
 - counter()
 - refusals_of()
+
+## scripts/test-prune-docker-cache.sh
+- ok()
+- bad()
+- check()
+- has()
+- run_prune()
+- prune_invocations()
+- service_line()
+- timer_line()
+- run_install()
+- env_value()
 
 ## scripts/test-read-probe.sh
 - ok()

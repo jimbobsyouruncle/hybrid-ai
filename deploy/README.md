@@ -230,6 +230,26 @@ The prune QUARANTINES and never deletes. The knobs and the inspection and restor
 steps are in the root `README.md` and
 [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
 
+## Docker build-cache prune units
+
+Two more units cap the Docker build cache, installed by the same
+`install_prune_scheduler()` step and named, like their sibling, by this README
+through the service's `Documentation=` target.
+
+| Unit | What it does |
+|---|---|
+| `hybrid-ai-docker-prune.service` | `Type=oneshot`, `User=root`, `EnvironmentFile=-/opt/hybrid-ai/.env`, `After=docker.service`, `ExecStart=/opt/hybrid-ai/scripts/prune-docker-cache.sh` |
+| `hybrid-ai-docker-prune.timer` | `OnCalendar=*-*-* 04:35:00`, `Persistent=true`, `Unit=hybrid-ai-docker-prune.service` |
+
+The timer caps the Docker build cache at 15 GB (override
+`HYBRID_AI_BUILD_CACHE_CAP`) daily at 04:35; it removes build cache only and
+never touches images, containers, volumes or bind-mounted data. The service
+carries no `Restart=` line, deliberately: a failing prune must not loop.
+`scripts/prune-docker-cache.sh` probes `docker builder prune --help` at run time
+and passes `--max-used-space` when the local Docker lists it, `--keep-storage`
+otherwise, and logs and exits 0 when it lists neither, so an unknown Docker
+never turns the timer into a hard failure.
+
 ---
 
 ## No retry policy

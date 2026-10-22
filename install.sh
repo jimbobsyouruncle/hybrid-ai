@@ -758,6 +758,13 @@ OPENHANDS_LOG_ALL_EVENTS=${OPENHANDS_LOG_ALL_EVENTS:-false}
 OPENHANDS_MEM_LIMIT=${OPENHANDS_MEM_LIMIT:-3g}
 OPENHANDS_CPUS=${OPENHANDS_CPUS:-2.5}
 
+# --- Docker build-cache cap ------------------------------------------------
+# hybrid-ai-docker-prune.timer runs scripts/prune-docker-cache.sh daily at
+# 04:35 to cap the Docker BUILD CACHE (cache only; never images, containers,
+# volumes or bind-mounted data). This size is handed to whichever cap flag the
+# local docker supports (--max-used-space, else --keep-storage).
+HYBRID_AI_BUILD_CACHE_CAP=${HYBRID_AI_BUILD_CACHE_CAP:-15GB}
+
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true
 DO_NOT_TRACK=true
@@ -900,16 +907,19 @@ install_firewall_unit() {
 }
 
 # ---------------------------------------------------------------------------
-# STEP 9a-2. Install and enable the conversation prune units
+# STEP 9a-2. Install and enable the prune units (conversations and Docker cache)
 # ---------------------------------------------------------------------------
-# hybrid-ai-prune.timer is the primary mechanism: it runs the prune daily so the
-# OpenHands conversations tree cannot grow without bound. The prune QUARANTINES
-# stale conversations and never deletes them. install.sh also runs the script
-# once after the stack is up (run_prune_catch_up), but that is catch-up only.
+# Two timers, two independent daily jobs, installed together:
+#   * hybrid-ai-prune.timer        (04:20) quarantines stale OpenHands
+#     conversations. It QUARANTINES and never deletes them. install.sh also runs
+#     the script once after the stack is up (run_prune_catch_up), catch-up only.
+#   * hybrid-ai-docker-prune.timer (04:35) caps the Docker BUILD CACHE so
+#     repeated rebuilds of the multi-GB stack images cannot fill the disk. It is
+#     cache only: no images, containers, volumes or bind-mounted data.
 #
 # UNCONDITIONAL: this is not gateable and must never appear inside the backup
 # gate, because pruning is unrelated to whether backups are configured. It sits
-# before the --no-start exit so both deploy paths install the timer.
+# before the --no-start exit so both deploy paths install the timers.
 #
 # Fail-safe, never fail-closed: it never calls sudo, never dies and never
 # changes this script's exit status. Without root, systemctl or the unit
@@ -918,9 +928,11 @@ install_firewall_unit() {
 # HYBRID_AI_SYSTEMD_UNIT_DIR is the same HARNESS-ONLY override the firewall step
 # uses for scripts/test-install-health.sh; it is not documented anywhere else.
 install_prune_scheduler() {
-  local unit
+  local unit timer
   local unit_dir="${HYBRID_AI_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
-  local units=(hybrid-ai-prune.service hybrid-ai-prune.timer)
+  local units=(hybrid-ai-prune.service hybrid-ai-prune.timer \
+               hybrid-ai-docker-prune.service hybrid-ai-docker-prune.timer)
+  local timers=(hybrid-ai-prune.timer hybrid-ai-docker-prune.timer)
 
   if [[ "$(id -u)" != "0" ]]; then
     warn "The prune units need root to install into ${unit_dir}; not calling sudo."
@@ -967,29 +979,32 @@ install_prune_scheduler() {
 
   # enable and start are separate calls on purpose: scripts/test-install-health.sh
   # asserts that no "enable --now" appears in this script's systemctl argv.
-  if ! systemctl enable hybrid-ai-prune.timer >/dev/null 2>&1; then
-    warn "Could not enable hybrid-ai-prune.timer; the daily prune is not scheduled."
-    event "prune_schedule_failed" "reason=enable"
-    return 0
-  fi
-  if ! systemctl start hybrid-ai-prune.timer >/dev/null 2>&1; then
-    warn "Could not start hybrid-ai-prune.timer; the daily prune is enabled but not running."
-    event "prune_schedule_failed" "reason=start"
-    return 0
-  fi
+  # Every failure path here warns, names the unit and returns 0: a prune
+  # schedule can never fail a deploy.
+  for timer in "${timers[@]}"; do
+    if ! systemctl enable "$timer" >/dev/null 2>&1; then
+      warn "Could not enable ${timer}; that daily prune is not scheduled."
+      event "prune_schedule_failed" "reason=enable" "unit=${timer}"
+      return 0
+    fi
+    if ! systemctl start "$timer" >/dev/null 2>&1; then
+      warn "Could not start ${timer}; it is enabled but not running."
+      event "prune_schedule_failed" "reason=start" "unit=${timer}"
+      return 0
+    fi
+    if [[ "$(systemctl is-enabled "$timer" 2>/dev/null)" != "enabled" ]]; then
+      warn "${timer} is installed but not enabled."
+      event "prune_schedule_failed" "reason=not_enabled" "unit=${timer}"
+      return 0
+    fi
+    if [[ "$(systemctl is-active "$timer" 2>/dev/null)" != "active" ]]; then
+      warn "${timer} is enabled but not active."
+      event "prune_schedule_failed" "reason=not_active" "unit=${timer}"
+      return 0
+    fi
+  done
 
-  if [[ "$(systemctl is-enabled hybrid-ai-prune.timer 2>/dev/null)" != "enabled" ]]; then
-    warn "hybrid-ai-prune.timer is installed but not enabled."
-    event "prune_schedule_failed" "reason=not_enabled"
-    return 0
-  fi
-  if [[ "$(systemctl is-active hybrid-ai-prune.timer 2>/dev/null)" != "active" ]]; then
-    warn "hybrid-ai-prune.timer is enabled but not active."
-    event "prune_schedule_failed" "reason=not_active"
-    return 0
-  fi
-
-  ok "Installed and enabled hybrid-ai-prune.timer (daily conversation prune)."
+  ok "Installed and enabled hybrid-ai-prune.timer (daily conversation prune) and hybrid-ai-docker-prune.timer (daily Docker build-cache cap)."
   event "prune_schedule_installed"
   return 0
 }

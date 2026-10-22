@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/hybrid-ai-docker-prune.timer
+# PURPOSE (plain English):
+#   Runs the Docker build-cache prune daily at 04:35, shortly after the
+#   conversation prune at 04:20. This timer is the PRIMARY mechanism: it caps
+#   the Docker build cache so repeated rebuilds of the multi-GB stack images
+#   cannot fill the disk on a host that stays up.
+#
+#   Persistent=true means a run missed while the host was off fires once the
+#   host is back up.
+#
+#   The prune caps the BUILD CACHE ONLY. Images, containers, volumes and
+#   bind-mounted data are never touched; only the script decides what is
+#   removed, and it invokes `docker builder prune` and nothing else.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Run the hybrid-ai Docker build-cache prune daily
+
+[Timer]
+OnCalendar=*-*-* 04:35:00
+Persistent=true
+Unit=hybrid-ai-docker-prune.service
+
+[Install]
+WantedBy=timers.target

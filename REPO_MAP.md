@@ -53,6 +53,8 @@
 - deploy/50-hybrid-ai-deploy.rules
 - deploy/README.md - deploy/ — headless deploy (one commit, one unit)
 - deploy/hybrid-ai-deploy@.service
+- deploy/hybrid-ai-docker-prune.service
+- deploy/hybrid-ai-docker-prune.timer
 - deploy/hybrid-ai-firewall.service
 - deploy/hybrid-ai-prune.service
 - deploy/hybrid-ai-prune.timer
@@ -108,6 +110,7 @@
 - scripts/deploy-remote.sh
 - scripts/deploy-trigger.sh
 - scripts/prune-conversations.sh - FILE: scripts/prune-conversations.sh
+- scripts/prune-docker-cache.sh - FILE: scripts/prune-docker-cache.sh
 - scripts/sandbox-firewall.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
@@ -134,6 +137,7 @@
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
 - scripts/test-install-health.sh - FILE: scripts/test-install-health.sh
 - scripts/test-prune-conversations.sh - FILE: scripts/test-prune-conversations.sh
+- scripts/test-prune-docker-cache.sh - FILE: scripts/test-prune-docker-cache.sh
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
 - scripts/test-sandbox-firewall.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
