@@ -48,13 +48,20 @@ calls `sudo`.
 3. **The unit** — `deploy/hybrid-ai-deploy@.service`, copied to
    `/etc/systemd/system/hybrid-ai-deploy@.service` (root-owned), then
    `systemctl daemon-reload`. It is an instantiated unit started explicitly; it
-   is never enabled.
+   is never enabled. `scripts/bootstrap.sh` installs it on a fresh device, and
+   **`install.sh` re-applies it on every deploy**, so a change to the tracked
+   file reaches the host through the normal deploy instead of a by-hand copy. A
+   deploy re-applies it while running inside the unit: the running instance
+   keeps its loaded configuration, so the new content is effective from the
+   next instantiation.
 4. **The polkit rule** — `deploy/50-hybrid-ai-deploy.rules`, copied to
    `/etc/polkit-1/rules.d/50-hybrid-ai-deploy.rules` (or the distro's polkit
    rules directory, e.g. `/usr/share/polkit-1/rules.d/`), root-owned, then
    reload polkit. It grants the account `start` of a matching unit and nothing
-   else. The bootstrap refuses to run when polkitd is absent or predates
-   `.rules` (JavaScript) support.
+   else. Like the unit, the bootstrap installs it on a fresh device and
+   `install.sh` re-applies it, byte-identical, on every deploy, followed by
+   `systemctl reload polkit`. The bootstrap refuses to run when polkitd is
+   absent or predates `.rules` (JavaScript) support.
 5. **The env file** — `/etc/hybrid-ai/hybrid-ai.env`, root-owned, mode `0644`.
    It is the LAYOUT file: it holds path and identity settings only, never a
    secret, so both `hybrid-ai-deploy` and `hybrid-ai-backup` can read it. (The

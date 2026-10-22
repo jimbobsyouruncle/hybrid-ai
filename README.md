@@ -574,6 +574,12 @@ which installs the unit, the polkit rule, the scripts and the `authorized_keys`
 line on the host. Once that bootstrap has run, every push to `main` takes this
 path. Until then the connection fails closed at SSH auth, with nothing run.
 
+The bootstrap installs those files once. `install.sh` re-applies the unit and the
+polkit rule (byte-identical from the deployed tree) on every deploy, so a change
+to either file reaches an already-bootstrapped host through the normal deploy
+instead of a by-hand copy. A deploy re-applies them while running inside the
+unit, so the new content is effective from the next instantiation.
+
 The account holds no login shell beyond the forced command, no sudo, and is in
 neither the `docker` nor the `systemd-journal` group. Full detail, including the
 `authorized_keys` line and the refusal exit codes, is in

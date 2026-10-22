@@ -217,6 +217,26 @@ in `scripts/deploy-instance.sh` or `scripts/deploy-remote.sh` (an ancestor
 refusal, a HEAD mismatch, a doctor.sh failure). Fix the reported problem, then
 push again.
 
+### Headless deploy: the host ran a stale installed unit
+
+Symptom: the unit gives up earlier than the tree says it should (for example
+`Result=timeout` at 20 min while `deploy/hybrid-ai-deploy@.service` says
+`TimeoutStartSec=45min`), or an older copy of the unit is missing a directive
+the tree has.
+
+Cause: `/etc/systemd/system/hybrid-ai-deploy@.service` was installed by an
+earlier `scripts/bootstrap.sh` and never refreshed. This happened on 2026-10-22:
+the host enforced a stale `TimeoutStartSec=20min` and SIGTERM'd a deploy
+mid-build, and the raise to 45 min had to be copied over by hand.
+
+This is now self-healing. `install.sh` re-applies the unit (and the polkit rule)
+on every deploy, so the **next** deploy replaces the stale file and the one
+after that runs with it: a deploy re-applies the unit while running inside it,
+and the running instance keeps its loaded configuration. To fix it immediately
+instead of waiting for the next deploy, re-run `./install.sh` as root and then
+`sudo systemctl daemon-reload`. Compare the installed copy against the tree with
+`diff /etc/systemd/system/hybrid-ai-deploy@.service deploy/hybrid-ai-deploy@.service`.
+
 ### Headless deploy: host-key mismatch
 
 Symptom: the deploy job fails with
@@ -313,6 +333,11 @@ The step is strictly longer on purpose. The unit gives up first, so the step is
 still alive to report the real `Result=` instead of being killed while the host
 is mid-deploy. If the unit times out, the log says so and nothing is left
 running: the unit has no `Restart=`, so there is no retry loop.
+
+The host's copy of the unit is re-applied by `install.sh` on every deploy, so
+these two numbers cannot drift apart on an already-bootstrapped host. If the
+host still times out at an older ceiling, see "the host ran a stale installed
+unit" above.
 
 ---
 

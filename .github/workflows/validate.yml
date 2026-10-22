@@ -212,6 +212,17 @@ jobs:
         # stubbed on PATH; the Hermes wait window is asserted at 300 s.
         run: bash scripts/test-install-health.sh
 
+      - name: Deploy wiring install tests
+        # Offline, no root, no Docker, no network. Proves install.sh re-applies
+        # deploy/hybrid-ai-deploy@.service and deploy/50-hybrid-ai-deploy.rules
+        # on every deploy (including --no-start), so a fix to either file
+        # reaches an already-bootstrapped host through the normal deploy. A
+        # stale 20-min unit is replaced by the tree content; the unit is never
+        # enabled or started; non-root and no-systemctl runs only warn and
+        # leave install.sh's exit status unchanged. systemctl is stubbed on
+        # PATH and the unit/polkit dirs are scratch directories.
+        run: bash scripts/test-deploy-wiring-install.sh
+
       - name: Conversation prune lease-guard tests
         # Offline, no root, no Docker, no network. RUNS
         # scripts/prune-conversations.sh against throwaway fixture trees under

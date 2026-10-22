@@ -23,11 +23,14 @@
 #     and disturb the running stack mid-interval. A failed deploy stays failed
 #     and is diagnosed from its log. Do not add any Restart= policy here.
 #
-#   NOT ACTIVE UNTIL MIGRATION:
-#     Nothing here is active until the owner's migration. Card F installs this
-#     unit under /etc/systemd/system/ (see deploy/README.md); a later card
-#     switches .github/workflows/deploy.yml over to it. Until then the file is
-#     inert and today's deploy path is unchanged.
+#   LIVE, AND RE-APPLIED ON EVERY DEPLOY:
+#     This unit IS the deploy path: .github/workflows/deploy.yml asks the forced
+#     command to start it, and the polkit rule authorises that one call. It is
+#     installed by scripts/bootstrap.sh on a fresh device and re-installed by
+#     install.sh on EVERY deploy, so a change here reaches the host through the
+#     normal deploy, never by hand. A deploy re-installs it while running INSIDE
+#     it: the running instance keeps its loaded configuration, and the new
+#     content takes effect from the NEXT instantiation.
 # ---------------------------------------------------------------------------
 [Unit]
 Description=hybrid-ai headless deploy for commit %i

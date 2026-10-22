@@ -159,7 +159,10 @@ It becomes fully active when the owner runs **card F**, `scripts/bootstrap.sh`,
 which installs the unit, the polkit rule, the scripts and the `authorized_keys`
 line on the host and creates the account as a system account with `/bin/sh` and
 a locked password (sshd runs the forced command through the login shell). Once
-that bootstrap has run, every push to `main` takes this path. See
+that bootstrap has run, every push to `main` takes this path. The bootstrap
+installs those files once; `install.sh` re-applies the unit and the polkit rule
+on every deploy, so a change to either file reaches the host without a by-hand
+copy (effective from the next instantiation). See
 [`../deploy/README.md`](../deploy/README.md) for the `authorized_keys` line, the
 install locations, the refusal exit codes and the least-privilege statement.
 

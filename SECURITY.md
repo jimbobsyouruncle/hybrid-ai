@@ -584,6 +584,12 @@ The pieces of a headless deploy live under `deploy/` and `scripts/deploy-*.sh`.
 the host and adds the `authorized_keys` line; until then the connection fails
 closed at SSH auth. See [`deploy/README.md`](deploy/README.md).
 
+`scripts/bootstrap.sh` installs the unit and the polkit rule once, on a fresh
+device. `install.sh` re-applies both files, byte-identical from the checked-out
+tree, on every deploy (`install_deploy_unit`, `install_deploy_polkit_rule`). It
+never enables or starts the template unit and never rewrites the rule, so the
+grant below is unchanged; only the tracked, review-gated files reach the host.
+
 The deploy no longer logs in as the admin account, and it no longer sends a shell
 script to the Pi. The only remote command is the two-token string
 `deploy <sha>`.

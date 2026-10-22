@@ -135,6 +135,8 @@
 - query_tailnet()
 - prepare_openhands_workspace()
 - install_firewall_unit()
+- install_deploy_unit()
+- install_deploy_polkit_rule()
 - install_prune_scheduler()
 - run_prune_catch_up()
 - print_phase_summary()
@@ -526,6 +528,13 @@
 - run()
 - ssh_called()
 - key_left()
+
+## scripts/test-deploy-wiring-install.sh
+- ok()
+- bad()
+- check()
+- run_install()
+- reset_state()
 
 ## scripts/test-doctor-backup-probe.sh
 - pass()
