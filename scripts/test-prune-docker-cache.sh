@@ -55,6 +55,12 @@ ok()   { printf '  ok   %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  FAIL %s\n' "$1"; fail=$((fail+1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3' got '$2')"; fi; }
 has() { if [[ "$2" == *"$3"* ]]; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+# Search $1 for a command matching ERE $2, comment lines stripped first. The
+# regex is written with a (^|[^[:alnum:]_]) boundary, not `[^#].*`, so a
+# command that begins at column 0 is caught.
+cache_only_offenders() {  # $1 = file, $2 = ERE
+  grep -vE '^[[:space:]]*#' "$1" 2>/dev/null | grep -E "$2"
+}
 
 WORK="$(mktemp -d)"
 STUB_BIN="$(mktemp -d)"
@@ -258,21 +264,55 @@ check "(i) timer WantedBy=timers.target" "$(timer_line 'WantedBy=timers.target')
 
 # --- (j) cache-only: no rmi / system prune / other prune / path deletion ----
 printf '\n'
-if grep -nE '^[[:space:]]*[^#].*docker[[:space:]]+rmi' "$PRUNE"; then
+RMI_ERE='(^|[^[:alnum:]_])docker[[:space:]]+rmi'
+WIDE_PRUNE_ERE='(^|[^[:alnum:]_])docker[[:space:]]+(system|container|volume|network|image)[[:space:]]+prune'
+RM_ERE='(^|[[:space:];|&(])rm[[:space:]]+-'
+# Any of the three, for the negative controls.
+OFFENDERS_ERE="${RMI_ERE}|${WIDE_PRUNE_ERE}|${RM_ERE}"
+if cache_only_offenders "$PRUNE" "$RMI_ERE" | grep -q .; then
   bad "(j) the script must not invoke docker rmi"
 else
   ok "(j) the script does not invoke docker rmi"
 fi
-if grep -nE '^[[:space:]]*[^#].*docker[[:space:]]+(system|container|volume|network|image)[[:space:]]+prune' "$PRUNE"; then
+if cache_only_offenders "$PRUNE" "$WIDE_PRUNE_ERE" | grep -q .; then
   bad "(j) the script must only prune the build cache"
 else
   ok "(j) the script prunes only the build cache"
 fi
-if grep -nE '^[[:space:]]*[^#].*(^|[[:space:]])rm[[:space:]]+-' "$PRUNE"; then
+if cache_only_offenders "$PRUNE" "$RM_ERE" | grep -q .; then
   bad "(j) the script must not delete paths"
 else
   ok "(j) the script does not delete paths"
 fi
+
+# --- (j2) the cache-only guard fires on a line-initial command --------------
+# The guard above is the only thing enforcing the cache-only invariant, so this
+# proves it does not silently rot: each offending form is appended at column 0
+# to its own copy of the script and the helper must FIND it. The unmodified copy
+# is the negative control.
+neg_copy="$WORK/prune-neg.sh"
+cp "$PRUNE" "$neg_copy"
+check "(j2) the unmodified script yields no offenders" \
+  "$(cache_only_offenders "$neg_copy" "$OFFENDERS_ERE" | wc -l | tr -d ' ')" "0"
+
+for form_ere in \
+  "docker rmi --force some-image:tag|$RMI_ERE" \
+  "docker system prune -af|$WIDE_PRUNE_ERE" \
+  "rm -rf /var/lib/hybrid-ai/x|$RM_ERE"
+do
+  form="${form_ere%%|*}"
+  ere="${form_ere#*|}"
+  pos_copy="$WORK/prune-pos-$(printf '%s' "$form" | tr -cs 'A-Za-z0-9' '-').sh"
+  cp "$PRUNE" "$pos_copy"
+  printf '%s\n' "$form" >> "$pos_copy"
+  if cache_only_offenders "$pos_copy" "$ere" | grep -q .; then
+    ok "(j2) the guard fires on line-initial '${form}'"
+  else
+    bad "(j2) the guard fires on line-initial '${form}'"
+  fi
+done
+check "(j2) the real script still yields no offenders" \
+  "$(cache_only_offenders "$PRUNE" "$OFFENDERS_ERE" | wc -l | tr -d ' ')" "0"
 
 # --- (k)/(l) install.sh writes and preserves HYBRID_AI_BUILD_CACHE_CAP -------
 # The unit reads the cap from the stack .env. install.sh STEP 8 rewrites that
