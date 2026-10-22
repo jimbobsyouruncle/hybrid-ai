@@ -141,6 +141,8 @@
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
 - scripts/test-sandbox-firewall.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
+- scripts/test-uninstall.sh - FILE: scripts/test-uninstall.sh
+- scripts/uninstall.sh - FILE: scripts/uninstall.sh
 ## scripts/lib
 
 - scripts/lib/build-gate.sh - FILE: scripts/lib/build-gate.sh

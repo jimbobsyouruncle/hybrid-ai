@@ -1832,3 +1832,57 @@ grep '^EVENT' install.log
 ```
 
 `install_success` confirms both services passed their health checks. `install_failed reason=healthcheck` means containers started but are not serving — the script exits non-zero and prints container logs.
+
+---
+
+## Uninstall and re-install problems
+
+`scripts/uninstall.sh` is safe to re-run, so most of these clear on a second
+run. Always try `sudo scripts/uninstall.sh --dry-run` first: it prints the full
+plan and changes nothing.
+
+### The second run takes the remnants path
+
+After a software-only uninstall `/opt/hybrid-ai` is gone, so the script reports
+`remnants only` and lists what is left by name. That is expected. It removes the
+known containers by name (no compose call, because there is no compose file to
+read) and, with `--remove-data`, the data directories. A third run then reports
+`nothing found` and exits 0.
+
+If the containers are already gone, `docker rm -f` warns and continues. The exit
+code stays 0.
+
+### A refused out-of-allowlist layout path
+
+If the layout file names a path outside the allowlist, the script refuses it and
+prints a message naming the setting, for example:
+
+```
+[ ! ] refusing to remove /srv/elsewhere (setting HYBRID_AI_DATA_DIR): outside the allowlist. It is left untouched.
+```
+
+The path survives. To remove it, do so by hand, or correct the setting in
+`/etc/hybrid-ai/hybrid-ai.env` and run again. The allowlist is exact:
+`/opt/hybrid-ai`, `/var/lib/hybrid-ai*`, `/var/log/hybrid-ai*`,
+`/var/cache/hybrid-ai-backup`, `/etc/hybrid-ai`,
+`/etc/credstore/hybrid-ai-backup`, the `hybrid-ai-*` unit files, and the polkit
+rule file. The script parses the layout file and never sources it, and it never
+reads or prints a value from `stack.env` or the credential store.
+
+### The stack comes back after uninstall
+
+The GitHub `deploy.yml` workflow runs on every push to `main`, and a push
+re-installs the stack. Disable that workflow before you decommission.
+
+### Images and the build cache are still there
+
+They are kept on purpose, so a re-install does not re-pull everything. Remove
+them by hand if you want the disk back:
+
+```bash
+docker image prune -a
+docker builder prune
+```
+
+The `hybrid-ai` and `hybrid-ai-backup` system accounts are kept too. Remove them
+by hand with `userdel`/`groupdel` if you are sure nothing else uses them.
