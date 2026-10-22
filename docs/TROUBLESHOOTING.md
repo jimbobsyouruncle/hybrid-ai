@@ -1254,6 +1254,38 @@ ${COMPOSE_CMD} up -d --force-recreate hermes
 
 ---
 
+## Kanban PR-acceptance gate: `infra` verdict, "GitHub acceptance evidence unavailable"
+
+When a card completes, the PR-acceptance gate
+(`hermes_cli/kanban_pr_acceptance.py`) shells out to `gh api ...` to collect GitHub evidence.
+If it cannot, it records the **`infra`** verdict with the message
+`GitHub acceptance evidence unavailable`, and the card is not accepted on GitHub evidence. This
+is a **fail-closed** behaviour and must not be relaxed. Two causes:
+
+| Cause | Detail | Remedy |
+|---|---|---|
+| `gh` is missing | The gate runs inside the Hermes container, which previously shipped no `gh`. | Fixed by the image: `hermes/Dockerfile` installs a pinned `gh 2.103.0` at `/usr/local/bin/gh`. Rebuild/redeploy the image so the layer is present. Confirm with `docker exec hermes-agent gh --version`. |
+| `gh` exits 4 | `gh` is present but unauthenticated: `GH_TOKEN` (or `GITHUB_TOKEN`) is absent from the **assignee profile's `.env`** (`hermes_data/profiles/<profile>/.env`). | Owner by-hand step: add the `GH_TOKEN` key to that profile `.env` through a masked prompt. Read-only scopes; no permission widening. Never place the value in a tracked file, image, branch, commit, or log. |
+
+Check which cause applies, read-only:
+
+```bash
+docker exec hermes-agent gh --version          # exit 4 / "command not found" tells you which
+docker exec hermes-agent gh auth status        # unauthenticated -> the token key is absent
+```
+
+Then recreate the container so the profile env is re-read:
+
+```bash
+${COMPOSE_CMD} up -d --force-recreate hermes
+```
+
+Do not work around this by disabling the gate, by widening any token scope, or by letting the gate
+pass with no evidence. See [`../hermes/README.md`](../hermes/README.md) and
+[`../SECURITY.md`](../SECURITY.md#github-credential-separation).
+
+---
+
 ## Tailscale networking
 
 **`tailscale status` reports `Stopped` or `NeedsLogin`**

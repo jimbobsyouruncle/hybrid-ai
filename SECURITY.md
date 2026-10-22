@@ -321,6 +321,15 @@ Both tokens are scoped to the same three owner-created repositories: `hybrid-ai`
 `shared-actions` and `runpod-hybrid-worker`. `Azure-Sentinel` and `jbxuploadps` are excluded
 because they are not owner-created.
 
+The builder credential is additionally exposed to the **builder profile `.env`** under the
+`GH_TOKEN` key name (with `GITHUB_TOKEN` accepted as an alias), so the Hermes kanban
+PR-acceptance gate can call `gh api ...` when a card completes. It carries the same read-only
+scopes as the OpenHands token — no permission is widened for it — and the value is an
+owner-supplied secret entered through a masked prompt, never stored in the image or any tracked
+file. With no `GH_TOKEN` the gate fails closed ("GitHub acceptance evidence unavailable"). See
+[`hermes/README.md`](hermes/README.md) and
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 The builder token holds **Workflows: Read and write**. The narrowing policy requires a written
 reason for every new permission, so the reason is recorded here: the builder publishes reviewed CI
 changes in both `jimbobsyouruncle/hybrid-ai` and `jimbobsyouruncle/shared-actions`. Those changes

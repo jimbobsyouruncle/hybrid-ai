@@ -280,6 +280,21 @@ jobs:
             || { echo "::error::the local kanban patch is missing from the installed code"; exit 1; }
           echo "Local kanban patch is present in /opt/hermes-agent."
 
+          # 6. The image ships the pinned gh CLI the PR-acceptance gate needs, and
+          #    the non-root runtime uid (10001) can execute it. docker exec uses
+          #    the container's configured user, which the run step set to 10001.
+          GH_UID="$(docker exec hermes-nonroot-smoke id -u)"
+          echo "gh exec uid = ${GH_UID}"
+          [ "$GH_UID" = "10001" ] || { echo "::error::gh assertion did not run as uid 10001"; exit 1; }
+          GH_VERSION="$(docker exec hermes-nonroot-smoke gh --version)" \
+            || { echo "::error::gh --version failed inside the image"; exit 1; }
+          echo "$GH_VERSION"
+          case "$GH_VERSION" in
+            *"2.103.0"*) ;;
+            *) echo "::error::gh --version did not report 2.103.0"; exit 1 ;;
+          esac
+          echo "gh 2.103.0 is present and runs as uid 10001."
+
       - name: Assert PID 1 runs only the pinned /opt agent, never the data volume
         # The decoy agent seeded above is a valid source root on the data volume
         # (/root/.hermes/hermes-agent). The WebUI (PID 1) must load its code and

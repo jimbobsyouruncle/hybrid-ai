@@ -26,6 +26,40 @@ RUN apt-get update -o Acquire::Retries=5 && \
         restic && \
     rm -rf /var/lib/apt/lists/*
 
+# --- Pinned GitHub CLI (`gh`) for the kanban PR-acceptance gate --------------
+# hermes_cli/kanban_pr_acceptance.py shells out to `gh api ...` at card
+# completion, and fails closed (gh exit 4 -> "GitHub acceptance evidence
+# unavailable") when gh is missing or unauthenticated. A runtime install cannot
+# supply it: the runtime uid has no root and this image cleans the apt lists, and
+# gh is not in the Debian repos. So it is a pinned upstream release tarball,
+# fetched TO A FILE and sha256-verified BEFORE extraction; the tarball is never
+# piped from the network into a shell or into tar. The layer runs as root, before
+# USER, and installs ONLY bin/gh at /usr/local/bin/gh, root-owned and 0755. It
+# reads no credential and no token environment variable.
+ARG GH_VERSION=2.103.0
+ARG GH_SHA256_ARM64=7f322df34e624d14f5ec0c4acb121fd6dfa14392fdbbd1066aa8e0a05ac3721e
+ARG GH_SHA256_AMD64=fdd768eb70f6409f80fcfa9f3a1c0adf0fc98d827ab3ce0bed2ac22762c5d786
+ARG TARGETARCH
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        arm64) gh_sha256="${GH_SHA256_ARM64}" ;; \
+        amd64) gh_sha256="${GH_SHA256_AMD64}" ;; \
+        *) echo "unsupported architecture for gh: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    gh_asset="gh_${GH_VERSION}_linux_${arch}"; \
+    gh_tar="/tmp/${gh_asset}.tar.gz"; \
+    curl -fsSL --retry 5 --retry-all-errors -o "$gh_tar" \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}.tar.gz" \
+ && echo "${gh_sha256}  ${gh_tar}" | sha256sum -c - \
+ && mkdir -p /tmp/gh-extract \
+ && tar -xzf "$gh_tar" -C /tmp/gh-extract \
+ && install -m 0755 "/tmp/gh-extract/${gh_asset}/bin/gh" /usr/local/bin/gh \
+ && test "$(stat -c '%u' /usr/local/bin/gh)" = "0" \
+ && test "$(stat -c '%a' /usr/local/bin/gh)" = "755" \
+ && test "$(gh --version | head -n1 | awk '{print $3}')" = "${GH_VERSION}" \
+ && rm -rf /tmp/gh-extract "$gh_tar"
+
 # --- Pinned Hermes Agent, installed OUTSIDE the data volume ------------------
 # The code must never live under /root/.hermes: that path is a bind-mount point
 # for the hermes_data volume, and a mount hides whatever the image wrote there.
