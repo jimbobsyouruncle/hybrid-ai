@@ -120,6 +120,7 @@
 - scripts/test-bootstrap.sh - FILE: scripts/test-bootstrap.sh
 - scripts/test-check-agent-context.sh - Fixture test for scripts/check-agent-context.sh.
 - scripts/test-check-git-remotes.sh
+- scripts/test-deploy-build-gate.sh - FILE: scripts/test-deploy-build-gate.sh
 - scripts/test-deploy-forced-command.sh
 - scripts/test-deploy-image-gate.sh
 - scripts/test-deploy-instance.sh
@@ -138,6 +139,7 @@
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 ## scripts/lib
 
+- scripts/lib/build-gate.sh - FILE: scripts/lib/build-gate.sh
 - scripts/lib/hybrid-ai-env.sh - FILE: scripts/lib/hybrid-ai-env.sh
 - scripts/lib/read-probe.sh - FILE: scripts/lib/read-probe.sh
 ## status

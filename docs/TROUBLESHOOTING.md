@@ -240,6 +240,82 @@ Never "fix" this by disabling host-key checking. There is no
 
 ---
 
+## The build phase of a deploy: gate, timestamps, timeouts
+
+Every deploy runs `install.sh` on the Pi. Its log now answers three questions
+that used to need guesswork: did the build run, how long did each phase take,
+and which ceiling fires first.
+
+### Did the build run?
+
+The Hermes image carries a label, `org.hybrid-ai.build-inputs-sha`, holding the
+sha256 of the inputs it was built from: the Dockerfile, every file under
+`hermes/patches/`, the three pinned ARGs (`HERMES_COMMIT`,
+`HERMES_INSTALL_SHA256`, `HERMES_WEBUI_COMMIT`) and the base-image digest on the
+`FROM` line. `install.sh` recomputes that sha and compares it with the label on
+`hybrid-ai-hermes:latest`.
+
+The install log prints exactly one of:
+
+```
+[ * ] 2026-01-01T00:00:00Z build-gate: cache hit (<sha>)
+[ * ] 2026-01-01T00:00:00Z build-gate: rebuild (<reason>)
+```
+
+A `cache hit` skips `docker compose build` entirely; the stack is only started
+(`up -d --remove-orphans`). The reason on a rebuild is one of:
+
+| Reason | Meaning |
+| `inputs-changed` | The sha differs from the label: the Dockerfile, a patch, an ARG or the base digest moved |
+| `image-absent` | `docker image inspect` found no `hybrid-ai-hermes:latest` |
+| `label-missing` | The image has no label, or it is empty |
+| `label-unparsable` | The label is not a 64-character lowercase hex sha |
+| `inputs-unavailable` | The inputs could not be hashed (Dockerfile missing, `FROM` not pinned) |
+| `no-docker` | `docker` is not on `PATH` |
+
+Only `inputs-changed` means someone changed the build inputs. Everything else
+is the gate failing toward building, which is deliberate: a gate that cannot
+prove a match must build rather than serve a stale image.
+
+If the gate reports `rebuild (inputs-changed)` on a deploy that changed nothing,
+the build inputs really did move on disk. Diff the Dockerfile, the patches and
+the three ARGs against the commit the running image was built from. Do not edit
+the label by hand.
+
+### Which phase took the time?
+
+Every `log()` line in `install.sh` starts with a UTC stamp
+(`YYYY-MM-DDTHH:MM:SSZ`), so `install.log` can be read against the systemd
+journal. While images are pulled, images are built and services are verified,
+a heartbeat prints one line per 60 s:
+
+```
+[ * ] 2026-01-01T00:00:60Z progress: phase=build elapsed=60s
+```
+
+The end of the run prints a per-phase summary:
+
+```
+[ * ] 2026-01-01T00:05:00Z Phase durations (s): pull=12 build=203 up=9 verify=31
+```
+
+The same numbers are appended to the install log as
+`EVENT ... event=phase_durations`. A build that takes minutes on a deploy whose
+gate said `cache hit` is a gate bug, not a slow build.
+
+### The two ceilings no longer race
+
+| Control | Ceiling |
+| `.github/workflows/deploy.yml`, `Trigger deploy` step | 60 min |
+| `deploy/hybrid-ai-deploy@.service`, `TimeoutStartSec=` | 45 min |
+
+The step is strictly longer on purpose. The unit gives up first, so the step is
+still alive to report the real `Result=` instead of being killed while the host
+is mid-deploy. If the unit times out, the log says so and nothing is left
+running: the unit has no `Restart=`, so there is no retry loop.
+
+---
+
 ## Host bootstrap: refusal exit codes
 
 `scripts/bootstrap.sh` is the ONE privileged, one-time command run per device.

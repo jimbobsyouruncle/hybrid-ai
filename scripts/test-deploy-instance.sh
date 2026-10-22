@@ -221,7 +221,47 @@ check_line "$UNIT_FILE" 'User=root' "unit runs as root"
 check_line "$UNIT_FILE" 'ExecStart=/opt/hybrid-ai/scripts/deploy-instance.sh %i' "unit execs deploy-instance.sh %i"
 check_line "$UNIT_FILE" 'WorkingDirectory=/opt/hybrid-ai' "unit WorkingDirectory is /opt/hybrid-ai"
 check_line "$UNIT_FILE" 'Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env' "unit sets the env file path"
-check_line "$UNIT_FILE" 'TimeoutStartSec=20min' "unit TimeoutStartSec is 20min"
+check_line "$UNIT_FILE" 'TimeoutStartSec=45min' "unit TimeoutStartSec is 45min"
+
+# The workflow step must outlive the unit, so the step sees the real Result=
+# instead of racing the unit to the same wall clock. Both numbers are parsed
+# out of the files; nothing here hardcodes either ceiling.
+ceiling_guard() { # unit-file workflow-file
+  local unit="$1" wf="$2" raw secs step
+  raw="$(grep -E '^TimeoutStartSec=' "$unit" | head -1 | cut -d= -f2-)"
+  [[ -n "$raw" ]] || { echo "no TimeoutStartSec in $unit"; return 1; }
+  if   [[ "$raw" =~ ^([0-9]+)min$ ]]; then secs=$(( BASH_REMATCH[1] * 60 ))
+  elif [[ "$raw" =~ ^([0-9]+)m$ ]];   then secs=$(( BASH_REMATCH[1] * 60 ))
+  elif [[ "$raw" =~ ^([0-9]+)s$ ]];   then secs=$(( BASH_REMATCH[1] ))
+  elif [[ "$raw" =~ ^([0-9]+)$ ]];    then secs=$(( BASH_REMATCH[1] ))
+  else echo "unparsable TimeoutStartSec '$raw' in $unit"; return 1
+  fi
+  step="$(awk '/- name: Trigger deploy/ { in_step = 1; next }
+               in_step && /timeout-minutes:/ { sub(/.*timeout-minutes:[ ]*/, ""); print; exit }
+               in_step && /- name:/ { exit }' "$wf")"
+  [[ "$step" =~ ^[0-9]+$ ]] || { echo "no numeric timeout-minutes for the Trigger deploy step in $wf"; return 1; }
+  (( secs < step * 60 ))
+}
+check_ceiling() { # unit-file workflow-file desc
+  if ceiling_guard "$1" "$2" >/dev/null; then ok "$3"; else bad "$3"; fi
+}
+
+check_ceiling "$UNIT_FILE" "${REPO}/.github/workflows/deploy.yml" \
+  "the Trigger deploy step timeout outlives the unit TimeoutStartSec"
+
+# Both directions, driven by scratch copies of the real unit so a future edit
+# to either file cannot quietly satisfy the guard.
+UNIT_45="$WORK/unit-45min.service"
+UNIT_65="$WORK/unit-65min.service"
+sed 's/^TimeoutStartSec=.*/TimeoutStartSec=45min/' "$UNIT_FILE" > "$UNIT_45"
+sed 's/^TimeoutStartSec=.*/TimeoutStartSec=65min/' "$UNIT_FILE" > "$UNIT_65"
+check_ceiling "$UNIT_45" "${REPO}/.github/workflows/deploy.yml" \
+  "a 45min unit passes the ceiling guard"
+if ceiling_guard "$UNIT_65" "${REPO}/.github/workflows/deploy.yml" >/dev/null; then
+  bad "a 65min unit is rejected by the ceiling guard"
+else
+  ok "a 65min unit is rejected by the ceiling guard"
+fi
 if hasnt_regex "$UNIT_FILE" '^Restart='; then
   ok "unit has NO Restart= line"
 else

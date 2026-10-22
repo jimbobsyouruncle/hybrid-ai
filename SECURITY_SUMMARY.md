@@ -36,7 +36,8 @@ never list secret values, and it must never grow into a full-repository dump.
 - Token repository lists: both tokens are intended to cover all four owned non-fork repos
   (`hybrid-ai`, `shared-actions`, `runpod-hybrid-worker`, `psychic-octo-dollop`); the docs
   lag that decision.
-- Images are pinned by tag, not digest.
+- Compose images are pinned by tag, not digest. `hermes/Dockerfile` now pins its base
+  image by digest (`FROM python:3.11-slim@sha256:...`).
 
 ---
 

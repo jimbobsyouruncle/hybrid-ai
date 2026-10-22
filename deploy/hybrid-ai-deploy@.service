@@ -49,8 +49,10 @@ Environment=HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env
 ExecStart=/opt/hybrid-ai/scripts/deploy-instance.sh %i
 
 # Give up rather than run forever. A hung deploy holding the lock is worse than
-# a failed one.
-TimeoutStartSec=20min
+# a failed one. Deliberately SHORTER than the workflow step that triggers it
+# (60 min in .github/workflows/deploy.yml), so the unit gives up first and the
+# step is still alive to report the real Result= instead of being killed.
+TimeoutStartSec=45min
 
 # Deliberately NO Restart= policy. See the file header: an automatic retry must
 # never re-reset the tree or disturb the running stack (incident B1).

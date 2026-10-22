@@ -141,6 +141,20 @@ Runtime tool installs (browsers, extra packages) land under `$HERMES_HOME`, that
 `hermes_data` volume at `/root/.hermes`, not under the install dir. They are rebuildable
 and are excluded from the backup.
 
+### The base image and the build gate
+
+The base image is pinned by digest, not by tag: `FROM python:3.11-slim@sha256:...`
+on line 1 of `hermes/Dockerfile`. A moved tag cannot change the image silently; a
+base bump is a reviewed line change.
+
+The image also carries `org.hybrid-ai.build-inputs-sha`, the sha256 of the
+Dockerfile, `patches/**`, the three pinned ARGs and that base digest. A deploy
+recomputes the same sha and skips `docker compose build` when it matches, so an
+unchanged pin costs no rebuild. Change any of those inputs and the next deploy
+rebuilds. The gate never records a cause for a mismatch; treat a mismatch as
+"the inputs changed on disk" and diff them. Full detail:
+[`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md), "The build phase of a deploy".
+
 ---
 
 ## Mounts
