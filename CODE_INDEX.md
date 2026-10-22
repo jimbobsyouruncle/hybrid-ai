@@ -658,6 +658,7 @@
 - write_layout()
 - write_full_install()
 - write_data_dirs()
+- write_siblings()
 
 ## scripts/uninstall.sh
 - log()
@@ -671,6 +672,7 @@
 - apply_layout_setting()
 - resolve_paths()
 - allowlisted_path()
+- unique_data_path()
 - build_removal_plan()
 - have_docker()
 - have_systemctl()

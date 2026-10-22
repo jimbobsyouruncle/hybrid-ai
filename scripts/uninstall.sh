@@ -144,6 +144,15 @@ LOG_DIR="$(host_path /var/log/hybrid-ai)"
 WORK_DIR="${DATA_DIR}/work"
 RESTIC_CACHE="$(host_path /var/cache/hybrid-ai-backup)"
 CRED_DIR="$(host_path /etc/credstore/hybrid-ai-backup)"
+# The agent workspace and the repo reference tree are SIBLINGS of the data dir,
+# never children of it. The deploy and backup account homes are fixed layout
+# paths with no env setting. The backup log directory is the directory of
+# BACKUP_LOG, whose system-mode default is /var/log/hybrid-ai-backup/backup.log.
+AGENT_WS="$(host_path /var/lib/hybrid-ai-agent)"
+AGENT_REPOS="$(host_path /var/lib/hybrid-ai-repos)"
+DEPLOY_HOME="$(host_path /var/lib/hybrid-ai-deploy)"
+BACKUP_HOME="$(host_path /var/lib/hybrid-ai-backup)"
+BACKUP_LOG_DIR="$(host_path /var/log/hybrid-ai-backup)"
 
 # --- Layout-file reader (PARSE, never source) ------------------------------
 # Read ONE key from a layout file, line by line. The value is DATA, never code,
@@ -202,6 +211,17 @@ resolve_paths() {
     if [[ -n "${HYBRID_AI_BACKUP_CRED_DIR:-}" ]]; then
       CRED_DIR="$(host_path "$HYBRID_AI_BACKUP_CRED_DIR")"
     fi
+    # Sibling trees and the backup log directory, all resolved by the library.
+    # Each keeps the built-in default when the library did not set it.
+    if [[ -n "${OPENHANDS_WORKSPACE:-}" ]]; then
+      AGENT_WS="$(host_path "$OPENHANDS_WORKSPACE")"
+    fi
+    if [[ -n "${AGENT_REPOS_DIR:-}" ]]; then
+      AGENT_REPOS="$(host_path "$AGENT_REPOS_DIR")"
+    fi
+    if [[ -n "${BACKUP_LOG:-}" ]]; then
+      BACKUP_LOG_DIR="$(host_path "$(dirname "$BACKUP_LOG")")"
+    fi
     return 0
   fi
 
@@ -213,6 +233,17 @@ resolve_paths() {
   apply_layout_setting RESTIC_CACHE RESTIC_CACHE_DIR
   apply_layout_setting CRED_DIR     HYBRID_AI_BACKUP_CRED_DIR
   apply_layout_setting STACK_ENV    HYBRID_AI_STACK_ENV_FILE
+  apply_layout_setting AGENT_WS     OPENHANDS_WORKSPACE
+  apply_layout_setting AGENT_REPOS  AGENT_REPOS_DIR
+  # BACKUP_LOG is a FILE setting: the directory it lives in is what gets removed.
+  local backup_log
+  backup_log="$(parse_env_value "$LAYOUT_ENV" BACKUP_LOG)"
+  if [[ -n "$backup_log" ]]; then
+    case "$backup_log" in
+      /*) BACKUP_LOG_DIR="$(dirname "$backup_log")" ;;
+      *)  warn "BACKUP_LOG is not an absolute path; ignoring it." ;;
+    esac
+  fi
   APP_DIR="$(host_path "$APP_DIR")"
   DATA_DIR="$(host_path "$DATA_DIR")"
   LOG_DIR="$(host_path "$LOG_DIR")"
@@ -220,6 +251,9 @@ resolve_paths() {
   RESTIC_CACHE="$(host_path "$RESTIC_CACHE")"
   CRED_DIR="$(host_path "$CRED_DIR")"
   STACK_ENV="$(host_path "$STACK_ENV")"
+  AGENT_WS="$(host_path "$AGENT_WS")"
+  AGENT_REPOS="$(host_path "$AGENT_REPOS")"
+  BACKUP_LOG_DIR="$(host_path "$BACKUP_LOG_DIR")"
   return 0
 }
 
@@ -283,17 +317,41 @@ IPT_LOCK_WAIT="5"
 IPT=( iptables -w "$IPT_LOCK_WAIT" )
 
 # The data directories, each with the setting that named it, so a refusal can
-# name the setting.
+# name the setting. The last five are the bootstrapped siblings, the two fixed
+# account homes and the backup log directory. Every entry is allowlist-checked.
 DATA_SETTINGS=( HYBRID_AI_DATA_DIR HYBRID_AI_WORK_DIR HYBRID_AI_LOG_DIR \
-                RESTIC_CACHE_DIR HYBRID_AI_BACKUP_CRED_DIR HYBRID_AI_ENV_FILE )
-DATA_PATHS=( "$DATA_DIR" "$WORK_DIR" "$LOG_DIR" "$RESTIC_CACHE" "$CRED_DIR" "$ETC_DIR" )
+                RESTIC_CACHE_DIR HYBRID_AI_BACKUP_CRED_DIR HYBRID_AI_ENV_FILE \
+                OPENHANDS_WORKSPACE AGENT_REPOS_DIR \
+                "fixed-layout DEPLOY_HOME" "fixed-layout BACKUP_HOME" \
+                "BACKUP_LOG directory" )
+DATA_PATHS=( "$DATA_DIR" "$WORK_DIR" "$LOG_DIR" "$RESTIC_CACHE" "$CRED_DIR" "$ETC_DIR" \
+             "$AGENT_WS" "$AGENT_REPOS" \
+             "$DEPLOY_HOME" "$BACKUP_HOME" \
+             "$BACKUP_LOG_DIR" )
 DATA_ALLOWED=()
 REMOVE_DATA=0
+
+# True when $1 is a non-empty path not already present in DATA_PATHS before $2.
+# Guards the removal loop against an empty entry and against a duplicate, so no
+# path is ever rm'd twice and no empty string is ever rm'd.
+unique_data_path() { # path index
+  local p="$1" upto="$2" j
+  [[ -n "$p" ]] || return 1
+  for (( j = 0; j < upto; j++ )); do
+    if [[ "${DATA_PATHS[j]}" == "$p" ]]; then return 1; fi
+  done
+  return 0
+}
 
 build_removal_plan() {
   local i
   DATA_ALLOWED=()
   for (( i = 0; i < ${#DATA_PATHS[@]}; i++ )); do
+    if ! unique_data_path "${DATA_PATHS[i]}" "$i"; then
+      # Empty or already handled: skip silently, never rm it.
+      DATA_ALLOWED+=(2)
+      continue
+    fi
     if allowlisted_path "${DATA_PATHS[i]}"; then
       DATA_ALLOWED+=(1)
     else
@@ -336,7 +394,7 @@ install_present() {
 find_remnants() {
   local p d
   REMNANTS=()
-  for p in "$DATA_DIR" "$WORK_DIR" "$LOG_DIR" "$RESTIC_CACHE" "$CRED_DIR" "$ETC_DIR"; do
+  for p in "${DATA_PATHS[@]}"; do
     if [[ -e "$p" ]]; then REMNANTS+=("$p"); fi
   done
   for d in "${POLKIT_DIRS[@]}"; do
@@ -384,11 +442,11 @@ report_data_paths() {
   local i
   hr; log "Data directories (KEPT by default)"; hr
   for (( i = 0; i < ${#DATA_PATHS[@]}; i++ )); do
-    if [[ "${DATA_ALLOWED[i]}" == "1" ]]; then
-      printf '      %s\n' "${DATA_PATHS[i]}"
-    else
-      warn "refusing to remove ${DATA_PATHS[i]} (setting ${DATA_SETTINGS[i]}): outside the allowlist. It is left untouched."
-    fi
+    case "${DATA_ALLOWED[i]}" in
+      1) printf '      %s\n' "${DATA_PATHS[i]}" ;;
+      2) : ;;  # empty or already handled; nothing to show or remove
+      *) warn "refusing to remove ${DATA_PATHS[i]} (setting ${DATA_SETTINGS[i]}): outside the allowlist. It is left untouched." ;;
+    esac
   done
   return 0
 }
@@ -612,10 +670,13 @@ step_remove_data() {
   hr; log "Data directories"; hr
   for (( i = 0; i < ${#DATA_PATHS[@]}; i++ )); do
     p="${DATA_PATHS[i]}"
-    if [[ "${DATA_ALLOWED[i]}" != "1" ]]; then
-      warn "refusing to remove ${p} (setting ${DATA_SETTINGS[i]}): outside the allowlist. It is left untouched."
-      continue
-    fi
+    case "${DATA_ALLOWED[i]}" in
+      2) continue ;;  # empty or already handled: never rm, never double-rm
+      1) ;;
+      *)
+        warn "refusing to remove ${p} (setting ${DATA_SETTINGS[i]}): outside the allowlist. It is left untouched."
+        continue ;;
+    esac
     if (( ! REMOVE_DATA )); then
       ok "kept: ${p}"
       continue

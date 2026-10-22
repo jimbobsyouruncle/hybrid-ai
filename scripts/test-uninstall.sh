@@ -139,6 +139,9 @@ HYBRID_AI_LOG_DIR=${r}/var/log/hybrid-ai
 HYBRID_AI_WORK_DIR=${r}/var/lib/hybrid-ai/work
 RESTIC_CACHE_DIR=${r}/var/cache/hybrid-ai-backup
 HYBRID_AI_BACKUP_CRED_DIR=${r}/etc/credstore/hybrid-ai-backup
+OPENHANDS_WORKSPACE=${r}/var/lib/hybrid-ai-agent
+AGENT_REPOS_DIR=${r}/var/lib/hybrid-ai-repos
+BACKUP_LOG=${r}/var/log/hybrid-ai-backup/backup.log
 EOF
 }
 
@@ -160,6 +163,20 @@ write_data_dirs() { # root
   mkdir -p "$r/var/lib/hybrid-ai/work" "$r/var/log/hybrid-ai" \
            "$r/var/cache/hybrid-ai-backup" "$r/etc/credstore/hybrid-ai-backup"
   : > "$r/var/lib/hybrid-ai/keepme.txt"
+}
+
+# The five bootstrapped sibling trees a bootstrap creates beside the data dir:
+# the agent workspace, the repo reference tree, the two account homes and the
+# backup log directory. Each gets a file so its removal is provable.
+SIBLING_DIRS=( var/lib/hybrid-ai-agent var/lib/hybrid-ai-repos \
+               var/lib/hybrid-ai-deploy var/lib/hybrid-ai-backup \
+               var/log/hybrid-ai-backup )
+write_siblings() { # root
+  local r="$1" d
+  for d in "${SIBLING_DIRS[@]}"; do
+    mkdir -p "$r/$d"
+    : > "$r/$d/sibling.txt"
+  done
 }
 
 # ===========================================================================
@@ -335,6 +352,69 @@ have "dry-run: prints the compose plan" "$OUT" "down --remove-orphans"
 AFTER="$(cd "$R" && find . | sort)"
 check "dry-run: the fixture tree is unchanged" "$BEFORE" "$AFTER"
 check "dry-run: the event log is unchanged" "" "$(cat "$EV")"
+
+# ===========================================================================
+# 10. Sibling trees: --remove-data removes all five bootstrapped directories.
+# ===========================================================================
+R="$(new_root siblings-full)"
+write_layout "$R"; write_full_install "$R"; write_data_dirs "$R"; write_siblings "$R"
+touch "$R/etc/hybrid-ai/stack.env"
+EV="$WORK/ev-sib-full"; : > "$EV"
+OUT="$(EVENTS="$EV" HYBRID_AI_UNINSTALL_ROOT="$R" bash "$UNINSTALL" --yes --remove-data 2>&1)"; RC=$?
+check "siblings: --remove-data exit 0" "0" "$RC"
+for d in "${SIBLING_DIRS[@]}"; do
+  check "siblings: ${d} is gone" "gone" \
+    "$( [[ -e "$R/$d" ]] && echo present || echo gone )"
+done
+
+# ===========================================================================
+# 11. Siblings only: remnants path names all five, with no /opt install.
+# ===========================================================================
+R="$(new_root siblings-only)"
+write_layout "$R"; write_siblings "$R"
+EV="$WORK/ev-sib-only"; : > "$EV"
+OUT="$(EVENTS="$EV" HYBRID_AI_UNINSTALL_ROOT="$R" bash "$UNINSTALL" --yes 2>&1)"; RC=$?
+check "siblings-only: exit 0" "0" "$RC"
+have "siblings-only: reports remnants only" "$OUT" "remnants only"
+for d in "${SIBLING_DIRS[@]}"; do
+  have "siblings-only: names ${d}" "$OUT" "$R/$d"
+done
+
+# ===========================================================================
+# 12. Siblings kept by default (no --remove-data).
+# ===========================================================================
+R="$(new_root siblings-keep)"
+write_layout "$R"; write_siblings "$R"
+EV="$WORK/ev-sib-keep"; : > "$EV"
+EVENTS="$EV" HYBRID_AI_UNINSTALL_ROOT="$R" bash "$UNINSTALL" --yes >/dev/null 2>&1
+for d in "${SIBLING_DIRS[@]}"; do
+  check "siblings kept: ${d} survives" "present" \
+    "$( [[ -e "$R/$d/sibling.txt" ]] && echo present || echo gone )"
+done
+
+# ===========================================================================
+# 13. Legacy layout: an out-of-allowlist OPENHANDS_WORKSPACE is refused.
+# ===========================================================================
+R="$(new_root legacy-ws)"
+write_layout "$R"; write_data_dirs "$R"
+mkdir -p "$R/home/pi/hybrid-ai-agent"; : > "$R/home/pi/hybrid-ai-agent/precious.txt"
+cat > "$R/etc/hybrid-ai/hybrid-ai.env" <<EOF
+HYBRID_AI_APP_DIR=${R}/opt/hybrid-ai
+HYBRID_AI_STACK_ENV_FILE=${R}/etc/hybrid-ai/stack.env
+HYBRID_AI_DATA_DIR=${R}/var/lib/hybrid-ai
+HYBRID_AI_LOG_DIR=${R}/var/log/hybrid-ai
+HYBRID_AI_WORK_DIR=${R}/var/lib/hybrid-ai/work
+RESTIC_CACHE_DIR=${R}/var/cache/hybrid-ai-backup
+HYBRID_AI_BACKUP_CRED_DIR=${R}/etc/credstore/hybrid-ai-backup
+OPENHANDS_WORKSPACE=${R}/home/pi/hybrid-ai-agent
+EOF
+EV="$WORK/ev-legacy-ws"; : > "$EV"
+OUT="$(EVENTS="$EV" HYBRID_AI_UNINSTALL_ROOT="$R" bash "$UNINSTALL" --yes --remove-data 2>&1)"; RC=$?
+check "legacy workspace: exit 0" "0" "$RC"
+have "legacy workspace: refusal names the setting" "$OUT" "OPENHANDS_WORKSPACE"
+have "legacy workspace: refusal says outside the allowlist" "$OUT" "outside the allowlist"
+check "legacy workspace: the path survives" "present" \
+  "$( [[ -e "$R/home/pi/hybrid-ai-agent/precious.txt" ]] && echo present || echo gone )"
 
 # ===========================================================================
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

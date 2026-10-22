@@ -697,8 +697,13 @@ It then removes:
 * only the `DOCKER-USER` firewall rules tagged `hybrid-ai-sandbox-egress`,
 * `/opt/hybrid-ai`.
 
-With `--remove-data` it also removes the data, work, log, restic-cache and
-backup credential directories, and `/etc/hybrid-ai`.
+With `--remove-data` it also removes the data, work, log and restic-cache
+directories, the backup credential directory, the agent workspace
+(`/var/lib/hybrid-ai-agent`), the repo reference tree
+(`/var/lib/hybrid-ai-repos`), the deploy and backup account homes
+(`/var/lib/hybrid-ai-deploy` and `/var/lib/hybrid-ai-backup`), the backup log
+directory (`/var/log/hybrid-ai-backup`), and the layout and stack files under
+`/etc/hybrid-ai`. Names and paths only: no file content is ever read or printed.
 
 ### What it keeps
 
