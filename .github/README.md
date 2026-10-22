@@ -283,7 +283,7 @@ Watch the **Actions** tab. First run takes 2–4 minutes.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Pi ... is unreachable over the tailnet` | ACL rule missing, or Pi offline | Verify the `tag:ci` ACL; check `tailscale status` on the Pi |
-| SSH `permission denied (publickey)` | Wrong key, or public half not installed | Re-run `ssh-copy-id`; confirm you pasted the **private** key into the secret |
+| SSH `permission denied (publickey)` | Wrong key, or public half not installed | Re-run `sudo ./scripts/bootstrap.sh --deploy-pubkey ~/.ssh/hybrid_ai_deploy.pub` on the Pi; confirm you pasted the **private** key into the secret. `ssh-copy-id` will not work — the deploy account's key is pinned to the forced command |
 | `RUNPOD_API_KEY missing and --non-interactive was requested` | `.env` does not exist on the Pi yet | Run `./install.sh` interactively on the Pi once first |
 | `Open WebUI failed its health check` | Container did not start | The workflow output includes the last 50 log lines — read those |
 | OAuth client errors | Wrong scope or missing tag | Client needs `auth_keys` write scope and `tag:ci` |

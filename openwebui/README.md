@@ -8,7 +8,7 @@ Three source files and one generated file.
 | `pipe_wrapper.py` | Open WebUI presentation: Valves, status lines, markdown. | Yes |
 | `build_pipe.py` | Concatenates the two into the pasteable artifact. | Rarely |
 | `runpod_pipe.py` | **Generated.** The file you paste into Open WebUI. | **No** |
-| `test_refactor.py` | 62 behavioural checks over the security-critical paths. | Yes |
+| `test_refactor.py` | 64 behavioural checks over the security-critical paths. | Yes |
 
 ---
 
