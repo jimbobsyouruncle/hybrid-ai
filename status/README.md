@@ -9,23 +9,25 @@
 
 ## Routes
 
+The `http://{$LOCAL_DOMAIN}` block:
+
 | Path | Serves | Access |
 |---|---|---|
-| `/hub` | Directory of all services with live health | LAN + tailnet |
-| `/status` | Health, **job history**, errors, log tails, diagnostics | LAN + tailnet |
-| `/openwebui`, `/chat` | 302 redirect to `/app/` | open |
-| `/app/*` | Open WebUI (prefix stripped) | open |
+| `/status*` | Health, **job history**, errors, log tails, diagnostics, and `/status/api` as JSON | LAN + tailnet |
+| `/hub*` | Directory of all services with live health | LAN + tailnet |
+| `/health` | One word: `ok` / `warn` / `fail` (rewritten to `/status/health-summary`) | open |
 | `/ollama/*` | Ollama REST API (prefix stripped) | LAN + tailnet |
-| `/health` | One word: `ok` / `warn` / `fail` | open |
-| `/status/api` | Full status as JSON | LAN + tailnet |
+| anything else | Open WebUI, proxied straight through | open |
 
-### Why `/openwebui` redirects instead of serving in place
+Two more site blocks: `http://status.{$LOCAL_DOMAIN}` redirects `/` to `/status` with a 302 and proxies to `status:8088`; `http://hermes.{$LOCAL_DOMAIN}` proxies to `hermes:8501`. Both import the same allowlist.
+
+### Why Open WebUI is served at the root
 
 Open WebUI is a SvelteKit app requesting assets from absolute root paths (`/_app/…`, `/static/…`) with no base-path setting. Serve it under a prefix and strip that prefix, and the HTML arrives but every asset request lands at the root, misses the route, and 404s — a blank page. This is a long-standing upstream limitation, not a misconfiguration here.
 
-So `/openwebui` issues a **302 to `/app/`**, a prefix Caddy strips before proxying. You get a memorable URL; the app gets the root-relative paths it needs. It is a 302 rather than 301 so browsers do not cache it permanently, leaving the door open for a true rewrite if upstream ever adds base-path support.
+So the Caddyfile serves it from the site root: the `http://{$LOCAL_DOMAIN}` block's catch-all `handle` proxies to `open-webui:8080` with no prefix to strip. There is no `/app/` prefix and no `/openwebui` or `/chat` alias. Port `3000` also stays published, so a direct address keeps working.
 
-The Ollama API is a plain REST API with no asset loading, so it *is* served properly under `/ollama/`.
+The Ollama API is a plain REST API with no asset loading, so it *is* served properly under the `/ollama/` prefix.
 
 > **Security note on `/ollama/`:** Ollama has no authentication. Anyone who can reach it can run inference, pull models, and fill your disk. It is behind the same strict allowlist, and Ollama's own port stays bound to `127.0.0.1`. It is exposed here only so scripts on your own machines have one consistent address.
 
@@ -39,14 +41,14 @@ A single page showing whether everything is working, what recently went wrong, a
 
 It shows:
 
-- **Services** — Open WebUI, Ollama, and the GPU pod, with response times
+- **Services** — Open WebUI, Ollama, Hermes Agent, OpenHands, and the GPU pod, with response times
 - **Scheduled jobs** — the last outcome of every backup, integrity check, restore rehearsal, retention prune and install, with staleness detection
 - **System checks** — container states, disk, memory, installed models, backup freshness, database health
 - **Recent errors** — filtered from the last 120 log lines of each service
 - **Log tails** — collapsible, last 40 lines per service
 - **Download diagnostic** — one click, no terminal
 
-The page auto-refreshes every 30 seconds, and pauses refreshing while a download is in progress or the tab is hidden.
+The page auto-refreshes every 60 seconds, and pauses refreshing while a download is in progress or the tab is hidden.
 
 `http://<your-pi>/` now serves Open WebUI through the same proxy. Port `3000` stays published, so existing bookmarks keep working.
 
@@ -58,7 +60,7 @@ This page reveals service state, log excerpts, and offers a downloadable bundle.
 
 ### It holds no secrets
 
-The status container is **not given `.env`**, any API key, or any credential. It cannot leak what it was never given. The only configuration it receives is `TAILSCALE_IP` and `VLLM_PORT` — a private mesh address and a port number, and the address is masked in all output anyway.
+The status container is **not given `.env`**, any API key, or any credential. It cannot leak what it was never given. Its whole configuration is `TAILSCALE_IP`, `STATUS_PORT`, `LOCAL_DOMAIN`, `OLLAMA_URL`, `WEBUI_URL`, `HERMES_URL`, `OPENHANDS_URL`, `WEBUI_DATA_PATH`, `BACKUP_LOG_PATH`, `INSTALL_LOG_PATH`, `RUNPOD_HOST`, `PI_HOST`, `VLLM_PORT`, `PYTHONDONTWRITEBYTECODE` and `DO_NOT_TRACK` — service addresses, host names, port numbers, container-side file paths and two static flags. None of it is a secret; the one hostname that could be sensitive, `RUNPOD_HOST`, is masked in all output anyway.
 
 This is why the web diagnostic is deliberately narrower than `./collect-diagnostics.sh`: the CLI tool can report which config keys are set and how long their values are, because it runs as you on the host. The web service cannot, because giving it that access would make it worth attacking.
 

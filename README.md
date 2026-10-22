@@ -24,7 +24,7 @@ Your RunPod prompts travel over an encrypted private network. The cloud server k
 - Autonomous workflow orchestration and persistent long-term memory via Hermes Agent.
 - No public ports, no port forwarding, no exposing your home network to the internet.
 - Push to `main` and your Pi updates itself, without ever touching your data.
-- Streamlined local DNS: `yourdomain.com` for chat, `hermes.` for orchestration, `openhands.` for maintenance, and `status.` for health.
+- Streamlined local DNS: `yourdomain.com` for chat, `hermes.` for orchestration, and `status.` for health. OpenHands stays off the proxy — you reach it through an SSH tunnel.
 - Nightly encrypted backups to Cloudflare R2 covering chats, documents, vectors, memories, connections, pipes, and settings — a failed disk is an inconvenience, not a catastrophe.
 
 ---
@@ -73,7 +73,7 @@ Your RunPod prompts travel over an encrypted private network. The cloud server k
 | 1 | You pick the cloud model and send a message | — |
 | 2 | The pipe confirms the destination is inside your private network | instant |
 | 3 | The pipe asks RunPod to resume the stopped pod | 2–5 s |
-| 4 | `start.sh` joins Tailscale, arms the watchdog, launches vLLM | 30–60 s |
+| 4 | The pod's `start.sh` (from the `runpod-hybrid-worker` repository) joins Tailscale, arms the watchdog, launches vLLM | 30–60 s |
 | 5 | The pipe polls until the model reports ready | 2–5 min (cold) |
 | 6 | Your prompt streams over the tunnel; text appears as it's written | — |
 | 7 | 15 minutes idle → the pod stops itself, billing ends | automatic |
@@ -160,7 +160,7 @@ On NVMe, the 30-minute keep-alive that `install.sh` configures at 16 GB matters 
 
 ## Addresses
 
-During setup, `install.sh` configures a local domain (e.g., `yourhostname.com`). All services route through a Caddy reverse proxy using local DNS:
+During setup, `install.sh` configures a local domain (e.g., `yourhostname.com`). The chat, orchestration and status services route through a Caddy reverse proxy using local DNS:
 
 | URL | What it serves | Who can reach it |
 |---|---|---|
@@ -168,7 +168,6 @@ During setup, `install.sh` configures a local domain (e.g., `yourhostname.com`).
 | `http://yourhostname.com` | Open WebUI (The chat interface) | Anyone (it has its own login) |
 | `http://hermes.yourhostname.com` | Hermes Agent UI (System orchestrator) | LAN + tailnet |
 | `http://status.yourhostname.com` | Service health, scheduled jobs, logs, diagnostics | LAN + tailnet |
-| `http://openhands.yourhostname.com` | OpenHands autonomous coding workspace | LAN + tailnet |
 | `http://yourhostname.com/ollama/` | Local model API, for scripts | LAN + tailnet |
 | `http://yourhostname.com/health` | One word — `ok`, `warn`, or `fail` | Anyone |
 
@@ -460,7 +459,7 @@ options is refused. See [`deploy/README.md`](deploy/README.md) and
 git clone [https://github.com/jimbobsyouruncle/hybrid-ai.git](https://github.com/jimbobsyouruncle/hybrid-ai.git)
 cd hybrid-ai
 chmod +x install.sh doctor.sh collect-diagnostics.sh \
-         backup/backup.sh backup/restore.sh runpod/start.sh \
+         backup/backup.sh backup/restore.sh \
          scripts/setup-agent-workspace.sh \
          openhands/scripts/openhands-control.sh
 
@@ -484,7 +483,7 @@ The installer only *looks* for the GPU pod on your tailnet (a read-only `tailsca
 
 ### Step 4 — Verify Local DNS
 
-If `install.sh` flags that your subdomains (e.g., `openhands.yourhostname.com`) are missing, add the exact A-Records it prints to your local Pi-hole or DNS server, pointing to the Pi's local IP address.
+If `install.sh` flags that your subdomains (e.g., `hermes.yourhostname.com`) are missing, add the exact A-Records it prints to your local Pi-hole or DNS server, pointing to the Pi's local IP address.
 
 ### Step 5 — Configure Open WebUI
 
@@ -506,7 +505,7 @@ Open `http://yourhostname.com/hub` in a browser to see everything at once, or fr
 ./doctor.sh
 ```
 
-Everything should report healthy. Ensure you can access `http://hermes.yourhostname.com` to manage long-term agent memory and `http://openhands.yourhostname.com` to verify workspace isolation.
+Everything should report healthy. Ensure you can access `http://hermes.yourhostname.com` to manage long-term agent memory, and reach OpenHands over the SSH tunnel to verify workspace isolation.
 
 ### Step 7 — Backups
 
@@ -538,7 +537,7 @@ Put that in a password manager. Rehearse a restore before you need one:
 | `docker-compose.yml` | Blueprint for the Pi containers | Commented inline |
 | `openwebui/` | The Python bridge to the cloud GPU | [`openwebui/README.md`](openwebui/README.md) |
 | `status/` | Status page and reverse proxy | [`status/README.md`](status/README.md) |
-| `runpod/` | Everything that runs on the rented GPU | [`runpod/README.md`](runpod/README.md) |
+| `runpod/` | Guide to the rented-GPU worker. The worker's `start.sh`, `Dockerfile` and build workflow live in [`jimbobsyouruncle/runpod-hybrid-worker`](https://github.com/jimbobsyouruncle/runpod-hybrid-worker) | [`runpod/README.md`](runpod/README.md) |
 | `hermes/` | Hermes Agent system orchestrator | [hermes/README.md](hermes/README.md) |
 | `openhands/` | Natural-language code-maintenance agent | [openhands/README.md](openhands/README.md) |
 | `backup/` | Encrypted backups to Cloudflare R2 | [`backup/README.md`](backup/README.md) |
@@ -665,7 +664,7 @@ Claims are only worth what enforces them. Each one below maps to a specific mech
 | Claim | Enforced by | Where |
 |---|---|---|
 | Prompts never traverse the public internet | Address validated against `100.64.0.0/10` before any transmission | `runpod_pipe.py` → `_is_mesh_address()` |
-| The GPU server keeps no record of prompts | `--disable-log-requests`, `VLLM_CONFIGURE_LOGGING=0` | `runpod/start.sh` |
+| The GPU server keeps no record of prompts | `--disable-log-requests`, `VLLM_CONFIGURE_LOGGING=0` | `start.sh` in `jimbobsyouruncle/runpod-hybrid-worker` (see [`runpod/README.md`](runpod/README.md)) |
 | **OpenRouter inference (Optional fallback)** | **Prompts sent to OpenRouter are subject to their privacy policy. Use local Ollama or RunPod for strict privacy.** | `.env` config |
 | No telemetry leaves the Pi | `DO_NOT_TRACK`, `SCARF_NO_ANALYTICS` | `docker-compose.yml` |
 | Documents are embedded locally | `RAG_EMBEDDING_ENGINE=""` — computed in-container | `docker-compose.yml` |

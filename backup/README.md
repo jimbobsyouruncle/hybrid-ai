@@ -6,7 +6,7 @@
 | `restore.sh` | Brings it all back — including a rehearsal mode that touches nothing live |
 | `hybrid-ai-backup.{service,timer}` | Nightly schedule at 03:15 (**user mode**, the default) |
 | `hybrid-ai-check.{service,timer}` | Monthly integrity verification (**user mode**) |
-| `system/` | The **system mode** units: a two-unit privilege split (see below) |
+| `system/` | The **system mode** units: a two-unit nightly privilege split (capture and upload), plus the monthly integrity-check unit (see below) |
 | `backup-containers.sh` | Root-only helper the system-mode capture unit calls; the only part of a system-mode backup that touches Docker |
 
 There are two ways to run the nightly backup, chosen by the
@@ -104,7 +104,7 @@ Some runs cannot capture everything. A discovered path fails the allow-list, an 
 
 - it still uploads what it has, tagged `complete:false`;
 - it logs `backup_incomplete` (never `backup_success`);
-- it exits with code **3**, which every backup unit lists in **both** `SuccessExitStatus=` (so systemd reports the run as a success, not a failed unit) and `RestartPreventExitStatus=` (so there is no 15-minute retry loop). The capture unit always had both; the upload and check units gained `SuccessExitStatus=3` so a successful-but-INCOMPLETE upload or check is no longer shown as a failed unit.
+- it exits with code **3**. No unit retries it: every unit except the capture unit lists 3 in `RestartPreventExitStatus=`, and the capture unit has no `Restart=` policy at all. The system-mode units also list 3 in `SuccessExitStatus=` (so systemd does not report a successful-but-INCOMPLETE run as a failed unit); the upload and check units gained that line so an INCOMPLETE upload or check is no longer shown as a failure. It is the user-mode units that carry `RestartPreventExitStatus=` alone, with no `SuccessExitStatus=`.
 
 `backup_failed` (exit 1) stays reserved for a run that aborted. An incomplete run is a distinct, non-retryable outcome. `doctor.sh` counts both `backup_failed` and `backup_incomplete` **since the last `backup_success`**, so a clean run resets the counters.
 
