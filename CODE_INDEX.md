@@ -495,6 +495,8 @@
 - hasnt_regex()
 - run_instance()
 - check_line()
+- ceiling_guard()
+- check_ceiling()
 - run_verify()
 
 ## scripts/test-deploy-remote.sh
