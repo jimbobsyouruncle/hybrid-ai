@@ -593,6 +593,7 @@
 - bad()
 - check()
 - has()
+- cache_only_offenders()
 - run_prune()
 - prune_invocations()
 - service_line()
