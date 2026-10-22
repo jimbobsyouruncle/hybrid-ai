@@ -407,13 +407,23 @@ PR; the builder does that after an independent review (see
 
 The OpenHands token is read-only. Use a fine-grained personal access token with:
 
-- **Repository access:** Only select repositories (this project only).
+- **Repository access:** Only select repositories: `hybrid-ai`, `shared-actions`, `runpod-hybrid-worker`.
 - **Contents:** Read-only.
 - **Metadata:** Read-only.
 
 This is enough to clone and fetch. Do not grant Pull requests, Administration, or Workflows
 permissions. The write capability (push and PR) belongs to the builder token, which stays out
 of the sandbox.
+
+The app-server used to clone with `https://<token>@github.com/...`, and git stored that URL
+verbatim in `project/<repo>/.git/config`, leaving the token on disk in plain text. The pinned
+agent-server (the pin that stops this is >= 1.37.0; this repo pins `1.37.1-python-hybrid.3`) no
+longer writes the token into the clone URL. Detection remains the control: `./doctor.sh` runs
+`scripts/check-git-remotes.sh` over the agent-clone roots and reports any `remote.*.url`,
+`remote.*.pushurl`, `url.<base>.insteadOf` or `url.<base>.pushInsteadOf` that embeds a
+credential, naming only the path and the config key, never the URL or the token. A finding now
+FAILS the deploy (doctor exit 2 -> deploy step exit 4). The pin stops the write, detection stays
+the control, and a credential still on disk is a defect.
 
 ---
 

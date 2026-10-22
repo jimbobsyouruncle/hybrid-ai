@@ -275,7 +275,7 @@ Add the output as a repository secret named `PI_SSH_HOST_KEY`. Without it the de
 
 **3. Confirm `--trust-remote-code` is off.** If you switched to a model that genuinely needs it, set `TRUST_REMOTE_CODE=1` explicitly and satisfy yourself the model repository is trustworthy.
 
-**4. Review and narrow the OpenHands token's repository list.** Check whether the existing OpenHands token lists repositories beyond this project, and if it does, narrow it. In GitHub → Settings → Developer settings → Fine-grained tokens, edit it so that **Only select repositories** lists this repository alone, and confirm Contents and Metadata are both Read-only. If the token cannot be narrowed, revoke it and create a replacement.
+**4. Review and narrow the OpenHands token's repository list.** Check whether the existing OpenHands token lists repositories beyond this project, and if it does, narrow it. In GitHub → Settings → Developer settings → Fine-grained tokens, edit it so that **Only select repositories** lists only the three repositories named under [GitHub credential separation](#github-credential-separation), and confirm Contents and Metadata are both Read-only. If the token cannot be narrowed, revoke it and create a replacement.
 
 ---
 
@@ -308,7 +308,7 @@ Two distinct GitHub tokens are used. They are never interchangeable.
 | | OpenHands token | Builder token (`BUILDER_GITHUB_TOKEN`) |
 |---|---|---|
 | Type | Fine-grained PAT | Fine-grained PAT |
-| Repository access | Only select repositories | Only select repositories |
+| Repository access | Only select repositories: `hybrid-ai`, `shared-actions`, `runpod-hybrid-worker` | Only select repositories: `hybrid-ai`, `shared-actions`, `runpod-hybrid-worker` |
 | Contents | Read-only | Read and write |
 | Pull requests | None | Read and write |
 | Metadata | Read-only | Read-only |
@@ -316,6 +316,10 @@ Two distinct GitHub tokens are used. They are never interchangeable.
 | Workflows | None | Read and write |
 | Organization scope | None | None |
 | Purpose | Clone and fetch only | Push `ai/*` branches and open PRs |
+
+Both tokens are scoped to the same three owner-created repositories: `hybrid-ai`,
+`shared-actions` and `runpod-hybrid-worker`. `Azure-Sentinel` and `jbxuploadps` are excluded
+because they are not owner-created.
 
 The builder token holds **Workflows: Read and write**. The narrowing policy requires a written
 reason for every new permission, so the reason is recorded here: the builder publishes reviewed CI
@@ -325,6 +329,16 @@ agent-context caller and test workflows.
 
 The OpenHands token is read-only. OpenHands can read the repository and commit locally, but it
 cannot push, open a PR, or change anything on GitHub.
+
+The app-server used to clone with `https://<token>@github.com/...`, and git stored that URL
+verbatim in `project/<repo>/.git/config`, leaving the token on disk in plain text. The pinned
+agent-server (the pin that stops this is >= 1.37.0; this repo pins `1.37.1-python-hybrid.3`) no
+longer writes the token into the clone URL. Detection remains the control: `./doctor.sh` runs
+`scripts/check-git-remotes.sh` over the agent-clone roots and reports any `remote.*.url`,
+`remote.*.pushurl`, `url.<base>.insteadOf` or `url.<base>.pushInsteadOf` that embeds a
+credential, naming only the path and the config key, never the URL or the token. A finding now
+FAILS the deploy (doctor exit 2 -> deploy step exit 4). The pin stops the write, detection stays
+the control, and a credential still on disk is a defect.
 
 The builder token never enters the sandbox, a URL, argv, a commit message, or a tracked file.
 It is supplied by name through the environment only, and pushes happen after independent review.
@@ -338,9 +352,11 @@ before every push, and the production environment gates the deploy. The owner sh
 production deployment branches to `main` and keep required reviewers on that environment. Neither
 control is claimed to be configured already.
 
-The builder token's repository list also includes `jimbobsyouruncle/shared-actions`, because the
-builder publishes the shared agent-context action there. The permissions are the same as above,
-including Workflows: Read and write.
+The builder token's repository list also includes `jimbobsyouruncle/shared-actions` and
+`jimbobsyouruncle/runpod-hybrid-worker`, in addition to this project, for the same three-repo
+set named in the table above. It includes `shared-actions` because the builder publishes the
+shared agent-context action there. The permissions are the same as above, including Workflows:
+Read and write.
 
 **Rotation and narrowing policy**
 

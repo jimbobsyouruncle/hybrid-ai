@@ -392,7 +392,7 @@ in any tracked file. It is separate from the read-only OpenHands token (see
 
 Create it as a fine-grained personal access token with:
 
-- **Repository access:** Only select repositories.
+- **Repository access:** Only select repositories: `hybrid-ai`, `shared-actions`, `runpod-hybrid-worker`.
 - **Contents:** Read and write.
 - **Pull requests:** Read and write.
 - **Metadata:** Read-only.
@@ -417,28 +417,22 @@ http://openhands:3000
 
 **Can a job be created and followed to completion with only that URL?**
 
-This is a documentation-based finding; no containers were recreated in this change (see the
-validation note below). Read from the architecture:
+Yes. Creating a job and following it — status, event stream and per-file diff — are all served
+by the OpenHands app REST API at `http://openhands:3000` over `coder-net`:
 
-- **Creating a job** against the OpenHands API over `http://openhands:3000` is expected to
-  work: it is a REST call to the app server, which is the member of `coder-net`.
-- **Following a job to completion** is expected to require the **sandbox agent-server**
-  directly. OpenHands V1 starts one sandbox container per conversation and the client streams
-  events from that sandbox, not through the app server. The endpoint is the per-conversation
-  published port:
+- **Creating a job** against the OpenHands API over `http://openhands:3000` works: it is a
+  REST call to the app server, which is the member of `coder-net`. The start-tasks route
+  creates the job.
+- **Following a job** uses the same app API: `GET /api/v1/app-conversations` lists the
+  conversations, the start-tasks route reports their status, and `events/search` streams the
+  events and per-file diff. The builder follows a whole run this way, reading it from inside
+  the `hermes-agent` container. The sandbox agent-server is not needed for this.
 
-  ```
-  http://${OPENHANDS_SANDBOX_HOST}:<sandbox_host_port>
-  ```
+The sandbox agent-server host port is published by the sandbox on the host and is **not**
+reachable from the Hermes container. It is not needed to follow a job.
 
-  From inside a container the same sandbox is reached as
-  `http://host.docker.internal:<sandbox_host_port>`. That port is published on the host by the
-  sandbox, not offered on `coder-net`.
-
-Per the scope of this change, no route, bind, or network was added to make the sandbox
-reachable from Hermes. The endpoint is named above and the investigation stops here. Any
-change to make the sandbox reachable belongs to the later phase that narrows the sandbox
-ports.
+No route, bind, or network was added, and none is needed. Any change to narrow the sandbox
+ports belongs to a later phase.
 
 ---
 
