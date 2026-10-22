@@ -907,6 +907,147 @@ install_firewall_unit() {
 }
 
 # ---------------------------------------------------------------------------
+# STEP 9a-1. Re-apply the headless-deploy wiring (system unit + polkit rule)
+# ---------------------------------------------------------------------------
+# scripts/bootstrap.sh installs these ONCE, on a fresh device. Until now that was
+# the only install path, so a later fix to either file never reached a host that
+# had already been bootstrapped. On 2026-10-22 the host enforced a stale
+# TimeoutStartSec=20min against the tree's 45min and SIGTERM'd a deploy
+# mid-build; the raise had to be copied over by hand.
+#
+# Re-applying on every deploy closes that gap: the files here are tracked and
+# review-gated, so the host always matches the tree it is deploying.
+#
+# SELF-REFERENCE IS SAFE AND INTENDED. During a deploy this script runs INSIDE a
+# running instance of this very unit. The running instance keeps the
+# configuration it loaded; overwriting the file plus `systemctl daemon-reload`
+# only changes what the NEXT instantiation starts with. The current deploy is
+# unaffected, and the new content takes effect from the next deploy.
+#
+# NEVER enable and NEVER start the unit: it is an instantiated template, and the
+# polkit rule grants only `start` of `hybrid-ai-deploy@<40-hex>.service`. No
+# `Restart=` policy is added either (incident B1).
+#
+# Both functions sit before the --no-start exit so both paths place the files,
+# and neither is gated on HYBRID_AI_BACKUP_MODE: this is not backup related.
+#
+# Fail-safe, never fail-closed: no sudo, never dies and never changes this
+# script's exit status. A failed copy leaves the previous file in place, so the
+# host keeps working with the unit it already has.
+#
+# HYBRID_AI_SYSTEMD_UNIT_DIR and HYBRID_AI_POLKIT_RULES_DIR are the HARNESS-ONLY
+# overrides for scripts/test-deploy-wiring-install.sh, which installs into
+# scratch directories. Do not document them.
+install_deploy_unit() {
+  local unit="hybrid-ai-deploy@.service"
+  local unit_dir="${HYBRID_AI_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+  local source_file="${APP_DIR}/deploy/${unit}"
+  local target_file="${unit_dir}/${unit}"
+
+  if [[ "$(id -u)" != "0" ]]; then
+    warn "${unit} needs root to install into ${unit_dir}; not calling sudo."
+    warn "Re-run ./install.sh as root so the headless-deploy unit is re-applied."
+    event "deploy_unit_install_failed" "reason=not_root"
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl is unavailable; install ${unit} by hand."
+    event "deploy_unit_install_failed" "reason=systemctl_missing"
+    return 0
+  fi
+
+  if [[ ! -f "$source_file" ]]; then
+    warn "Missing deploy unit file: ${source_file}"
+    event "deploy_unit_install_failed" "reason=template_missing"
+    return 0
+  fi
+
+  if ! install -m 0644 "$source_file" "${target_file}.tmp"; then
+    rm -f "${target_file}.tmp"
+    warn "Could not stage ${unit} in ${unit_dir}."
+    event "deploy_unit_install_failed" "reason=copy_failed"
+    return 0
+  fi
+  if ! mv -f "${target_file}.tmp" "$target_file"; then
+    warn "Could not move ${unit} into ${unit_dir}."
+    event "deploy_unit_install_failed" "reason=move_failed"
+    return 0
+  fi
+
+  if ! systemctl daemon-reload; then
+    warn "system daemon reload failed; ${unit} is installed but may not be visible yet."
+    event "deploy_unit_install_failed" "reason=daemon_reload"
+    return 0
+  fi
+
+  ok "Re-applied ${unit} (never enabled; effective from the next deploy)."
+  event "deploy_unit_installed"
+  return 0
+}
+
+# The polkit rule is copied byte-identical from the tree: it grants `start` of one
+# unit shape and nothing else. The first existing rules directory wins, in the
+# same order scripts/bootstrap.sh probes.
+install_deploy_polkit_rule() {
+  local rule="50-hybrid-ai-deploy.rules"
+  local source_file="${APP_DIR}/deploy/${rule}"
+  local polkit_dir="" target_file="" d
+
+  if [[ "$(id -u)" != "0" ]]; then
+    warn "${rule} needs root to install; not calling sudo."
+    warn "Re-run ./install.sh as root so the deploy polkit rule is re-applied."
+    event "deploy_polkit_rule_install_failed" "reason=not_root"
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl is unavailable; install ${rule} and reload polkit by hand."
+    event "deploy_polkit_rule_install_failed" "reason=systemctl_missing"
+    return 0
+  fi
+
+  for d in ${HYBRID_AI_POLKIT_RULES_DIR:+"$HYBRID_AI_POLKIT_RULES_DIR"} \
+           /etc/polkit-1/rules.d /usr/share/polkit-1/rules.d; do
+    if [[ -d "$d" ]]; then polkit_dir="$d"; break; fi
+  done
+  if [[ -z "$polkit_dir" ]]; then
+    warn "No polkit rules directory found; install ${rule} by hand."
+    event "deploy_polkit_rule_install_failed" "reason=rules_dir_missing"
+    return 0
+  fi
+
+  if [[ ! -f "$source_file" ]]; then
+    warn "Missing polkit rule file: ${source_file}"
+    event "deploy_polkit_rule_install_failed" "reason=template_missing"
+    return 0
+  fi
+
+  target_file="${polkit_dir}/${rule}"
+  if ! install -m 0644 "$source_file" "${target_file}.tmp"; then
+    rm -f "${target_file}.tmp"
+    warn "Could not stage ${rule} in ${polkit_dir}."
+    event "deploy_polkit_rule_install_failed" "reason=copy_failed"
+    return 0
+  fi
+  if ! mv -f "${target_file}.tmp" "$target_file"; then
+    warn "Could not move ${rule} into ${polkit_dir}."
+    event "deploy_polkit_rule_install_failed" "reason=move_failed"
+    return 0
+  fi
+
+  if ! { systemctl reload polkit || systemctl restart polkit; }; then
+    warn "Could not reload polkit; reload it by hand: systemctl reload polkit"
+    event "deploy_polkit_rule_install_failed" "reason=polkit_reload"
+    return 0
+  fi
+
+  ok "Re-applied ${rule} into ${polkit_dir} (0644)."
+  event "deploy_polkit_rule_installed"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # STEP 9a-2. Install and enable the prune units (conversations and Docker cache)
 # ---------------------------------------------------------------------------
 # Two timers, two independent daily jobs, installed together:
@@ -1034,6 +1175,8 @@ run_prune_catch_up() {
 }
 
 install_firewall_unit || true
+install_deploy_unit || true
+install_deploy_polkit_rule || true
 install_prune_scheduler || true
 
 if (( NO_START )); then

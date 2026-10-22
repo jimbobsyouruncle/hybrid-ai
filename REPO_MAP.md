@@ -129,6 +129,7 @@
 - scripts/test-deploy-instance.sh
 - scripts/test-deploy-remote.sh
 - scripts/test-deploy-trigger.sh
+- scripts/test-deploy-wiring-install.sh - FILE: scripts/test-deploy-wiring-install.sh
 - scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
 - scripts/test-doctor-sandbox-firewall.sh - FILE: scripts/test-doctor-sandbox-firewall.sh
 - scripts/test-doctor-startup-grace.sh - FILE: scripts/test-doctor-startup-grace.sh

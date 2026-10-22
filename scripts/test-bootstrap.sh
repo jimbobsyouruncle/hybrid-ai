@@ -1197,8 +1197,9 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   # fail-closed card (docker-compose.yml, hermes/docker-compose.hermes.yml and
   # doctor.sh) and for the sandbox startup-grace card
   # (openhands/docker-compose.openhands.yml), and for the sandbox-image
-  # auto-publish / deploy gate card (.github/workflows/deploy.yml). The capture
-  # unit is frozen and stays listed.
+  # auto-publish / deploy gate card (.github/workflows/deploy.yml), and for the
+  # deploy-wiring re-apply card (deploy/hybrid-ai-deploy@.service, comment-only).
+  # The capture unit is frozen and stays listed.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
     status/Caddyfile \
     backup/backup-containers.sh \
@@ -1208,7 +1209,7 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
     backup/hybrid-ai-backup.service backup/hybrid-ai-backup.timer \
     backup/hybrid-ai-check.service backup/hybrid-ai-check.timer \
     scripts/deploy-instance.sh \
-    deploy/hybrid-ai-deploy@.service deploy/50-hybrid-ai-deploy.rules 2>/dev/null)"
+    deploy/50-hybrid-ai-deploy.rules 2>/dev/null)"
   check "the out-of-scope files are byte-identical to origin/main" "" "$diff_out"
 else
   printf 'skip: origin/main is not available; the byte-identical check is a no-op here\n'
