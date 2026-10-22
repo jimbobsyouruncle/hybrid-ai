@@ -236,6 +236,20 @@ jobs:
         # writes the 15GB default and preserves an owner value across a re-run.
         run: bash scripts/test-prune-docker-cache.sh
 
+      - name: Uninstall teardown tests
+        # Offline, no root, no Docker, no network. Proves scripts/uninstall.sh
+        # removes the right things and nothing else: a full install invokes the
+        # compose `down --remove-orphans` with the three -f files (exact argv),
+        # a remnants-only host removes the six containers by name with NO
+        # compose call, an empty host is a no-op that exits 0, --remove-data
+        # removes the fixture data while the default keeps it, an
+        # out-of-allowlist layout value is refused and left untouched, a mixed
+        # DOCKER-USER chain loses only its tagged rules (never a flush or a
+        # chain delete), a hybrid-ai-* glob unit is removed, and --dry-run
+        # mutates nothing. docker, systemctl, runuser, iptables, getent and id
+        # are stubbed on PATH; HYBRID_AI_UNINSTALL_ROOT points at a scratch tree.
+        run: bash scripts/test-uninstall.sh
+
       - name: Env pin migration tests
         # Offline. Proves install.sh's STEP 2b migration moves a stale
         # :1.8 / 1.26.0-python pin in an existing .env to the current defaults,

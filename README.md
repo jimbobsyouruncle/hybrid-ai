@@ -663,6 +663,74 @@ protected tree, whichever layout is in use.
 
 ---
 
+## Uninstall
+
+`scripts/uninstall.sh` tears the stack down. It is the one privileged teardown
+command, it is safe to re-run, and it never calls `sudo` for you, so run it as
+root:
+
+```bash
+sudo scripts/uninstall.sh --dry-run     # print the full plan, change nothing
+sudo scripts/uninstall.sh               # tear down the software, keep the data
+sudo scripts/uninstall.sh --remove-data # tear down the software AND the data
+```
+
+Disable the GitHub `deploy.yml` workflow before you decommission. It runs on
+every push to `main`, so any later push re-installs the stack.
+
+### What it removes
+
+The script detects the state first and reports it before it acts:
+
+* an existing install (`/opt/hybrid-ai` with all three compose files),
+* remnants only (no install, but data or unit files left behind), or
+* nothing at all, in which case it is a no-op and exits 0.
+
+It then removes:
+
+* the containers `ollama`, `open-webui`, `hybrid-ai-status`, `hybrid-ai-proxy`,
+  `hermes-agent` and `hybrid-ai-openhands`; on a remnants-only re-run it also
+  sweeps the OpenHands sandboxes named `oh-agent-server*`,
+* the Docker networks `hybrid-ai` and `coder-net`,
+* the `hybrid-ai-*` systemd units, and the login user's backup and check units,
+* the polkit rule `50-hybrid-ai-deploy.rules`,
+* only the `DOCKER-USER` firewall rules tagged `hybrid-ai-sandbox-egress`,
+* `/opt/hybrid-ai`.
+
+With `--remove-data` it also removes the data, work, log and restic-cache
+directories, the backup credential directory, the agent workspace
+(`/var/lib/hybrid-ai-agent`), the repo reference tree
+(`/var/lib/hybrid-ai-repos`), the deploy and backup account homes
+(`/var/lib/hybrid-ai-deploy` and `/var/lib/hybrid-ai-backup`), the backup log
+directory (`/var/log/hybrid-ai-backup`), and the layout and stack files under
+`/etc/hybrid-ai`. Names and paths only: no file content is ever read or printed.
+
+### What it keeps
+
+* every Docker image, and the Docker build cache,
+* the `hybrid-ai` and `hybrid-ai-backup` system accounts,
+* the data directories, unless you pass `--remove-data`,
+* anything outside the allowlist below. A layout value that resolves outside the
+  allowlist is refused and left untouched, with a message naming the setting.
+
+The allowlist is exact: `/opt/hybrid-ai`, `/var/lib/hybrid-ai*`,
+`/var/log/hybrid-ai*`, `/var/cache/hybrid-ai-backup`, `/etc/hybrid-ai`,
+`/etc/credstore/hybrid-ai-backup`, the `hybrid-ai-*` unit files, and the polkit
+rule file.
+
+### Keep or remove the data
+
+The default is KEEP. On a terminal the script asks once, showing the exact path
+list. Non-interactively, pass `--remove-data` or `--keep-data`; `--yes` skips
+the prompt and still keeps the data. A second run after a software-only
+uninstall reports the leftovers and can then remove the data.
+
+No value from `.env`, `stack.env` or the credential store is ever read or
+printed: the output carries names and paths only. See
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for uninstall problems.
+
+---
+
 ## Privacy design
 
 Claims are only worth what enforces them. Each one below maps to a specific mechanism you can go and read:
