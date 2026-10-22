@@ -209,6 +209,12 @@ service once at deploy time as catch-up only. The sweep is configurable with
 `HYBRID_AI_PRUNE_AGE_SECONDS`, `HYBRID_AI_PRUNE_GRACE_SECONDS`,
 `HYBRID_AI_PRUNE_MAX_MOVES` and `HYBRID_AI_PRUNE_QUARANTINE_BASE`.
 
+`hybrid-ai-docker-prune.timer` is a sibling that caps the Docker build cache
+daily at 04:35 so repeated rebuilds of the multi-GB stack images cannot fill the
+disk. It removes build cache only — never images, containers, volumes or
+bind-mounted data — and is configurable with `HYBRID_AI_BUILD_CACHE_CAP`
+(default `15GB`).
+
 To inspect it: `systemctl list-timers hybrid-ai-prune.timer` and
 `journalctl -u hybrid-ai-prune`. Full procedure and tuning in
 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
