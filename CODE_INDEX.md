@@ -358,6 +358,7 @@
 ## scripts/run-post-deploy-verify.sh
 - usage_refuse()
 - finish()
+- resolve_app_dir()
 - probe_runs()
 - conclusion_list()
 

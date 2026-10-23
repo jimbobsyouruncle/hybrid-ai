@@ -169,6 +169,12 @@ jobs:
         # before running install.sh, and maps doctor.sh's exit code correctly.
         run: bash scripts/test-deploy-remote.sh
 
+      - name: Post-deploy verifier tests
+        # Offline. Proves scripts/run-post-deploy-verify.sh resolves APP_DIR from
+        # the environment, then the layout file, then /workspace, and that the
+        # tree check verdicts PASS / FAIL against a throwaway checkout.
+        run: bash scripts/test-run-post-deploy-verify.sh
+
       - name: Headless deploy forced-command tests
         # Offline. Proves the forced-command entrypoint accepts only
         # `deploy <40-lowercase-hex>`, refuses every other form with exit 2 and

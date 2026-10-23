@@ -333,6 +333,21 @@ if [[ "$INVOCATIONS" -eq 1 ]]; then
   else
     fail "verifier present -> the unit name does not match hybrid-ai-post-deploy-verify-<sha12>-<pid>"
   fi
+  # --setenv must carry the APP_DIR the deploy resolved (scripts/lib/hybrid-ai-env.sh,
+  # line 9), so the transient unit checks the real tree instead of its own default.
+  EXPECTED_APP_DIR="$(
+    cd "$REPO"
+    # shellcheck source=scripts/lib/hybrid-ai-env.sh
+    source "$SCRIPT_DIR/lib/hybrid-ai-env.sh"
+    printf '%s' "$HYBRID_AI_APP_DIR"
+  )"
+  setenv_count="$(grep -cF -- "--setenv=HYBRID_AI_APP_DIR=${EXPECTED_APP_DIR}" "$SDRUN_LOG" 2>/dev/null || true)"
+  setenv_count="${setenv_count:-0}"
+  if [[ "$setenv_count" -eq 1 ]]; then
+    pass "verifier present -> argv carries --setenv=HYBRID_AI_APP_DIR=<resolved APP_DIR> exactly once"
+  else
+    fail "verifier present -> expected --setenv=HYBRID_AI_APP_DIR=${EXPECTED_APP_DIR} exactly once, found ${setenv_count}"
+  fi
 else
   fail "verifier present -> argv assertions skipped, systemd-run never ran"
 fi

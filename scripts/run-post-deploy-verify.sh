@@ -27,8 +27,11 @@ set -Eeuo pipefail
 # USAGE:
 #   ./scripts/run-post-deploy-verify.sh --wait-for <full-40-hex-commit-sha>
 #
-#   APP_DIR comes from HYBRID_AI_APP_DIR (default: /workspace, the live
-#   deployment directory on the host). Tests point it at a throwaway checkout.
+#   APP_DIR resolves in order: HYBRID_AI_APP_DIR from the environment; else
+#   HYBRID_AI_APP_DIR parsed line by line from the layout file named by
+#   ${HYBRID_AI_ENV_FILE_FALLBACK:-/etc/hybrid-ai/hybrid-ai.env}; else /workspace.
+#   The layout file is read as DATA (KEY=VALUE), never sourced, and no value from
+#   it is ever printed. Tests point APP_DIR at a throwaway checkout.
 #
 # EXIT CODES:
 #   0  PASS   every run succeeded and the deployed tree is on the SHA
@@ -66,7 +69,48 @@ SHA="$2"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] \
   || usage_refuse "--wait-for needs a 40-character lowercase hex commit SHA"
 
-APP_DIR="${HYBRID_AI_APP_DIR:-/workspace}"
+# Resolve APP_DIR in three steps. The layout file is read as DATA, one KEY=VALUE
+# line at a time -- it is NEVER sourced, and no value read from it is printed.
+# An unreadable EXISTING file fails closed and names the setting, never a value.
+HYBRID_AI_ENV_FILE_FALLBACK="${HYBRID_AI_ENV_FILE_FALLBACK:-/etc/hybrid-ai/hybrid-ai.env}"
+
+resolve_app_dir() {
+  local value="" line key
+
+  if [[ -n "${HYBRID_AI_APP_DIR:-}" ]]; then
+    printf '%s' "$HYBRID_AI_APP_DIR"
+    return 0
+  fi
+
+  if [[ -e "$HYBRID_AI_ENV_FILE_FALLBACK" ]]; then
+    if [[ ! -r "$HYBRID_AI_ENV_FILE_FALLBACK" ]]; then
+      printf 'run-post-deploy-verify: HYBRID_AI_ENV_FILE_FALLBACK (%s) exists but is not readable\n' \
+        "$HYBRID_AI_ENV_FILE_FALLBACK" >&2
+      return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      [[ "$line" == HYBRID_AI_APP_DIR=* ]] || continue
+      value="${line#HYBRID_AI_APP_DIR=}"
+      key="$value"
+      [[ "$key" == /* ]] || { value=""; break; }
+      if [[ "$key" == *[[:space:]]* || "$key" == *:* || "$key" == *","* ]]; then
+        value=""
+        break
+      fi
+      break
+    done < "$HYBRID_AI_ENV_FILE_FALLBACK"
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+
+  printf '%s' "/workspace"
+  return 0
+}
+
+APP_DIR="$(resolve_app_dir)" || exit 1
 API_URL="https://api.github.com/repos/${REPO_SLUG}/actions/runs?head_sha=${SHA}"
 
 BODY_FILE="$(mktemp)"
