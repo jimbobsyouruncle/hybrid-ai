@@ -57,10 +57,27 @@ EOF
 exit 0
 EOF
 
-  chmod +x "$BINDIR/docker" "$BINDIR/curl" "$BINDIR/systemctl"
+  # systemd-run: records its argv so the post-deploy cases can assert the exact
+  # transient unit the deploy asks for. SYSTEMD_RUN_EXIT simulates a launch
+  # failure (systemd refuses to start the unit).
+  cat > "$BINDIR/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+printf 'INVOKED\n' >> "${SYSTEMD_RUN_LOG:-/dev/null}"
+printf '%s\n' "$@" >> "${SYSTEMD_RUN_LOG:-/dev/null}"
+exit "${SYSTEMD_RUN_EXIT:-0}"
+EOF
+
+  chmod +x "$BINDIR/docker" "$BINDIR/curl" "$BINDIR/systemctl" "$BINDIR/systemd-run"
 }
 make_shims
 export PATH="$BINDIR:$PATH"
+
+# Default every run to the "verifier is absent" case so the pre-existing cases
+# never depend on whether the host really ships /usr/local/sbin/run-post-deploy-
+# verify.sh. The post-deploy cases below override these per call.
+export HYBRID_AI_POST_DEPLOY_VERIFY_CMD="$WORKDIR/no-such-verifier"
+export HYBRID_AI_POST_DEPLOY_VERIFY_LOG="$WORKDIR/no-such-verify.log"
+unset SYSTEMD_RUN_LOG SYSTEMD_RUN_EXIT
 
 # --- Throwaway repo with a real commit --------------------------------------
 setup_repo() {
@@ -266,6 +283,106 @@ else
 
   # The 1-vs-2 mapping already proven above (cases 5 and 6) turns rc 2 into
   # exit 4; the credential finding now travels that path instead of rc 1.
+fi
+
+# --- Post-deploy verification hook -----------------------------------------
+# The defect: the hook used to start `setsid nohup ... &`, which systemd kills
+# at unit exit (setsid escapes the session, not the cgroup), and it silently did
+# nothing when the script was absent. The hook now asks systemd for a transient
+# unit that outlives the deploy, and says so loudly when it cannot.
+rm -f "$MARKER"; write_install_stub; write_doctor_stub
+
+VERIFY_STUB="$WORKDIR/verify-stub"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$VERIFY_STUB"
+chmod +x "$VERIFY_STUB"
+VERIFY_LOG="$WORKDIR/verify.log"
+SDRUN_LOG="$WORKDIR/systemd-run.argv"
+rm -f "$SDRUN_LOG"
+
+if HYBRID_AI_POST_DEPLOY_VERIFY_CMD="$VERIFY_STUB" \
+   HYBRID_AI_POST_DEPLOY_VERIFY_LOG="$VERIFY_LOG" \
+   SYSTEMD_RUN_LOG="$SDRUN_LOG" \
+   run_deploy "$WORKDIR/c8.out" "$SHA"; then
+  RC_SCHEDULED=0
+else
+  RC_SCHEDULED=$?
+fi
+
+INVOCATIONS="$(grep -c '^INVOKED$' "$SDRUN_LOG" 2>/dev/null || true)"
+INVOCATIONS="${INVOCATIONS:-0}"
+if [[ "$RC_SCHEDULED" -eq 0 && "$INVOCATIONS" -eq 1 ]]; then
+  pass "verifier present -> systemd-run invoked exactly once, deploy exit 0"
+else
+  fail "verifier present -> expected one systemd-run call and exit 0, got ${INVOCATIONS} call(s), exit ${RC_SCHEDULED}"
+fi
+
+if [[ "$INVOCATIONS" -eq 1 ]]; then
+  missing=""
+  for needle in "--collect" "--service-type=exec" \
+                "StandardOutput=append:${VERIFY_LOG}" \
+                "StandardError=append:${VERIFY_LOG}" "--wait-for" "$SHA"; do
+    grep -qF -- "$needle" "$SDRUN_LOG" || missing="${missing} ${needle}"
+  done
+  if [[ -z "$missing" ]]; then
+    pass "verifier present -> argv carries --collect, --service-type=exec, both append: properties and --wait-for <sha>"
+  else
+    fail "verifier present -> argv is missing:${missing}"
+  fi
+  if grep -qE -- '--unit=hybrid-ai-post-deploy-verify-[0-9a-f]{12}-[0-9]+' "$SDRUN_LOG"; then
+    pass "verifier present -> the transient unit is named hybrid-ai-post-deploy-verify-<sha12>-<pid>"
+  else
+    fail "verifier present -> the unit name does not match hybrid-ai-post-deploy-verify-<sha12>-<pid>"
+  fi
+else
+  fail "verifier present -> argv assertions skipped, systemd-run never ran"
+fi
+
+# Case: the verifier script is absent. The deploy must say so and stay green.
+rm -f "$MARKER" "$SDRUN_LOG"
+ABSENT_CMD="$WORKDIR/not-installed/run-post-deploy-verify.sh"
+if HYBRID_AI_POST_DEPLOY_VERIFY_CMD="$ABSENT_CMD" \
+   HYBRID_AI_POST_DEPLOY_VERIFY_LOG="$VERIFY_LOG" \
+   SYSTEMD_RUN_LOG="$SDRUN_LOG" \
+   run_deploy "$WORKDIR/c9.out" "$SHA"; then
+  RC_ABSENT=0
+else
+  RC_ABSENT=$?
+fi
+if has_line "$WORKDIR/c9.out" "::warning::post-deploy verification script is absent: ${ABSENT_CMD}"; then
+  pass "verifier absent -> the exact absent warning is printed"
+else
+  fail "verifier absent -> the exact ::warning::post-deploy verification script is absent line is missing"
+fi
+if [[ "$RC_ABSENT" -eq 0 ]]; then
+  pass "verifier absent -> the deploy exit code is unchanged (0)"
+else
+  fail "verifier absent -> the deploy exited ${RC_ABSENT}, expected 0"
+fi
+if [[ ! -s "$SDRUN_LOG" ]]; then
+  pass "verifier absent -> systemd-run was never invoked"
+else
+  fail "verifier absent -> systemd-run was invoked for a script that does not exist"
+fi
+
+# Case: scheduling fails (systemd refuses). Loud, but never fatal.
+rm -f "$MARKER" "$SDRUN_LOG"
+if HYBRID_AI_POST_DEPLOY_VERIFY_CMD="$VERIFY_STUB" \
+   HYBRID_AI_POST_DEPLOY_VERIFY_LOG="$VERIFY_LOG" \
+   SYSTEMD_RUN_LOG="$SDRUN_LOG" SYSTEMD_RUN_EXIT=1 \
+   run_deploy "$WORKDIR/c10.out" "$SHA"; then
+  RC_SCHEDFAIL=0
+else
+  RC_SCHEDFAIL=$?
+fi
+if has_line "$WORKDIR/c10.out" "::warning::post-deploy verification could not be scheduled"; then
+  pass "scheduling failure -> the exact could-not-be-scheduled warning is printed"
+else
+  fail "scheduling failure -> the exact ::warning::post-deploy verification could not be scheduled line is missing"
+fi
+if [[ "$RC_SCHEDFAIL" -eq 0 ]]; then
+  pass "scheduling failure -> the deploy exit code is unchanged (0)"
+else
+  fail "scheduling failure -> the deploy exited ${RC_SCHEDFAIL}, expected 0"
 fi
 
 echo "== done =="

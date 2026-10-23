@@ -23,6 +23,7 @@ unset HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_ENV_FILE_FALLBACK \
       HYBRID_AI_WORK_DIR HYBRID_AI_UID HYBRID_AI_GID OPENHANDS_WORKSPACE \
       AGENT_REPOS_DIR OPENHANDS_STATE_DIR BACKUP_CONF_DIR RESTIC_CACHE_DIR \
       BACKUP_LOG HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
+      HYBRID_AI_POST_DEPLOY_VERIFY_CMD HYBRID_AI_POST_DEPLOY_VERIFY_LOG \
       BACKUP_CONTAINER_CONTROL 2>/dev/null || true
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,6 +89,19 @@ check "OPENHANDS_STATE_DIR default" "$HOME/.openhands" "$(resolve "$EMPTY" OPENH
 check "BACKUP_CONF_DIR default" "$HOME/.config/hybrid-ai-backup" "$(resolve "$EMPTY" BACKUP_CONF_DIR)"
 check "RESTIC_CACHE_DIR default" "$HOME/.cache/restic" "$(resolve "$EMPTY" RESTIC_CACHE_DIR)"
 check "HYBRID_AI_HERMES_HOME_DIR default" "$HOME/.hermes" "$(resolve "$EMPTY" HYBRID_AI_HERMES_HOME_DIR)"
+# The post-deploy verifier command and log. INTERNAL test seams, but their
+# defaults are exactly the paths the deploy hook used to hardcode.
+check "HYBRID_AI_POST_DEPLOY_VERIFY_CMD default" \
+  "/usr/local/sbin/run-post-deploy-verify.sh" "$(resolve "$EMPTY" HYBRID_AI_POST_DEPLOY_VERIFY_CMD)"
+check "HYBRID_AI_POST_DEPLOY_VERIFY_LOG default" \
+  "/var/log/hybrid-ai-post-deploy-verify.log" "$(resolve "$EMPTY" HYBRID_AI_POST_DEPLOY_VERIFY_LOG)"
+# An exported value wins for both, which is how the harnesses relocate them.
+check "an exported POST_DEPLOY_VERIFY_CMD wins" "${TMPROOT}/sbin/run-post-deploy-verify.sh" \
+  "$(resolve "$EMPTY" HYBRID_AI_POST_DEPLOY_VERIFY_CMD \
+      HYBRID_AI_POST_DEPLOY_VERIFY_CMD="${TMPROOT}/sbin/run-post-deploy-verify.sh")"
+check "an exported POST_DEPLOY_VERIFY_LOG wins" "${TMPROOT}/logs/verify.log" \
+  "$(resolve "$EMPTY" HYBRID_AI_POST_DEPLOY_VERIFY_LOG \
+      HYBRID_AI_POST_DEPLOY_VERIFY_LOG="${TMPROOT}/logs/verify.log")"
 check "HYBRID_AI_BACKUP_MODE default is user" "user" "$(resolve "$EMPTY" HYBRID_AI_BACKUP_MODE)"
 check "BACKUP_CONTAINER_CONTROL default is self" "self" "$(resolve "$EMPTY" BACKUP_CONTAINER_CONTROL)"
 check "UID default is empty" "" "$(resolve "$EMPTY" HYBRID_AI_UID)"
@@ -133,6 +147,7 @@ for v in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_STACK_ENV_FILE \
          HYBRID_AI_OLLAMA_DATA_DIR HYBRID_AI_INSTALL_LOG \
          HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR \
          HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
+         HYBRID_AI_POST_DEPLOY_VERIFY_CMD HYBRID_AI_POST_DEPLOY_VERIFY_LOG \
          BACKUP_CONTAINER_CONTROL BACKUP_LOG BACKUP_CONF_DIR \
          RESTIC_CACHE_DIR OPENHANDS_WORKSPACE AGENT_REPOS_DIR \
          OPENHANDS_STATE_DIR; do
@@ -155,6 +170,8 @@ HYBRID_AI_INSTALL_LOG=${CLONE}/install.log
 HYBRID_AI_BACKUP_STAGING_DIR=${CLONE}/.backup-staging
 HYBRID_AI_RESTORE_WORK_DIR=${CLONE}/.restore-work
 HYBRID_AI_HERMES_HOME_DIR=${CH}/.hermes
+HYBRID_AI_POST_DEPLOY_VERIFY_CMD=/usr/local/sbin/run-post-deploy-verify.sh
+HYBRID_AI_POST_DEPLOY_VERIFY_LOG=/var/log/hybrid-ai-post-deploy-verify.log
 HYBRID_AI_BACKUP_MODE=user
 BACKUP_CONTAINER_CONTROL=self
 BACKUP_LOG=${CLONE}/backup.log

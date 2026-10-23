@@ -44,6 +44,16 @@
 #     HYBRID_AI_UID, HYBRID_AI_GID, OPENHANDS_WORKSPACE, AGENT_REPOS_DIR,
 #     OPENHANDS_STATE_DIR, BACKUP_CONF_DIR, RESTIC_CACHE_DIR, BACKUP_LOG
 #
+#   Two INTERNAL settings name the post-deploy verifier and its log, so the
+#   deploy hook, install.sh and doctor.sh cannot disagree about either path:
+#
+#     HYBRID_AI_POST_DEPLOY_VERIFY_CMD  default /usr/local/sbin/run-post-deploy-verify.sh
+#     HYBRID_AI_POST_DEPLOY_VERIFY_LOG  default /var/log/hybrid-ai-post-deploy-verify.log
+#
+#   They are TEST SEAMS, not documented settings: no .env.example entry and no
+#   install.sh template entry. With nothing set they resolve byte-identically to
+#   the paths that used to be hardcoded.
+#
 #   With NO settings, every resolved path equals today's, byte for byte.
 #
 # RESOLUTION ORDER (per setting):
@@ -352,6 +362,15 @@ hybrid_ai_env_load() {
   # default (exactly where backup.sh and restore.sh already looked), but now a
   # named path setting so a system-mode unit can relocate it.
   _hybrid_ai_resolve_path HYBRID_AI_HERMES_HOME_DIR "${HOME:-}/.hermes" "$ef" || return 1
+
+  # The post-deploy verifier and the log it appends to. Both are INTERNAL test
+  # seams (undocumented on purpose): their defaults are the paths the deploy
+  # hook and doctor.sh used to hardcode, so a host that sets neither sees no
+  # change at all.
+  _hybrid_ai_resolve_path HYBRID_AI_POST_DEPLOY_VERIFY_CMD \
+    "/usr/local/sbin/run-post-deploy-verify.sh" "$ef" || return 1
+  _hybrid_ai_resolve_path HYBRID_AI_POST_DEPLOY_VERIFY_LOG \
+    "/var/log/hybrid-ai-post-deploy-verify.log" "$ef" || return 1
 
   # --- Mode selectors -------------------------------------------------------
   # HYBRID_AI_BACKUP_MODE picks WHICH system units run the backup. "user" keeps

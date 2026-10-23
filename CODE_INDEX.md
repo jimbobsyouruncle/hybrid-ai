@@ -137,6 +137,7 @@
 - install_firewall_unit()
 - install_deploy_unit()
 - install_deploy_polkit_rule()
+- install_post_deploy_verifier()
 - install_prune_scheduler()
 - run_prune_catch_up()
 - print_phase_summary()
@@ -354,6 +355,12 @@
 - warn()
 - log_free_space()
 
+## scripts/run-post-deploy-verify.sh
+- usage_refuse()
+- finish()
+- probe_runs()
+- conclusion_list()
+
 ## scripts/sandbox-firewall.sh
 - usage()
 - resolve_bridge()
@@ -535,10 +542,17 @@
 - check()
 - run_install()
 - reset_state()
+- reset_sbin()
 
 ## scripts/test-doctor-backup-probe.sh
 - pass()
 - fail()
+
+## scripts/test-doctor-post-deploy-log.sh
+- pass()
+- fail()
+- summary_count()
+- run_doctor()
 
 ## scripts/test-doctor-sandbox-firewall.sh
 - pass()

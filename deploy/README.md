@@ -155,6 +155,55 @@ after the reset.
 
 ---
 
+## Post-deploy verification (after the workflow has finished)
+
+The deploy cannot verify its own build: the workflow run it belongs to is still
+in progress at that moment. So `scripts/deploy-remote.sh` starts
+`/usr/local/sbin/run-post-deploy-verify.sh` and lets it finish afterwards.
+
+What it does: poll `GET /repos/jimbobsyouruncle/hybrid-ai/actions/runs?head_sha=<sha>`
+anonymously every 30 s for up to 60 minutes (curl and jq only, no token), wait
+until every run for that commit is `completed`, require every conclusion to be
+`success`, then compare `git -C /workspace rev-parse HEAD` with the deployed sha.
+It writes one `waiting for <sha> at <UTC>` line up front, then exactly one
+result line -- `PASS`, `FAIL: ...` or `TIMEOUT: ...`.
+
+**It runs in its own transient unit**, not as a child of the deploy:
+
+```
+systemd-run --collect --unit=hybrid-ai-post-deploy-verify-<sha12>-<pid> ...
+```
+
+`deploy/hybrid-ai-deploy@.service` is `Type=oneshot` with the default
+`KillMode=control-group`, so systemd kills everything left in the unit's cgroup
+when it exits. An in-cgroup waiter is therefore killed at unit exit --
+`setsid` escapes the session, not the cgroup. That was the original defect: a
+0-byte log whose mtime matched unit exit. This is why the unit file must never
+grow a `KillMode=` override: the transient unit is the fix, and a relaxed kill
+mode would hide the class of bug instead of fixing it.
+
+Paths (both resolved in `scripts/lib/hybrid-ai-env.sh`):
+
+| Path | Default |
+|---|---|
+| Verifier | `/usr/local/sbin/run-post-deploy-verify.sh`, installed root:root 0755 by `install.sh` |
+| Log | `/var/log/hybrid-ai-post-deploy-verify.log`, appended by the transient unit |
+
+The hook is a warning, never a gate. All three paths leave the deploy's exit
+code untouched: scheduled, scheduling failed
+(`::warning::post-deploy verification could not be scheduled`), and script
+absent (`::warning::post-deploy verification script is absent: <path>`). The
+absent case is loud on purpose -- it used to be silent.
+
+`--service-type=exec` is deliberate: it waits for `exec()` to succeed, so a
+launch failure is reported instead of lost. `--no-block` would suppress exactly
+that. `--collect` and `append:` are supported by the host's systemd 252.
+
+Reading the log and the units: see
+[`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#post-deploy-verification).
+
+---
+
 ## Timeouts
 
 The unit's `TimeoutStartSec=` is 45 min and the workflow's `Trigger deploy` step

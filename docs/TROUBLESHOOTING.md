@@ -147,6 +147,55 @@ Warnings (`exit 1`) never fail the deploy. If you want to silence one, fix the u
 
 ---
 
+## Post-deploy verification
+
+Every deploy starts `scripts/run-post-deploy-verify.sh` in a **transient**
+systemd unit named `hybrid-ai-post-deploy-verify-<sha12>-<pid>`. It outlives the
+deploy unit, waits for the GitHub Actions run(s) for the deployed commit to
+finish, then checks the host is on that commit. Why a transient unit:
+[`deploy/README.md`](../deploy/README.md#post-deploy-verification-after-the-workflow-has-finished).
+
+Read the result:
+
+```
+sudo tail -n 20 /var/log/hybrid-ai-post-deploy-verify.log
+sudo journalctl -u 'hybrid-ai-post-deploy-verify-*' --since -2h
+```
+
+Each run appends a `waiting for <sha> at <UTC>` line and then exactly one
+result line:
+
+| Line | Meaning |
+|---|---|
+| `PASS` | Every workflow run for that commit concluded `success`, and `/workspace` is on that commit |
+| `FAIL: run <id> conclusion <c>` | One run, and it did not succeed (`failure`, `cancelled`, `timed_out`, ...) |
+| `FAIL: run conclusions: <list>` | Several runs; the list is one word per run, in API order |
+| `FAIL: deployed tree is on <sha>, expected <sha>` | CI was green, but the host is on a different commit (interrupted deploy, or a manual `git reset`) |
+| `FAIL: github api returned HTTP <code>` | The API refused (401/403/404, or 429 rate limit). The request is anonymous, so a 403 usually means the anonymous rate limit |
+| `FAIL: cannot read HEAD of the deployed tree at /workspace` | The deployment directory is absent or not a git checkout |
+| `FAIL: ... that jq could not parse` | The API returned a body this script does not understand (proxy or captive portal, usually) |
+| `TIMEOUT: no completed run for <sha> after 60 minutes` | No run for that commit finished inside an hour |
+
+The most common **silent** failure used to be a 0-byte log: the verifier was
+killed when the deploy unit exited, so nothing was written and nothing said so.
+`doctor.sh` now catches it. It looks at the resolved log path and:
+
+| Situation | doctor.sh |
+|---|---|
+| Log absent | prints `- post-deploy verification log skipped (log not present (...))`, counts nothing |
+| Log is 0 bytes | **warns**: "the post-deploy verifier never wrote anything", with the `journalctl` remedy |
+| Log is more than 10 minutes older than the deployed HEAD's commit time | **warns**: a deploy happened after the last verification write |
+| Log is fresh and non-empty | passes |
+| Log unreadable, or the git tree unreadable | prints a skip note, counts nothing |
+
+None of these can fail the host: the check is warning-only, so the worst it can
+do is exit 1. If the deploy printed `::warning::post-deploy verification script
+is absent: <path>`, `install.sh` never placed the verifier -- re-run
+`./install.sh` as root, then check `ls -l /usr/local/sbin/run-post-deploy-verify.sh`.
+The deploy's own exit status never depends on the verifier.
+
+---
+
 ## Headless deploy: refusal exit codes
 
 The headless deploy path (`deploy/`, `scripts/deploy-*.sh`, the
