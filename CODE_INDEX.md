@@ -632,6 +632,13 @@
 - check()
 - run_find_unreadable()
 
+## scripts/test-run-post-deploy-verify.sh
+- pass()
+- fail()
+- make_tree()
+- write_layout()
+- run_verify()
+
 ## scripts/test-sandbox-firewall.sh
 - ok()
 - bad()
