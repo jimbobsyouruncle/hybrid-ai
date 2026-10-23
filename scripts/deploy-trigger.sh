@@ -32,7 +32,7 @@ set -Eeuo pipefail
 #     used.
 #
 # USAGE (the deploy job calls it with the runner-provided GITHUB_SHA):
-#   PI_HOST=<pi-ip> PI_SSH_KEY=<private-key> PI_SSH_HOST_KEY=<SHA256:...> \
+#   PI_HOST=<pi-magicdns-name> PI_SSH_KEY=<private-key> PI_SSH_HOST_KEY=<SHA256:...> \
 #     ./scripts/deploy-trigger.sh "$GITHUB_SHA"
 #
 # SECRET HANDLING:

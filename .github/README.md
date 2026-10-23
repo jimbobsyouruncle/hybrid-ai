@@ -252,7 +252,7 @@ GitHub repo → **Settings** → **Secrets and variables** → **Actions** → *
 |---|---|---|
 | `TS_OAUTH_CLIENT_ID` | OAuth client ID | Step 2 |
 | `TS_OAUTH_SECRET` | OAuth client secret | Step 2 |
-| `PI_TAILSCALE_IP` | `100.x.x.x` | `tailscale ip -4` on the Pi |
+| `PI_TAILSCALE_FULL_DOMAIN` | The Pi's MagicDNS name, e.g. `jarvis.tailXXXX.ts.net` | `tailscale status` on the Pi — the peer's `DNSName` without its trailing dot. Use the name, not the address: a re-registered Pi keeps its name but can change its mesh address |
 | `PI_SSH_KEY` | **Private** key contents | `cat ~/.ssh/hybrid_ai_deploy` — include the BEGIN and END lines. The matching public key is pinned to the forced command on the `hybrid-ai-deploy` account |
 | `PI_SSH_HOST_KEY` | The Pi's SSH host key fingerprint | `ssh-keyscan -t ed25519 $(tailscale ip -4) \| ssh-keygen -lf -` on the Pi — use the SHA256:... field, not the raw known_hosts line |
 | `PI_SSH_USER` | **Unused** | May be deleted by the owner |
