@@ -398,6 +398,102 @@ jobs:
           print(f"All friendly aliases redirect: {sorted(must_redirect)}")
           EOF
 
+      - name: Assert secure_headers coverage
+        # The (secure_headers) snippet was dropped once before, taking the
+        # uniform response headers and the Server suppression with it. This
+        # reads status/Caddyfile as text and fails if the snippet is missing or
+        # incomplete, if any site or handle stops importing it (a site-level
+        # import alone is bypassed by a matching handle), or if the removed
+        # trusted_proxies directive comes back.
+        run: |
+          python - status/Caddyfile <<'EOF'
+          import re, sys
+
+          cfg = open(sys.argv[1]).read()
+
+          def blocks(lines, prefix):
+              """Yield (header, body_lines) for blocks whose header line starts
+              with `prefix` and sits at that indentation level."""
+              indent = '\t' * prefix[1]
+              start = prefix[0]
+              out = []
+              i = 0
+              while i < len(lines):
+                  if lines[i].startswith(indent + start) and lines[i].rstrip().endswith('{'):
+                      j = i + 1
+                      while j < len(lines) and not lines[j].startswith(indent + '}'):
+                          j += 1
+                      out.append((lines[i].strip(), lines[i + 1:j]))
+                      i = j + 1
+                  else:
+                      i += 1
+              return out
+
+          lines = cfg.splitlines()
+
+          expected_header = [
+              'header {',
+              'X-Content-Type-Options nosniff',
+              'X-Frame-Options DENY',
+              'Referrer-Policy no-referrer',
+              '-Server',
+              '}',
+          ]
+
+          problems = []
+
+          snippets = {h: b for h, b in blocks(lines, ('(', 0))}
+          if '(secure_headers) {' not in snippets:
+              problems.append('(secure_headers) snippet is missing')
+          else:
+              body = [ln.strip() for ln in snippets['(secure_headers) {']]
+              if body != expected_header:
+                  problems.append(
+                      '(secure_headers) snippet does not contain exactly the four '
+                      f'expected header operations; found: {body!r}')
+
+          if 'trusted_proxies' in cfg:
+              problems.append('trusted_proxies must not be present')
+
+          def require(where, body, label, snippet):
+              if not any(ln.strip() == f'import {snippet}' for ln in body):
+                  problems.append(f'{where} ({label}) is missing import {snippet}')
+
+          sites = blocks(lines, ('http://', 0))
+          for name, body in sites:
+              if 'status.{$LOCAL_DOMAIN}' in name or 'hermes.{$LOCAL_DOMAIN}' in name:
+                  require(name, body, name, 'secure_headers')
+
+          main = [b for h, b in sites if h == 'http://{$LOCAL_DOMAIN} {']
+          if not main:
+              problems.append('http://{$LOCAL_DOMAIN} site block is missing')
+          else:
+              handles = blocks(main[0], ('handle', 1))
+              wanted = {'/status*', '/hub*', '/health', '/ollama/*',
+                        '/openwebui*', '/chat*'}
+              seen = set()
+              for header, body in handles:
+                  m = re.match(r'handle(?:_path)?\s+(\S+)\s*\{', header)
+                  label = m.group(1) if m else 'catch-all handle'
+                  if m:
+                      seen.add(m.group(1))
+                  require('http://{$LOCAL_DOMAIN}', body, label, 'secure_headers')
+              missing = sorted(wanted - seen)
+              if missing:
+                  problems.append(f'handles missing from the main site: {missing}')
+              if not any(re.match(r'handle\s*\{', h) for h, _ in handles):
+                  problems.append('catch-all handle is missing')
+
+          if problems:
+              for p in problems:
+                  print(f'::error::{p}')
+              sys.exit(1)
+
+          print('secure_headers snippet is intact.')
+          print(f'Every site and handle imports secure_headers: {sorted(seen)}')
+          print('trusted_proxies occurs zero times.')
+          EOF
+
       - name: Assert Hermes gateway autostart is pinned to the default profile
         # The gateway runs as the default profile. A sticky named active profile
         # (e.g. ciso) in the bind-mounted hermes_data/ would otherwise capture a
