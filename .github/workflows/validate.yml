@@ -358,23 +358,44 @@ jobs:
           rm -rf "$TMPTREE"
           echo "Compose renders under a split layout."
 
+      - name: Validate status/Caddyfile parses
+        # The allowlist assertion below reads the Caddyfile as text, so it
+        # cannot catch a syntax error. Let Caddy itself parse the file with the
+        # same image the stack pins.
+        run: |
+          docker run --rm -e LOCAL_DOMAIN=example.test \
+            -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile
+
       - name: Assert proxy allowlist is intact
         # A future edit could remove `import trusted_only` from a sensitive
         # route and silently expose the status page or the unauthenticated
-        # Ollama API. This fails the build if that happens.
+        # Ollama API. This fails the build if that happens. The same pass also
+        # requires the friendly /openwebui and /chat aliases to exist and to
+        # actually redirect, so a refactor cannot silently drop them again.
         run: |
           python - <<'EOF'
           import re, sys
           cfg = open('status/Caddyfile').read()
           must_protect = {'/hub*', '/status*', '/ollama/*'}
+          must_redirect = {'/openwebui*', '/chat*'}
           found = {}
           for m in re.finditer(r'handle(?:_path)?\s+(\S+)\s*\{(.*?)\n\t\}', cfg, re.S):
-              found[m.group(1)] = 'trusted_only' in m.group(2)
-          missing = [r for r in must_protect if not found.get(r)]
+              found[m.group(1)] = m.group(2)
+          missing = [r for r in must_protect if 'trusted_only' not in found.get(r, '')]
           if missing:
               print(f"::error::Routes missing the IP allowlist: {missing}")
               sys.exit(1)
+          absent = [r for r in must_redirect if r not in found]
+          if absent:
+              print(f"::error::Friendly alias routes missing: {absent}")
+              sys.exit(1)
+          no_redir = [r for r in must_redirect if 'redir' not in found[r]]
+          if no_redir:
+              print(f"::error::Friendly alias routes do not redirect: {no_redir}")
+              sys.exit(1)
           print(f"All sensitive routes protected: {sorted(must_protect)}")
+          print(f"All friendly aliases redirect: {sorted(must_redirect)}")
           EOF
 
       - name: Assert Hermes gateway autostart is pinned to the default profile

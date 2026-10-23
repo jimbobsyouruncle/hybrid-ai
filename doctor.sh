@@ -711,7 +711,7 @@ if curl -fsS --max-time 5 http://127.0.0.1:80/status/healthz >/dev/null 2>&1; th
   done
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://127.0.0.1:80/openwebui" 2>/dev/null)"
   if [[ "$code" == "302" ]]; then
-    pass "Proxy: /openwebui redirects to /app/ (expected)"
+    pass "Proxy: /openwebui redirects to the site root / (expected)"
   else
     warn "Proxy: /openwebui returned HTTP ${code}, expected 302" \
          "Open WebUI cannot be served under a subpath; this alias must redirect."
