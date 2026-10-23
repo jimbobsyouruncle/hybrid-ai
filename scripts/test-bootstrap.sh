@@ -1198,10 +1198,11 @@ if git -C "$REPO" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   # doctor.sh) and for the sandbox startup-grace card
   # (openhands/docker-compose.openhands.yml), and for the sandbox-image
   # auto-publish / deploy gate card (.github/workflows/deploy.yml), and for the
-  # deploy-wiring re-apply card (deploy/hybrid-ai-deploy@.service, comment-only).
-  # The capture unit is frozen and stays listed.
+  # deploy-wiring re-apply card (deploy/hybrid-ai-deploy@.service, comment-only),
+  # and for the alias-restoration card (status/Caddyfile, which restored the
+  # /openwebui and /chat 302 aliases). The capture unit is frozen and stays
+  # listed.
   diff_out="$(git -C "$REPO" diff --stat origin/main -- \
-    status/Caddyfile \
     backup/backup-containers.sh \
     backup/system/hybrid-ai-backup-capture.service \
     backup/system/hybrid-ai-backup-capture.timer \

@@ -45,6 +45,25 @@ http://{$LOCAL_DOMAIN} {
 		reverse_proxy ollama:11434
 	}
 
+	# Friendly aliases restored after the Caddyfile refactor. The target is the
+	# site root because Open WebUI is served at the root (there is no /app/
+	# prefix). Deep links and query strings are preserved. These handles do not
+	# import trusted_only: their only target is the open catch-all below, which
+	# has its own login. See status/README.md.
+	handle /openwebui* {
+		route {
+			uri strip_prefix /openwebui
+			redir * {uri} 302
+		}
+	}
+
+	handle /chat* {
+		route {
+			uri strip_prefix /chat
+			redir * {uri} 302
+		}
+	}
+
 	handle {
 		reverse_proxy open-webui:8080
 	}

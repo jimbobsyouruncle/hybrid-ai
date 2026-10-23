@@ -17,6 +17,8 @@ The `http://{$LOCAL_DOMAIN}` block:
 | `/hub*` | Directory of all services with live health | LAN + tailnet |
 | `/health` | One word: `ok` / `warn` / `fail` (rewritten to `/status/health-summary`) | open |
 | `/ollama/*` | Ollama REST API (prefix stripped) | LAN + tailnet |
+| `/openwebui*` | 302 to the site root (deep links preserved) | open |
+| `/chat*` | 302 to the site root (deep links preserved) | open |
 | anything else | Open WebUI, proxied straight through | open |
 
 Two more site blocks: `http://status.{$LOCAL_DOMAIN}` redirects `/` to `/status` with a 302 and proxies to `status:8088`; `http://hermes.{$LOCAL_DOMAIN}` proxies to `hermes:8501`. Both import the same allowlist.
@@ -25,7 +27,7 @@ Two more site blocks: `http://status.{$LOCAL_DOMAIN}` redirects `/` to `/status`
 
 Open WebUI is a SvelteKit app requesting assets from absolute root paths (`/_app/…`, `/static/…`) with no base-path setting. Serve it under a prefix and strip that prefix, and the HTML arrives but every asset request lands at the root, misses the route, and 404s — a blank page. This is a long-standing upstream limitation, not a misconfiguration here.
 
-So the Caddyfile serves it from the site root: the `http://{$LOCAL_DOMAIN}` block's catch-all `handle` proxies to `open-webui:8080` with no prefix to strip. There is no `/app/` prefix and no `/openwebui` or `/chat` alias. Port `3000` also stays published, so a direct address keeps working.
+So the Caddyfile serves it from the site root: the `http://{$LOCAL_DOMAIN}` block's catch-all `handle` proxies to `open-webui:8080` with no prefix to strip. There is no `/app/` prefix. The friendly `/openwebui` and `/chat` aliases exist again: each answers with a 302 to the site root, and a deep link such as `/openwebui/some/path?q=1` redirects to `/some/path?q=1`, keeping the query string. Port `3000` also stays published, so a direct address keeps working.
 
 The Ollama API is a plain REST API with no asset loading, so it *is* served properly under the `/ollama/` prefix.
 

@@ -111,9 +111,9 @@ curl -s http://localhost/status/api | jq '.jobs'
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/status`, `/hub` or `/ollama` refuses the connection | You are outside the allowlist (private LAN + tailnet only) | Connect over the LAN or Tailscale. See `status/Caddyfile` |
-| `/openwebui` returns 302 | **Expected.** It redirects to `/app/` — see the note in the README | Nothing to fix |
+| `/openwebui` returns 302 | **Expected.** It redirects to the site root `/` — see the note in the README | Nothing to fix |
 | `/health` returns 503 | **Expected** when any check is degraded — that is the endpoint working | Open `/status` to see which check |
-| Blank Open WebUI page under a subpath | Open WebUI cannot be served from a subpath | Use `/openwebui` (which redirects) or `/app/`, never a custom prefix |
+| Blank Open WebUI page under a subpath | Open WebUI cannot be served from a subpath | Use `/openwebui` (which redirects to the site root), never a custom prefix |
 | Port 80 in use, proxy will not start | Another web server on the Pi | `sudo ss -tlnp \| grep :80` |
 | Page loads, containers show "not found" | Socket group mismatch | Compare `DOCKER_GID` in `.env` with `stat -c '%g' /var/run/docker.sock`, then `./install.sh` |
 | Everything on the page fails | Status container cannot reach the others | `docker network inspect hybrid-ai` |
