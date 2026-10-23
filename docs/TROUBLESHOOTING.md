@@ -298,11 +298,11 @@ anything occupying the Pi's address from impersonating it and harvesting the
 deploy key. The usual causes:
 
 - The Pi was reinstalled or reimaged, so its host key changed. Get the new
-  fingerprint with `ssh-keyscan -t ed25519 <pi-ip> | ssh-keygen -lf -` and update
+  fingerprint with `ssh-keyscan -t ed25519 <pi-magicdns-name> | ssh-keygen -lf -` and update
   the `PI_SSH_HOST_KEY` secret.
 - The secret holds a raw known_hosts line instead of the `SHA256:...` field.
   Replace it with the `SHA256:...` value only.
-- The runner reached the wrong host. Check `PI_TAILSCALE_IP`.
+- The runner reached the wrong host. Check `PI_TAILSCALE_FULL_DOMAIN`.
 
 Never "fix" this by disabling host-key checking. There is no
 `StrictHostKeyChecking=no` and no `accept-new` path by design.
@@ -1376,7 +1376,7 @@ Unusual, but it happens after certain account changes.
 tailscale ip -4
 ```
 
-Update the `PI_TAILSCALE_IP` GitHub secret if you use CI.
+Update the `PI_TAILSCALE_FULL_DOMAIN` GitHub secret if you use CI.
 
 **`runpod-vllm` peer does not appear**
 

@@ -37,12 +37,16 @@
 #
 #     TS_OAUTH_CLIENT_ID   Tailscale OAuth client ID  (scope: auth_keys, tag:ci)
 #     TS_OAUTH_SECRET      Tailscale OAuth client secret
-#     PI_TAILSCALE_IP      100.x.x.x address of your Pi
+#     PI_TAILSCALE_FULL_DOMAIN
+#                          Your Pi's MagicDNS name exactly as Tailscale lists
+#                          it, e.g. jarvis.tailXXXX.ts.net (a NAME, not an
+#                          address). A re-registered Pi keeps its name but can
+#                          change its mesh address, so target the name.
 #     PI_SSH_KEY           private SSH key authorised on the Pi as the
 #                          `hybrid-ai-deploy` account (the key line is pinned
 #                          to the forced command, scripts/deploy-forced-command.sh)
 #     PI_SSH_HOST_KEY      SHA256 fingerprint of the Pi's SSH host key:
-#                            ssh-keyscan -t ed25519 <pi-ip> | ssh-keygen -lf -
+#                            ssh-keyscan -t ed25519 <pi-magicdns-name> | ssh-keygen -lf -
 #                          Use the SHA256:... field. scripts/deploy-trigger.sh
 #                          compares the scanned fingerprint against this value
 #                          and refuses to connect on any mismatch.
@@ -131,6 +135,38 @@ jobs:
           tags: tag:ci
           version: '1.104.1'
 
+      - name: Verify MagicDNS resolves the Pi inside the mesh
+        env:
+          PI_NAME: ${{ secrets.PI_TAILSCALE_FULL_DOMAIN }}
+        run: |
+          set -u
+          if [ -z "${PI_NAME:-}" ]; then
+            echo "::error::PI_TAILSCALE_FULL_DOMAIN is empty or unset; cannot resolve the Pi's MagicDNS name."
+            exit 1
+          fi
+          name="${PI_NAME%.}"
+          resolved="$(tailscale ip -4 "$name" 2>/dev/null | head -n1 || true)"
+          if [ -z "$resolved" ]; then
+            resolved="$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1; exit}' || true)"
+          fi
+          if [ -z "$resolved" ]; then
+            echo "::error::MagicDNS did not resolve '$name' to any address. Likely causes: MagicDNS disabled for this tailnet/runner, or PI_TAILSCALE_FULL_DOMAIN is not the Pi's MagicDNS NAME (get the peer DNSName without its trailing dot from 'tailscale status' on the Pi)."
+            exit 1
+          fi
+          o2="${resolved#*.}"
+          o2="${o2%%.*}"
+          case "$o2" in
+            ''|*[!0-9]*)
+              echo "::error::Resolved address for '$name' has a malformed second octet; refusing to deploy."
+              exit 1
+              ;;
+          esac
+          if [ "${resolved%%.*}" != "100" ] || [ "$o2" -lt 64 ] || [ "$o2" -gt 127 ]; then
+            echo "::error::'$name' resolves outside the tailnet mesh range (second octet not 64-127); refusing to deploy off-tunnel."
+            exit 1
+          fi
+          echo "MagicDNS ok: '$name' resolves to a mesh address."
+
       - name: Verify Pi is reachable
         # Retry for up to ~50 seconds. Mesh routes take a moment to establish,
         # and failing here gives a much clearer error than a mysterious SSH
@@ -138,14 +174,14 @@ jobs:
         run: |
           echo "Runner mesh address: $(tailscale ip -4)"
           for i in $(seq 1 10); do
-            if tailscale ping --c 1 --timeout 5s "${{ secrets.PI_TAILSCALE_IP }}" >/dev/null 2>&1; then
+            if tailscale ping --c 1 --timeout 5s "${{ secrets.PI_TAILSCALE_FULL_DOMAIN }}" >/dev/null 2>&1; then
               echo "Pi reachable over the mesh."
               exit 0
             fi
             echo "attempt $i: no response yet..."
             sleep 5
           done
-          echo "::error::Pi at ${{ secrets.PI_TAILSCALE_IP }} is unreachable over the tailnet."
+          echo "::error::Pi at ${{ secrets.PI_TAILSCALE_FULL_DOMAIN }} is unreachable over the tailnet."
           exit 1
 
       - name: Trigger deploy
@@ -165,7 +201,7 @@ jobs:
         # Result= instead of being killed mid-deploy.
         timeout-minutes: 60
         env:
-          PI_HOST: ${{ secrets.PI_TAILSCALE_IP }}
+          PI_HOST: ${{ secrets.PI_TAILSCALE_FULL_DOMAIN }}
           PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}
           PI_SSH_HOST_KEY: ${{ secrets.PI_SSH_HOST_KEY }}
         run: |
@@ -192,7 +228,7 @@ jobs:
             echo "| Field | Value |"
             echo "|---|---|"
             echo "| Commit | \`${GITHUB_SHA::8}\` |"
-            echo "| Target | \`${{ secrets.PI_TAILSCALE_IP }}\` |"
+            echo "| Target | \`${{ secrets.PI_TAILSCALE_FULL_DOMAIN }}\` |"
             echo "| Result | ${{ job.status }} |"
             echo ""
             echo "Persistent mounts (\`webui_data\`, \`ollama_data\`) were not modified."
