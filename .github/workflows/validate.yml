@@ -132,6 +132,16 @@ jobs:
         # check.
         run: bash scripts/test-doctor-startup-grace.sh
 
+      - name: Doctor post-deploy-log tests
+        # Offline. RUNS doctor.sh (stubbed host commands, fixture log files) to
+        # prove the new warning-only post-deploy verification-log check: a fresh
+        # non-empty log passes at the base exit code, a 0-byte log warns and exits
+        # 1 (never 2), a log older than the deployed HEAD's commit warns, and an
+        # absent or unreadable log or git tree prints a skip note and leaves the
+        # exit code alone. The harness fails against a doctor.sh without the
+        # check.
+        run: bash scripts/test-doctor-post-deploy-log.sh
+
       - name: Doctor sandbox-firewall tests
         # Offline. RUNS doctor.sh (stubbed iptables and a recorded DOCKER-USER
         # chain) to prove the new warning-only sandbox-firewall check: a chain

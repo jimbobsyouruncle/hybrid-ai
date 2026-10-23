@@ -1048,6 +1048,56 @@ install_deploy_polkit_rule() {
 }
 
 # ---------------------------------------------------------------------------
+# STEP 9a-1b. Install the post-deploy verifier
+# ---------------------------------------------------------------------------
+# scripts/deploy-remote.sh starts this verifier in a transient systemd unit
+# after every deploy. It used to point at a file nothing ever installed, so the
+# check silently never ran. Copied root:root 0755 from the tree, staged as
+# <target>.tmp then moved, so a failed copy leaves any previous file in place.
+#
+# Fail-safe, never fail-closed: it never calls sudo, never dies and never
+# changes this script's exit status. Without root or without the source it warns
+# and records an event.
+#
+# HYBRID_AI_SBIN_DIR is a HARNESS-ONLY override, the same precedent as
+# HYBRID_AI_SYSTEMD_UNIT_DIR and HYBRID_AI_POLKIT_RULES_DIR above; it is not
+# documented anywhere else.
+install_post_deploy_verifier() {
+  local source_file="${APP_DIR}/scripts/run-post-deploy-verify.sh"
+  local sbin_dir="${HYBRID_AI_SBIN_DIR:-/usr/local/sbin}"
+  local target_file="${sbin_dir}/run-post-deploy-verify.sh"
+
+  if [[ "$(id -u)" != "0" ]]; then
+    warn "The post-deploy verifier needs root to install into ${sbin_dir}; not calling sudo."
+    warn "Re-run ./install.sh as root so post-deploy verification is installed."
+    event "post_deploy_verifier_install_failed" "reason=not_root"
+    return 0
+  fi
+
+  if [[ ! -f "$source_file" ]]; then
+    warn "Missing post-deploy verifier: ${source_file}"
+    event "post_deploy_verifier_install_failed" "reason=source_missing"
+    return 0
+  fi
+
+  if ! install -o root -g root -m 0755 "$source_file" "${target_file}.tmp"; then
+    rm -f "${target_file}.tmp"
+    warn "Could not stage the post-deploy verifier in ${sbin_dir}."
+    event "post_deploy_verifier_install_failed" "reason=copy_failed"
+    return 0
+  fi
+  if ! mv -f "${target_file}.tmp" "$target_file"; then
+    warn "Could not move the post-deploy verifier into ${sbin_dir}."
+    event "post_deploy_verifier_install_failed" "reason=move_failed"
+    return 0
+  fi
+
+  ok "Installed the post-deploy verifier (0755): ${target_file}"
+  event "post_deploy_verifier_installed"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # STEP 9a-2. Install and enable the prune units (conversations and Docker cache)
 # ---------------------------------------------------------------------------
 # Two timers, two independent daily jobs, installed together:
@@ -1177,6 +1227,7 @@ run_prune_catch_up() {
 install_firewall_unit || true
 install_deploy_unit || true
 install_deploy_polkit_rule || true
+install_post_deploy_verifier || true
 install_prune_scheduler || true
 
 if (( NO_START )); then

@@ -1424,6 +1424,53 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Post-deploy verification log (WARNING ONLY)
+# ---------------------------------------------------------------------------
+# scripts/deploy-remote.sh starts scripts/run-post-deploy-verify.sh in a
+# transient unit after every deploy. Its one-line verdicts land here. This check
+# is a smoke detector, never a gate: it warns and never fails, so a missing or
+# empty log can never turn a deploy red.
+#
+#   absent                      -> skip note, exit unchanged
+#   exists, 0 bytes             -> warn: the verifier never wrote anything
+#   mtime > 600 s older than the
+#     deployed HEAD's commit    -> warn: a deploy happened after the last write
+#   otherwise                   -> pass
+#   unreadable log / git fails  -> skip note, exit unchanged
+# ---------------------------------------------------------------------------
+PDV_LOG="$HYBRID_AI_POST_DEPLOY_VERIFY_LOG"
+PDV_SKIP=""
+PDV_MTIME=""
+PDV_COMMIT_TS=""
+if [[ ! -e "$PDV_LOG" ]]; then
+  PDV_SKIP="log not present (${PDV_LOG})"
+else
+  PDV_MTIME="$(stat -c %Y -- "$PDV_LOG" 2>/dev/null)" || PDV_MTIME=""
+  if [[ -z "$PDV_MTIME" ]]; then
+    PDV_SKIP="log not readable (${PDV_LOG})"
+  elif [[ ! -r "$PDV_LOG" ]]; then
+    PDV_SKIP="log not readable (${PDV_LOG})"
+  elif ! PDV_COMMIT_TS="$(git -C "$APP_DIR" show -s --format=%ct HEAD 2>/dev/null)"; then
+    PDV_SKIP="deployed tree not readable with git (${APP_DIR})"
+  elif [[ ! "$PDV_COMMIT_TS" =~ ^[0-9]+$ ]]; then
+    PDV_SKIP="deployed tree not readable with git (${APP_DIR})"
+  fi
+fi
+
+if [[ -n "$PDV_SKIP" ]]; then
+  (( QUIET )) || printf '  %s-%s post-deploy verification log skipped (%s)\n' "$C_DIM" "$C_RST" "$PDV_SKIP"
+elif [[ ! -s "$PDV_LOG" ]]; then
+  warn "post-deploy verification log ${PDV_LOG} is empty: the post-deploy verifier never wrote anything" \
+       "Either the verifier is not installed (check ${HYBRID_AI_POST_DEPLOY_VERIFY_CMD}) or it was killed before it wrote. Inspect it with: journalctl -u 'hybrid-ai-post-deploy-verify-*'"
+elif (( PDV_MTIME + 600 < PDV_COMMIT_TS )); then
+  warn "post-deploy verification log is older than the deployed commit: last write $(date -u -d "@${PDV_MTIME}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "${PDV_MTIME}"), deployed HEAD committed $(date -u -d "@${PDV_COMMIT_TS}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "${PDV_COMMIT_TS}")" \
+       "A deploy happened after the last verification write. Check why the verifier did not report: journalctl -u 'hybrid-ai-post-deploy-verify-*' --since -2h"
+else
+  pass "post-deploy verification log is current (${PDV_LOG})"
+fi
+unset PDV_LOG PDV_SKIP PDV_MTIME PDV_COMMIT_TS
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "============================================================"

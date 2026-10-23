@@ -60,10 +60,13 @@ fi
 
 UNIT="hybrid-ai-deploy@.service"
 RULE="50-hybrid-ai-deploy.rules"
+VERIFIER="run-post-deploy-verify.sh"
 UNIT_SRC="$REPO/deploy/$UNIT"
 RULE_SRC="$REPO/deploy/$RULE"
+VERIFIER_SRC="$REPO/scripts/$VERIFIER"
 [[ -f "$UNIT_SRC" ]] || { echo "FATAL: cannot find deploy/$UNIT" >&2; exit 2; }
 [[ -f "$RULE_SRC" ]] || { echo "FATAL: cannot find deploy/$RULE" >&2; exit 2; }
+[[ -f "$VERIFIER_SRC" ]] || { echo "FATAL: cannot find scripts/$VERIFIER" >&2; exit 2; }
 
 # --- scratch app + layout ----------------------------------------------------
 APP="$WORK/app"
@@ -71,7 +74,8 @@ BIN="$WORK/bin"
 BIN_ROOT="$WORK/bin-root"
 SYSD="$WORK/systemd"
 POLKITD="$WORK/polkit-rules.d"
-mkdir -p "$APP/scripts/lib" "$APP/deploy" "$BIN" "$BIN_ROOT" "$SYSD" "$POLKITD" \
+SBIND="$WORK/sbin"
+mkdir -p "$APP/scripts/lib" "$APP/deploy" "$BIN" "$BIN_ROOT" "$SYSD" "$POLKITD" "$SBIND" \
          "$WORK/data" "$WORK/log" "$WORK/work" "$WORK/ws" "$WORK/repos" \
          "$WORK/ohstate" "$WORK/conf" "$WORK/restic" "$WORK/etc/hybrid-ai" \
          "$WORK/sysstate"
@@ -91,6 +95,9 @@ mkdir -p "$APP/openhands" "$WORK/ws/.git/info"
 for s in setup-agent-workspace.sh sync-agent-repos.sh check-hermes-nonroot.sh; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$APP/scripts/$s"
 done
+# The verifier is copied byte-identical: the install cases compare the placed
+# file against the tree.
+cp "$VERIFIER_SRC" "$APP/scripts/$VERIFIER"
 chmod +x "$APP/scripts/"*.sh
 
 LAYOUT="$WORK/etc/hybrid-ai/hybrid-ai.env"
@@ -145,11 +152,19 @@ exit 0
 EOF
 printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/curl"
 # install: record the argv, then do the real copy so the mode and the bytes are
-# genuine.
+# genuine. CI is not root, so -o root -g root is stripped before exec'ing the
+# real install: only the argv assertion cares about the ownership flags.
 cat > "$BIN/install" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${INSTALL_ARGV_LOG:-/dev/null}"
-exec /usr/bin/install "$@"
+args=()
+while (( $# )); do
+  case "$1" in
+    -o|-g) shift 2; continue ;;
+  esac
+  args+=("$1"); shift
+done
+exec /usr/bin/install "${args[@]}"
 EOF
 # systemctl: record the argv and answer from a scratch state directory. It has
 # to satisfy the other install steps too (daemon-reload, cat, enable --now,
@@ -220,10 +235,12 @@ run_install() {
       -u BACKUP_CONF_DIR -u RESTIC_CACHE_DIR -u HYBRID_AI_HERMES_HOME_DIR \
       -u HYBRID_AI_BACKUP_MODE -u BACKUP_CONTAINER_CONTROL \
       -u HYBRID_AI_UID -u HYBRID_AI_GID \
+      -u HYBRID_AI_POST_DEPLOY_VERIFY_CMD -u HYBRID_AI_POST_DEPLOY_VERIFY_LOG \
       PATH="${RUN_PATH:-$BIN:$PATH}" \
       HYBRID_AI_ENV_FILE="$LAYOUT" \
       HYBRID_AI_SYSTEMD_UNIT_DIR="$SYSD" \
       HYBRID_AI_POLKIT_RULES_DIR="$POLKITD" \
+      HYBRID_AI_SBIN_DIR="$SBIND" \
       INSTALL_ARGV_LOG="$INSTALL_ARGV" \
       SUDO_ARGV_LOG="$SUDO_ARGV" \
       SYSTEMCTL_LOG="$SYSTEMCTL_ARGV" \
@@ -241,6 +258,8 @@ reset_state() {
   rm -f "$SYSD/$UNIT" "$POLKITD/$RULE"
   rm -rf "${WORK:?}/sysstate"; mkdir -p "$WORK/sysstate"
 }
+
+reset_sbin() { rm -f "$SBIND/$VERIFIER"; }
 
 # ---------------------------------------------------------------------------
 echo "== (a) an absent unit is installed 0644 and byte-identical =="
@@ -473,6 +492,113 @@ if grep -q -- '--no-start requested' "$WORK/h.log"; then
   ok "(h) the run really took the --no-start path"
 else
   bad "(h) the run did not take the --no-start path"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (i) the post-deploy verifier is installed root:root 0755, byte-identical =="
+reset_state; reset_sbin
+RUN_PATH="$ROOT_PATH"
+: > "$WORK/i.log"
+rc=0
+run_install "$WORK/i.log" --no-start || rc=$?
+check "(i) the run exits 0" "0" "$rc"
+if [[ -f "$SBIND/$VERIFIER" ]]; then
+  ok "(i) the verifier was installed into the scratch sbin dir"
+else
+  bad "(i) the verifier was NOT installed"
+  sed 's/^/      /' "$WORK/i.log" >&2
+fi
+check "(i) the installed verifier has mode 0755" "755" "$(stat -c '%a' "$SBIND/$VERIFIER" 2>/dev/null)"
+if cmp -s "$VERIFIER_SRC" "$SBIND/$VERIFIER"; then
+  ok "(i) the installed verifier is byte-identical to the tree"
+else
+  bad "(i) the installed verifier differs from the tree"
+fi
+if grep -q -- "-o root -g root -m 0755 $APP/scripts/$VERIFIER" "$INSTALL_ARGV"; then
+  ok "(i) install was asked for root:root and mode 0755"
+else
+  bad "(i) install was not asked for -o root -g root -m 0755"
+  sed 's/^/      /' "$INSTALL_ARGV" >&2
+fi
+if grep -q 'EVENT .*event=post_deploy_verifier_installed' "$WORK/log/install.log"; then
+  ok "(i) post_deploy_verifier_installed was logged"
+else
+  bad "(i) post_deploy_verifier_installed was not logged"
+fi
+if grep -E '^(enable|start|restart|stop|disable)[[:space:]]' "$SYSTEMCTL_ARGV" \
+     | grep -q 'post-deploy-verify'; then
+  bad "(i) systemctl was asked to enable/start a verifier unit"
+else
+  ok "(i) the verifier is never enabled or started by systemctl"
+fi
+
+echo
+echo "== (j) a re-install replaces an existing copy byte-identically =="
+printf '#!/usr/bin/env bash\n# stale\nexit 1\n' > "$SBIND/$VERIFIER"
+chmod 0600 "$SBIND/$VERIFIER"
+: > "$WORK/j.log"
+rc=0
+run_install "$WORK/j.log" --no-start || rc=$?
+check "(j) the re-install run exits 0" "0" "$rc"
+check "(j) the replaced file has mode 0755" "755" "$(stat -c '%a' "$SBIND/$VERIFIER" 2>/dev/null)"
+if cmp -s "$VERIFIER_SRC" "$SBIND/$VERIFIER"; then
+  ok "(j) the stale copy was replaced by the tree content"
+else
+  bad "(j) the stale copy was NOT replaced"
+  diff -u "$VERIFIER_SRC" "$SBIND/$VERIFIER" | sed 's/^/      /' >&2 || true
+fi
+if [[ -e "$SBIND/$VERIFIER.tmp" ]]; then
+  bad "(j) a staging file was left behind"
+else
+  ok "(j) no staging file was left behind"
+fi
+
+echo
+echo "== (k) a --no-start run still installs the verifier =="
+reset_state; reset_sbin
+: > "$WORK/k.log"
+rc=0
+run_install "$WORK/k.log" --no-start || rc=$?
+check "(k) the --no-start run exits 0" "0" "$rc"
+if [[ -f "$SBIND/$VERIFIER" ]]; then
+  ok "(k) --no-start placed the verifier"
+else
+  bad "(k) --no-start did not place the verifier"
+fi
+if grep -q -- '--no-start requested' "$WORK/k.log"; then
+  ok "(k) the run really took the --no-start path"
+else
+  bad "(k) the run did not take the --no-start path"
+fi
+
+echo
+echo "== (l) a non-root run warns and writes no verifier =="
+reset_state; reset_sbin
+RUN_PATH="$BIN:$PATH"
+: > "$WORK/l.log"
+rc=0
+run_install "$WORK/l.log" --no-start || rc=$?
+check "(l) the non-root run still exits 0" "0" "$rc"
+if grep -q 'post-deploy verifier needs root' "$WORK/l.log"; then
+  ok "(l) the non-root run warns about the verifier"
+else
+  bad "(l) the non-root run did not warn about the verifier"
+fi
+if grep -q 'EVENT .*event=post_deploy_verifier_install_failed .*reason=not_root' "$WORK/log/install.log"; then
+  ok "(l) post_deploy_verifier_install_failed reason=not_root was logged"
+else
+  bad "(l) post_deploy_verifier_install_failed reason=not_root was not logged"
+fi
+if [[ -e "$SBIND/$VERIFIER" ]]; then
+  bad "(l) the non-root run wrote the verifier"
+else
+  ok "(l) the non-root run wrote no verifier"
+fi
+if grep -q "$VERIFIER" "$SUDO_ARGV"; then
+  bad "(l) the non-root run shelled out through sudo for the verifier"
+else
+  ok "(l) the non-root run made no sudo call for the verifier"
 fi
 
 # ---------------------------------------------------------------------------

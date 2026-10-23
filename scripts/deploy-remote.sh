@@ -165,9 +165,31 @@ case "$doctor_rc" in
     ;;
 esac
 
-# HERMES_POST_DEPLOY_VERIFY: this script runs inside the deploy workflow, so
-# detach a waiter that verifies only after the workflow run completes.
-if [ -x /usr/local/sbin/run-post-deploy-verify.sh ]; then
-  setsid nohup /usr/local/sbin/run-post-deploy-verify.sh --wait-for "$EXPECTED_SHA" \
-    >/var/log/hybrid-ai-post-deploy-verify.log 2>&1 </dev/null &
+# POST-DEPLOY VERIFICATION, in its OWN transient unit.
+# A waiter started as a child of this deploy would be killed when the deploy
+# unit exits: deploy/hybrid-ai-deploy@.service is Type=oneshot with the default
+# KillMode=control-group, so systemd kills everything left in the unit's cgroup
+# at exit -- setsid escapes the session, NOT the cgroup. That is exactly the
+# defect the host showed as a 0-byte log whose mtime matched unit exit.
+#
+# So the verifier runs in a transient systemd-run unit named
+#   hybrid-ai-post-deploy-verify-<sha12>-<pid>
+# which outlives this unit and appends to the resolved log. --service-type=exec
+# is deliberate: it waits for exec() to succeed, so a launch failure is loud
+# instead of silently lost (--no-block would suppress exactly that). --collect
+# lets the finished unit be garbage-collected.
+#
+# The deploy's own exit code never depends on the verifier: both the "could not
+# schedule" and "script absent" paths are warnings. The absent case is loud on
+# purpose -- it used to fail silently.
+if [ -x "$HYBRID_AI_POST_DEPLOY_VERIFY_CMD" ]; then
+  systemd-run --collect \
+    --unit="hybrid-ai-post-deploy-verify-${EXPECTED_SHA:0:12}-$$" \
+    --service-type=exec \
+    --property="StandardOutput=append:${HYBRID_AI_POST_DEPLOY_VERIFY_LOG}" \
+    --property="StandardError=append:${HYBRID_AI_POST_DEPLOY_VERIFY_LOG}" \
+    "$HYBRID_AI_POST_DEPLOY_VERIFY_CMD" --wait-for "$EXPECTED_SHA" \
+    || echo "::warning::post-deploy verification could not be scheduled"
+else
+  echo "::warning::post-deploy verification script is absent: ${HYBRID_AI_POST_DEPLOY_VERIFY_CMD}"
 fi

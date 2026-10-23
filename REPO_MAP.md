@@ -111,6 +111,7 @@
 - scripts/deploy-trigger.sh
 - scripts/prune-conversations.sh - FILE: scripts/prune-conversations.sh
 - scripts/prune-docker-cache.sh - FILE: scripts/prune-docker-cache.sh
+- scripts/run-post-deploy-verify.sh
 - scripts/sandbox-firewall.sh
 - scripts/setup-agent-workspace.sh - FILE: scripts/setup-agent-workspace.sh
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
@@ -131,6 +132,7 @@
 - scripts/test-deploy-trigger.sh
 - scripts/test-deploy-wiring-install.sh - FILE: scripts/test-deploy-wiring-install.sh
 - scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
+- scripts/test-doctor-post-deploy-log.sh - FILE: scripts/test-doctor-post-deploy-log.sh
 - scripts/test-doctor-sandbox-firewall.sh - FILE: scripts/test-doctor-sandbox-firewall.sh
 - scripts/test-doctor-startup-grace.sh - FILE: scripts/test-doctor-startup-grace.sh
 - scripts/test-env-pin-migration.sh - FILE: scripts/test-env-pin-migration.sh
