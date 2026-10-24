@@ -164,9 +164,23 @@ in progress at that moment. So `scripts/deploy-remote.sh` starts
 What it does: poll `GET /repos/jimbobsyouruncle/hybrid-ai/actions/runs?head_sha=<sha>`
 anonymously every 30 s for up to 60 minutes (curl and jq only, no token), wait
 until every run for that commit is `completed`, require every conclusion to be
-`success`, then compare `git -C /workspace rev-parse HEAD` with the deployed sha.
+`success`, then compare `git -C <resolved deployment directory> rev-parse HEAD`
+with the deployed sha.
 It writes one `waiting for <sha> at <UTC>` line up front, then exactly one
 result line -- `PASS`, `FAIL: ...` or `TIMEOUT: ...`.
+
+The deployment directory resolves in this order:
+
+1. `HYBRID_AI_APP_DIR` from the environment. The deploy hook passes this
+   explicitly with `systemd-run --setenv=HYBRID_AI_APP_DIR=<resolved APP_DIR>`,
+   because a transient unit inherits the systemd manager's environment, not the
+   deploy script's.
+2. else `HYBRID_AI_APP_DIR` parsed line by line from the layout file named by
+   `${HYBRID_AI_ENV_FILE_FALLBACK:-/etc/hybrid-ai/hybrid-ai.env}`, when that file
+   exists and is readable. The file is read as data (`KEY=VALUE`), never sourced,
+   and no value from it is printed. An unreadable existing file fails closed. The
+   value must be an absolute path with no whitespace, `:` or `,`.
+3. else `/workspace`.
 
 **It runs in its own transient unit**, not as a child of the deploy:
 

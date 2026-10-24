@@ -142,6 +142,7 @@
 - scripts/test-prune-conversations.sh - FILE: scripts/test-prune-conversations.sh
 - scripts/test-prune-docker-cache.sh - FILE: scripts/test-prune-docker-cache.sh
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
+- scripts/test-run-post-deploy-verify.sh
 - scripts/test-sandbox-firewall.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 - scripts/test-uninstall.sh - FILE: scripts/test-uninstall.sh

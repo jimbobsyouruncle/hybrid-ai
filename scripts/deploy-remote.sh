@@ -183,9 +183,13 @@ esac
 # schedule" and "script absent" paths are warnings. The absent case is loud on
 # purpose -- it used to fail silently.
 if [ -x "$HYBRID_AI_POST_DEPLOY_VERIFY_CMD" ]; then
+  # --setenv carries the resolved APP_DIR into the transient unit. Without it the
+  # unit inherits the systemd manager's environment, not this script's, so the
+  # verifier would fall back to its own default and check the wrong tree.
   systemd-run --collect \
     --unit="hybrid-ai-post-deploy-verify-${EXPECTED_SHA:0:12}-$$" \
     --service-type=exec \
+    --setenv=HYBRID_AI_APP_DIR="$APP_DIR" \
     --property="StandardOutput=append:${HYBRID_AI_POST_DEPLOY_VERIFY_LOG}" \
     --property="StandardError=append:${HYBRID_AI_POST_DEPLOY_VERIFY_LOG}" \
     "$HYBRID_AI_POST_DEPLOY_VERIFY_CMD" --wait-for "$EXPECTED_SHA" \
