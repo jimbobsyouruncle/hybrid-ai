@@ -598,6 +598,13 @@
 - run_install()
 - firewall_sudo()
 
+## scripts/test-post-deploy-verify-log-env.sh
+- ok()
+- bad()
+- check()
+- run_install()
+- env_value()
+
 ## scripts/test-prune-conversations.sh
 - ok()
 - bad()
@@ -739,6 +746,7 @@
 - def probe_resources()
 - def probe_models()
 - def probe_backups()
+- def probe_deploy_verification()
 - def probe_data()
 - def _parse_events(path, limit)
 - def _age_hours(stamp)
@@ -759,3 +767,11 @@
   - def do_GET(self)
   - def do_POST(self)
 - def main()
+
+## status/test_deploy_verification.py
+- def ok(msg)
+- def bad(msg)
+- def check(label, got, want)
+- def write(text)
+- def remove()
+- def shape(tile)

@@ -142,6 +142,19 @@ jobs:
         # check.
         run: bash scripts/test-doctor-post-deploy-log.sh
 
+      - name: Status deploy-verification tile tests
+        # Offline, no Docker, no network. Proves status/app.py's Deploy
+        # verification tile parses the LAST `waiting for <sha> at <ts>` line and
+        # the verdict after it: PASS -> ok naming the short sha and timestamp,
+        # FAIL/TIMEOUT -> fail quoting the verdict, an earlier verdict is never
+        # carried into a later block, and an absent, empty, directory-shaped,
+        # unreadable, unparseable or still-running log degrades to warn with a
+        # clear detail rather than a crash. A credential-shaped verdict detail
+        # is redacted before display. Fixture files in a scratch dir; the probe
+        # path is set through POST_DEPLOY_VERIFY_LOG_PATH. The harness fails
+        # against a status/app.py without the probe.
+        run: python3 status/test_deploy_verification.py
+
       - name: Doctor sandbox-firewall tests
         # Offline. RUNS doctor.sh (stubbed iptables and a recorded DOCKER-USER
         # chain) to prove the new warning-only sandbox-firewall check: a chain
@@ -284,6 +297,15 @@ jobs:
         # no .env exists, and is idempotent on a second run. Docker and friends
         # are stubbed on PATH; the run uses --no-start.
         run: bash scripts/test-env-pin-migration.sh
+
+      - name: Post-deploy verify-log env tests
+        # Offline. Proves install.sh's STEP 8 template writes
+        # HYBRID_AI_POST_DEPLOY_VERIFY_LOG as ${VAR:-default}: with nothing set
+        # it writes the default path; an owner override loaded from the existing
+        # .env survives the rewrite byte-for-byte; a second run changes nothing.
+        # Docker and friends are stubbed on PATH; the run uses --no-start. The
+        # harness fails against an install.sh without the template line.
+        run: bash scripts/test-post-deploy-verify-log-env.sh
 
       - name: Agent-server image repository tests
         # Offline. Proves install.sh's STEP 2b migration moves the canonical

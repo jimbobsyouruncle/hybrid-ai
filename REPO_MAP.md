@@ -139,6 +139,7 @@
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
 - scripts/test-install-health.sh - FILE: scripts/test-install-health.sh
+- scripts/test-post-deploy-verify-log-env.sh - FILE: scripts/test-post-deploy-verify-log-env.sh
 - scripts/test-prune-conversations.sh - FILE: scripts/test-prune-conversations.sh
 - scripts/test-prune-docker-cache.sh - FILE: scripts/test-prune-docker-cache.sh
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
@@ -157,3 +158,4 @@
 - status/Caddyfile
 - status/README.md - status/ — Status Page
 - status/app.py - FILE: status/app.py
+- status/test_deploy_verification.py - FILE: status/test_deploy_verification.py
