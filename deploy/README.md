@@ -169,6 +169,17 @@ with the deployed sha.
 It writes one `waiting for <sha> at <UTC>` line up front, then exactly one
 result line -- `PASS`, `FAIL: ...` or `TIMEOUT: ...`.
 
+**`doctor.sh` reads that back.** The log is appended across deploys, so the
+doctor check takes the last `waiting for` line as the run of interest and reads
+the first verdict line after it. It surfaces that verdict in the next deploy's
+run log: a `PASS` becomes a pass line naming the short sha and the waiting
+timestamp, `FAIL` and `TIMEOUT` become a warning quoting the verdict, and a
+waiting line with no verdict becomes a warning only once it is more than 65
+minutes old -- a younger one is simply still running. There is no mtime
+comparison with the deployed commit, because `doctor` runs before the current
+deploy's verifier can have written. See
+[`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#post-deploy-verification).
+
 The deployment directory resolves in this order:
 
 1. `HYBRID_AI_APP_DIR` from the environment. The deploy hook passes this

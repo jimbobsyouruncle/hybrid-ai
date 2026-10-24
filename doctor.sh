@@ -1427,34 +1427,59 @@ fi
 # Post-deploy verification log (WARNING ONLY)
 # ---------------------------------------------------------------------------
 # scripts/deploy-remote.sh starts scripts/run-post-deploy-verify.sh in a
-# transient unit after every deploy. Its one-line verdicts land here. This check
-# is a smoke detector, never a gate: it warns and never fails, so a missing or
-# empty log can never turn a deploy red.
+# transient unit after every deploy. Each run appends a header line
+# `waiting for <sha> at <ts>`, then exactly one verdict: `PASS`, `FAIL: <detail>`
+# or `TIMEOUT: <detail>`. The log is appended across deploys, so the LAST
+# `waiting for` line names the run of interest and the first verdict line after
+# it is that run's outcome. The log is read as data, never as code.
 #
-#   absent                      -> skip note, exit unchanged
-#   exists, 0 bytes             -> warn: the verifier never wrote anything
-#   mtime > 600 s older than the
-#     deployed HEAD's commit    -> warn: a deploy happened after the last write
-#   otherwise                   -> pass
-#   unreadable log / git fails  -> skip note, exit unchanged
+# The check reads that verdict. It does NOT compare the log's mtime with a
+# commit time: doctor.sh runs before the current deploy's verifier can have
+# written, so an mtime comparison warned on every deploy by construction. A
+# verdict from an earlier deploy is surfaced here, in this deploy's output.
+#
+#   absent                        -> skip note, exit unchanged
+#   unreadable / git probe fails  -> skip note, exit unchanged
+#   exists, 0 bytes               -> warn: the verifier never wrote anything
+#   no parseable waiting line     -> warn
+#   verdict PASS                  -> pass, naming the short sha and timestamp
+#   verdict FAIL / TIMEOUT        -> warn, quoting the verdict and short sha
+#   no verdict, wait > 65 minutes -> warn: the run was abandoned
+#   no verdict, wait within 65 min-> skip note (still running)
+#   unparseable wait timestamp    -> skip note, exit unchanged
+#
+# This is a smoke detector, never a gate: it calls warn()/pass() only, so the
+# worst it can do is raise the exit code to 1, never 2.
 # ---------------------------------------------------------------------------
 PDV_LOG="$HYBRID_AI_POST_DEPLOY_VERIFY_LOG"
 PDV_SKIP=""
-PDV_MTIME=""
-PDV_COMMIT_TS=""
+PDV_SEEN_WAITING=0
+PDV_WAITING_SHA=""
+PDV_WAITING_TS=""
+PDV_VERDICT=""
+PDV_WAIT_EPOCH=""
+PDV_NOW=""
+PDV_SHA12=""
+PDV_LINE=""
 if [[ ! -e "$PDV_LOG" ]]; then
   PDV_SKIP="log not present (${PDV_LOG})"
-else
-  PDV_MTIME="$(stat -c %Y -- "$PDV_LOG" 2>/dev/null)" || PDV_MTIME=""
-  if [[ -z "$PDV_MTIME" ]]; then
-    PDV_SKIP="log not readable (${PDV_LOG})"
-  elif [[ ! -r "$PDV_LOG" ]]; then
-    PDV_SKIP="log not readable (${PDV_LOG})"
-  elif ! PDV_COMMIT_TS="$(git -C "$APP_DIR" show -s --format=%ct HEAD 2>/dev/null)"; then
-    PDV_SKIP="deployed tree not readable with git (${APP_DIR})"
-  elif [[ ! "$PDV_COMMIT_TS" =~ ^[0-9]+$ ]]; then
-    PDV_SKIP="deployed tree not readable with git (${APP_DIR})"
-  fi
+elif [[ ! -r "$PDV_LOG" ]]; then
+  PDV_SKIP="log not readable (${PDV_LOG})"
+elif ! git -C "$APP_DIR" show -s --format=%ct HEAD >/dev/null 2>&1; then
+  PDV_SKIP="deployed tree not readable with git (${APP_DIR})"
+elif [[ -s "$PDV_LOG" ]]; then
+  while IFS= read -r PDV_LINE || [[ -n "$PDV_LINE" ]]; do
+    if [[ "$PDV_LINE" =~ ^waiting\ for\ ([0-9a-fA-F]{40})\ at\ (.+)$ ]]; then
+      PDV_WAITING_SHA="${BASH_REMATCH[1]}"
+      PDV_WAITING_TS="${BASH_REMATCH[2]}"
+      PDV_VERDICT=""
+      PDV_SEEN_WAITING=1
+    elif (( PDV_SEEN_WAITING )) && [[ -z "$PDV_VERDICT" ]]; then
+      case "$PDV_LINE" in
+        PASS|FAIL:*|TIMEOUT:*) PDV_VERDICT="${PDV_LINE//[[:cntrl:]]/}" ;;
+      esac
+    fi
+  done < "$PDV_LOG"
 fi
 
 if [[ -n "$PDV_SKIP" ]]; then
@@ -1462,13 +1487,35 @@ if [[ -n "$PDV_SKIP" ]]; then
 elif [[ ! -s "$PDV_LOG" ]]; then
   warn "post-deploy verification log ${PDV_LOG} is empty: the post-deploy verifier never wrote anything" \
        "Either the verifier is not installed (check ${HYBRID_AI_POST_DEPLOY_VERIFY_CMD}) or it was killed before it wrote. Inspect it with: journalctl -u 'hybrid-ai-post-deploy-verify-*'"
-elif (( PDV_MTIME + 600 < PDV_COMMIT_TS )); then
-  warn "post-deploy verification log is older than the deployed commit: last write $(date -u -d "@${PDV_MTIME}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "${PDV_MTIME}"), deployed HEAD committed $(date -u -d "@${PDV_COMMIT_TS}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "${PDV_COMMIT_TS}")" \
-       "A deploy happened after the last verification write. Check why the verifier did not report: journalctl -u 'hybrid-ai-post-deploy-verify-*' --since -2h"
+elif (( ! PDV_SEEN_WAITING )); then
+  warn "post-deploy verification log ${PDV_LOG} has no parseable 'waiting for <sha> at <ts>' line" \
+       "Inspect the run with: journalctl -u 'hybrid-ai-post-deploy-verify-*'"
 else
-  pass "post-deploy verification log is current (${PDV_LOG})"
+  PDV_SHA12="${PDV_WAITING_SHA:0:12}"
+  if [[ -n "$PDV_VERDICT" ]]; then
+    if [[ "$PDV_VERDICT" == "PASS" ]]; then
+      pass "post-deploy verification passed for ${PDV_SHA12} (verdict written ${PDV_WAITING_TS})"
+    else
+      warn "post-deploy verification reported '${PDV_VERDICT}' for ${PDV_SHA12}" \
+           "Inspect the run with: journalctl -u 'hybrid-ai-post-deploy-verify-*'"
+    fi
+  else
+    PDV_WAIT_EPOCH="$(date -u -d "$PDV_WAITING_TS" +%s 2>/dev/null)"
+    PDV_NOW="$(date -u +%s)"
+    if [[ ! "$PDV_WAIT_EPOCH" =~ ^[0-9]+$ ]]; then
+      (( QUIET )) || printf "  %s-%s post-deploy verification log skipped (unparseable verification timestamp '%s')\n" \
+        "$C_DIM" "$C_RST" "${PDV_WAITING_TS//[[:cntrl:]]/}"
+    elif (( PDV_WAIT_EPOCH + 3900 < PDV_NOW )); then
+      warn "post-deploy verification for ${PDV_SHA12} has no verdict and its wait started at ${PDV_WAITING_TS}, more than 65 minutes ago" \
+           "Inspect the run with: journalctl -u 'hybrid-ai-post-deploy-verify-*'"
+    else
+      (( QUIET )) || printf '  %s-%s post-deploy verification log skipped (verification for %s still running since %s)\n' \
+        "$C_DIM" "$C_RST" "$PDV_SHA12" "${PDV_WAITING_TS//[[:cntrl:]]/}"
+    fi
+  fi
 fi
-unset PDV_LOG PDV_SKIP PDV_MTIME PDV_COMMIT_TS
+unset PDV_LOG PDV_SKIP PDV_SEEN_WAITING PDV_WAITING_SHA PDV_WAITING_TS PDV_VERDICT \
+      PDV_WAIT_EPOCH PDV_NOW PDV_SHA12 PDV_LINE
 
 # ---------------------------------------------------------------------------
 # Summary

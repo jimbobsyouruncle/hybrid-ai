@@ -5,25 +5,43 @@
 #   Proves doctor.sh's post-deploy verification-log check by RUNNING doctor.sh
 #   against fixture files -- it does not grep the text of doctor.sh.
 #
-#   The defect: scripts/deploy-remote.sh used to start a waiter that systemd
-#   killed when the deploy unit exited, leaving a 0-byte log whose mtime matched
-#   unit exit. Nothing noticed. doctor.sh now looks at the log and warns when it
-#   is empty, or when it is older than the commit that is deployed.
+#   The defect: the check used to compare the log's mtime with the deployed
+#   commit's time. doctor.sh runs during a deploy, after the new tree is
+#   checked out but before that deploy's verifier can have written, so the log
+#   was always "older than the deployed commit" and the check warned on EVERY
+#   deploy by construction. It also never read the verdict the verifier wrote.
+#
+#   Now it parses the log. A run's block is one `waiting for <sha> at <ts>`
+#   line followed by one verdict line: `PASS`, `FAIL: <detail>` or
+#   `TIMEOUT: <detail>`. The last waiting line is the run of interest and the
+#   first verdict after it is its outcome. A PASS for any sha passes; FAIL and
+#   TIMEOUT warn; a waiting line with no verdict warns only once it is older
+#   than 65 minutes, because a deploy may simply still be verifying.
 #
 #   Fully OFFLINE. No Docker, no network, no root. The host commands doctor.sh
 #   probes are stubbed on PATH, so a fixed set of unrelated checks passes and
 #   the only thing that moves the verdict is the log fixture.
 #
 #   Proven here:
-#     (1) healthy fresh non-empty log -> pass, exit code as the log-absent run;
-#     (2) 0-byte log                  -> warn, exit 1, never 2;
-#     (3) log mtime > 600 s older than
-#         the deployed HEAD's commit  -> warn, exit 1;
-#     (4) absent log                  -> a skip note, base exit code;
-#     (5) unreadable log / unreadable
-#         git dir                     -> a skip note, exit unchanged;
-#     (6) the summary never gains a failure in any of the above.
-#   Cases (2) and (3) fail against a doctor.sh without the check.
+#     (1) PASS for a sha that is NOT the deployed HEAD, with the log's mtime
+#         hours in the past   -> pass naming the short sha, baseline exit --
+#         this is the case that proves the structural noise is gone;
+#     (2) FAIL verdict         -> warn quoting the verdict, exit 1, never 2;
+#     (3) TIMEOUT verdict      -> warn quoting the verdict;
+#     (4) waiting line, no verdict, started 90 min ago
+#                              -> warn (abandoned), exit 1, never 2;
+#     (5) waiting line, no verdict, started now
+#                              -> skip note, baseline exit, no extra warning;
+#     (6) non-empty log without a parseable waiting line
+#                              -> warn, never a silent pass;
+#     (7) waiting line with an unparseable timestamp
+#                              -> skip note, exit unchanged;
+#     (8) absent log           -> skip note, base exit code;
+#     (9) 0-byte log           -> warn, exit 1, never 2;
+#    (10) unreadable log, unreadable git dir
+#                              -> skip note, exit unchanged;
+#    (11) the summary never gains a failure in any of the above.
+#   Cases (1) through (7) fail against a doctor.sh that compares mtimes.
 #
 # USAGE:
 #   bash scripts/test-doctor-post-deploy-log.sh [path-to-doctor.sh]
@@ -141,7 +159,7 @@ chmod +x "$BIN/stub"
 # The host-side bind doctor.sh expects when it reads the port bindings. Taken
 # from doctor.sh itself so the stub can never drift from the real check.
 BRIDGE_IP="$(sed -n "s/.*\"\$BINDINGS\" == \*\"\([^:\"]*\):\\\${OH_PORT}\".*/\1/p" "$DOCTOR" | head -1)"
-BRIDGE_IP="${BRIDGE_IP:-0.0.0.0}"
+BRIDGE_IP="${BRIDGE_IP:-[IP_ADDRESS]}"
 for n in docker curl jq getfacl iptables df findmnt nvme lsblk dmesg vcgencmd \
          hostname getent uname nproc tailscale systemctl journalctl sqlite3 \
          rsync restic mountpoint ip; do
@@ -153,11 +171,11 @@ cp "$REPO_ROOT/scripts/lib/hybrid-ai-env.sh" "$APPD/scripts/lib/"
 cp "$DOCTOR" "$APPD/doctor.sh"
 chmod +x "$APPD/doctor.sh"
 
-# A throwaway git tree whose HEAD commit is "now". Its commit time is what the
-# check compares the log's mtime against.
+# A throwaway git tree. doctor.sh still probes it for git readability; nothing
+# compares its commit time with the log any more.
 TREE="$WORK/tree"
 mkdir -p "$TREE"
-( cd "$TREE" && git init -q && git config user.email [EMAIL] \
+( cd "$TREE" && git init -q && git config user.email fixture@example.test \
     && git config user.name test && git commit -q --allow-empty -m deployed ) >/dev/null 2>&1
 NOTGIT="$WORK/notgit"
 mkdir -p "$NOTGIT"
@@ -180,18 +198,46 @@ EOF
 chmod 600 "$APPD/.env"
 
 LOG_ABSENT="$LOGDIR/absent.log"
-LOG_FRESH="$LOGDIR/fresh.log"
+LOG_PASS="$LOGDIR/pass.log"
 LOG_EMPTY="$LOGDIR/empty.log"
-LOG_STALE="$LOGDIR/stale.log"
+LOG_FAIL="$LOGDIR/fail.log"
+LOG_TIMEOUT="$LOGDIR/timeout.log"
+LOG_ABANDONED="$LOGDIR/abandoned.log"
+LOG_RUNNING="$LOGDIR/running.log"
+LOG_GARBAGE="$LOGDIR/garbage.log"
+LOG_BADTS="$LOGDIR/badts.log"
 LOG_UNREADABLE="$LOGDIR/unreadable.log"
 
-printf 'waiting for aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa at 2026-01-01T00:00:00Z\nPASS\n' > "$LOG_FRESH"
+# Every sha below is a 40-hex value the throwaway tree's HEAD never has, so a
+# PASS can only come from reading the log -- never from matching the deployment.
+SHA_PASS="1234567890abcdef1234567890abcdef12345678"
+SHA_FAIL="abcdef1234567890abcdef1234567890abcdef12"
+SHA_TIMEOUT="fedcba0987654321fedcba0987654321fedcba09"
+SHA_ABANDONED="0123456789abcdef0123456789abcdef01234567"
+SHA_RUNNING="9999999999999999999999999999999999999999"
+SHA_BADTS="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+SHA12_PASS="${SHA_PASS:0:12}"
+SHA12_FAIL="${SHA_FAIL:0:12}"
+SHA12_TIMEOUT="${SHA_TIMEOUT:0:12}"
+SHA12_ABANDONED="${SHA_ABANDONED:0:12}"
+SHA12_RUNNING="${SHA_RUNNING:0:12}"
+
+TS_OLD="$(date -u -d '90 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+TS_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+printf 'waiting for %s at %s\nPASS\n' "$SHA_PASS" "$TS_OLD" > "$LOG_PASS"
+printf 'waiting for %s at %s\nFAIL: run 123 conclusion failure\n' "$SHA_FAIL" "$TS_NOW" > "$LOG_FAIL"
+printf 'waiting for %s at %s\nTIMEOUT: no completed run for %s after 60 minutes\n' \
+  "$SHA_TIMEOUT" "$TS_OLD" "$SHA_TIMEOUT" > "$LOG_TIMEOUT"
+printf 'waiting for %s at %s\n' "$SHA_ABANDONED" "$TS_OLD" > "$LOG_ABANDONED"
+printf 'waiting for %s at %s\n' "$SHA_RUNNING" "$TS_NOW" > "$LOG_RUNNING"
+printf '%s\n' 'not a waiting line' 'still not a waiting line' > "$LOG_GARBAGE"
+printf 'waiting for %s at not-a-timestamp\n' "$SHA_BADTS" > "$LOG_BADTS"
+printf 'waiting for %s at %s\nPASS\n' "$SHA_PASS" "$TS_OLD" > "$LOG_UNREADABLE"
 : > "$LOG_EMPTY"
-printf 'waiting for bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb at 2026-01-01T00:00:00Z\nPASS\n' > "$LOG_STALE"
-printf 'waiting for cccccccccccccccccccccccccccccccccccccccc at 2026-01-01T00:00:00Z\nPASS\n' > "$LOG_UNREADABLE"
-# The stale log stopped being written two hours ago; HEAD was committed now, so
-# the deploy plainly happened after the last verification write.
-touch -d '2 hours ago' "$LOG_STALE"
+# The PASS log stopped being written three hours ago while the deployed tree was
+# committed a moment ago. Under the old mtime rule this warned on every deploy.
+touch -d '3 hours ago' "$LOG_PASS"
 chmod 000 "$LOG_UNREADABLE"
 
 summary_count() { # <outfile> <passed|warning|failure>
@@ -221,7 +267,7 @@ run_doctor() {
 
 echo "== Running doctor.sh post-deploy-log tests =="
 
-# --- (4) baseline: the log is absent ---------------------------------------
+# --- (8) baseline: the log is absent ---------------------------------------
 run_doctor absent "$LOG_ABSENT"
 BASE_RC=$RC; BASE_WARNED=$WARNED; BASE_FAILED=$FAILED
 
@@ -230,33 +276,184 @@ if grep -q "post-deploy verification log skipped (log not present" "$OUT"; then
 else
   fail "absent log: no skip note printed"
 fi
-if grep -q "post-deploy verification log is current" "$OUT" \
-   || grep -q "post-deploy verification log .* is empty" "$OUT" \
-   || grep -q "post-deploy verification log is older" "$OUT"; then
+if grep -q "post-deploy verification passed for" "$OUT" \
+   || grep -q "post-deploy verification reported" "$OUT" \
+   || grep -q "is empty: the post-deploy verifier" "$OUT" \
+   || grep -q "has no parseable" "$OUT"; then
   fail "absent log: the check reported a verdict for a log that is not there"
 else
   pass "absent log: no verdict is reported"
 fi
 
-# --- (1) healthy fresh non-empty log --------------------------------------
-run_doctor fresh "$LOG_FRESH"
-if grep -q "post-deploy verification log is current" "$OUT"; then
-  pass "fresh log: the check reports pass"
+# --- (1) PASS for a sha that is not the deployed HEAD ----------------------
+run_doctor pass "$LOG_PASS"
+RC_PASS=$RC
+if grep -q "post-deploy verification passed for ${SHA12_PASS} (verdict written ${TS_OLD})" "$OUT"; then
+  pass "pass verdict: the pass line names the short sha and the waiting timestamp"
 else
-  fail "fresh log: no pass line for the post-deploy log check"
+  fail "pass verdict: no pass line naming ${SHA12_PASS} / ${TS_OLD}"
 fi
-if [[ "$RC" == "$BASE_RC" ]]; then
-  pass "fresh log: exit code matches the log-absent run (${BASE_RC})"
+if [[ "$RC_PASS" == "$BASE_RC" ]]; then
+  pass "pass verdict: exit code matches the log-absent run (${BASE_RC})"
 else
-  fail "fresh log: exit code ${RC} differs from the log-absent run (${BASE_RC})"
+  fail "pass verdict: exit code ${RC_PASS} differs from the log-absent run (${BASE_RC})"
+fi
+if [[ "$WARNED" == "$BASE_WARNED" ]]; then
+  pass "pass verdict: no extra warning despite a 3-hour-old mtime"
+else
+  fail "pass verdict: warnings ${WARNED}, baseline ${BASE_WARNED} -- an old mtime must not warn"
 fi
 if [[ "$FAILED" == "$BASE_FAILED" ]]; then
-  pass "fresh log: no new failures in the summary"
+  pass "pass verdict: no new failures in the summary"
 else
-  fail "fresh log: summary failures ${FAILED}, baseline ${BASE_FAILED}"
+  fail "pass verdict: summary failures ${FAILED}, baseline ${BASE_FAILED}"
 fi
 
-# --- (2) 0-byte log -------------------------------------------------------
+# --- (2) FAIL verdict -----------------------------------------------------
+run_doctor fail "$LOG_FAIL"
+RC_FAIL=$RC
+if grep -q "post-deploy verification reported 'FAIL: run 123 conclusion failure' for ${SHA12_FAIL}" "$OUT"; then
+  pass "fail verdict: the warn quotes the verdict and the short sha"
+else
+  fail "fail verdict: no warn quoting the FAIL verdict for ${SHA12_FAIL}"
+fi
+if grep -q "journalctl -u 'hybrid-ai-post-deploy-verify-\*'" "$OUT"; then
+  pass "fail verdict: the remedy names journalctl for the verifier units"
+else
+  fail "fail verdict: the remedy does not name journalctl -u 'hybrid-ai-post-deploy-verify-*'"
+fi
+if [[ "$RC_FAIL" == "1" ]]; then
+  pass "fail verdict: exit code is 1"
+else
+  fail "fail verdict: exit code ${RC_FAIL}, expected 1 (baseline ${BASE_RC})"
+fi
+if [[ "$RC_FAIL" != "2" ]]; then
+  pass "fail verdict: exit code is never 2 (check is warning-only)"
+else
+  fail "fail verdict: exit code is 2 -- the check must never fail the host"
+fi
+if [[ "$WARNED" == "$(( BASE_WARNED + 1 ))" ]]; then
+  pass "fail verdict: exactly one extra warning in the summary"
+else
+  fail "fail verdict: warnings ${WARNED}, expected $(( BASE_WARNED + 1 ))"
+fi
+if [[ "$FAILED" == "$BASE_FAILED" ]]; then
+  pass "fail verdict: no new failures in the summary"
+else
+  fail "fail verdict: summary failures ${FAILED}, baseline ${BASE_FAILED}"
+fi
+
+# --- (3) TIMEOUT verdict --------------------------------------------------
+run_doctor timeout "$LOG_TIMEOUT"
+RC_TIMEOUT=$RC
+if grep -q "post-deploy verification reported 'TIMEOUT: no completed run for ${SHA_TIMEOUT} after 60 minutes' for ${SHA12_TIMEOUT}" "$OUT"; then
+  pass "timeout verdict: the warn quotes the verdict and the short sha"
+else
+  fail "timeout verdict: no warn quoting the TIMEOUT verdict for ${SHA12_TIMEOUT}"
+fi
+if [[ "$RC_TIMEOUT" != "2" && "$FAILED" == "$BASE_FAILED" ]]; then
+  pass "timeout verdict: warning-only (exit ${RC_TIMEOUT}, no new failures)"
+else
+  fail "timeout verdict: exit ${RC_TIMEOUT} with ${FAILED} failures, baseline ${BASE_RC}/${BASE_FAILED}"
+fi
+if [[ "$WARNED" == "$(( BASE_WARNED + 1 ))" ]]; then
+  pass "timeout verdict: exactly one extra warning in the summary"
+else
+  fail "timeout verdict: warnings ${WARNED}, expected $(( BASE_WARNED + 1 ))"
+fi
+
+# --- (4) waiting line, no verdict, 90 minutes old -------------------------
+run_doctor abandoned "$LOG_ABANDONED"
+RC_ABANDONED=$RC
+if grep -q "post-deploy verification for ${SHA12_ABANDONED} has no verdict and its wait started at ${TS_OLD}, more than 65 minutes ago" "$OUT"; then
+  pass "abandoned wait: a warn names the short sha and the waiting timestamp"
+else
+  fail "abandoned wait: no warn about the abandoned verification for ${SHA12_ABANDONED}"
+fi
+if grep -q "journalctl -u 'hybrid-ai-post-deploy-verify-\*'" "$OUT"; then
+  pass "abandoned wait: the remedy names journalctl for the verifier units"
+else
+  fail "abandoned wait: the remedy does not name journalctl -u 'hybrid-ai-post-deploy-verify-*'"
+fi
+if [[ "$RC_ABANDONED" == "1" ]]; then
+  pass "abandoned wait: exit code is 1, never 2"
+else
+  fail "abandoned wait: exit code ${RC_ABANDONED}, expected 1 and never 2"
+fi
+if [[ "$WARNED" == "$(( BASE_WARNED + 1 ))" && "$FAILED" == "$BASE_FAILED" ]]; then
+  pass "abandoned wait: exactly one extra warning and no new failures"
+else
+  fail "abandoned wait: warnings ${WARNED}/failures ${FAILED}, baseline ${BASE_WARNED}/${BASE_FAILED}"
+fi
+
+# --- (5) waiting line, no verdict, started now ----------------------------
+run_doctor running "$LOG_RUNNING"
+RC_RUNNING=$RC
+if grep -q "post-deploy verification log skipped (verification for ${SHA12_RUNNING} still running since ${TS_NOW})" "$OUT"; then
+  pass "running wait: a skip note says the verification is still running"
+else
+  fail "running wait: no skip note for the in-flight verification of ${SHA12_RUNNING}"
+fi
+if [[ "$RC_RUNNING" == "$BASE_RC" ]]; then
+  pass "running wait: exit code matches the log-absent run (${BASE_RC})"
+else
+  fail "running wait: exit code ${RC_RUNNING} differs from the log-absent run (${BASE_RC})"
+fi
+if [[ "$WARNED" == "$BASE_WARNED" ]]; then
+  pass "running wait: no extra warning while the verification is in flight"
+else
+  fail "running wait: warnings ${WARNED}, baseline ${BASE_WARNED}"
+fi
+if grep -q "post-deploy verification for .* has no verdict" "$OUT"; then
+  fail "running wait: it wrongly reported the in-flight verification as abandoned"
+else
+  pass "running wait: it is not reported as abandoned"
+fi
+
+# --- (6) non-empty log without a parseable waiting line -------------------
+run_doctor garbage "$LOG_GARBAGE"
+RC_GARBAGE=$RC
+if grep -q "has no parseable 'waiting for <sha> at <ts>' line" "$OUT"; then
+  pass "no waiting line: a warn says the waiting line cannot be parsed"
+else
+  fail "no waiting line: no warn about the missing waiting line (silent pass?)"
+fi
+if grep -q "journalctl -u 'hybrid-ai-post-deploy-verify-\*'" "$OUT"; then
+  pass "no waiting line: the remedy names journalctl for the verifier units"
+else
+  fail "no waiting line: the remedy does not name journalctl -u 'hybrid-ai-post-deploy-verify-*'"
+fi
+if [[ "$RC_GARBAGE" == "1" ]]; then
+  pass "no waiting line: exit code is 1"
+else
+  fail "no waiting line: exit code ${RC_GARBAGE}, expected 1 (baseline ${BASE_RC})"
+fi
+if [[ "$WARNED" == "$(( BASE_WARNED + 1 ))" && "$FAILED" == "$BASE_FAILED" ]]; then
+  pass "no waiting line: exactly one extra warning and no new failures"
+else
+  fail "no waiting line: warnings ${WARNED}/failures ${FAILED}, baseline ${BASE_WARNED}/${BASE_FAILED}"
+fi
+
+# --- (7) waiting line with an unparseable timestamp -----------------------
+run_doctor badts "$LOG_BADTS"
+RC_BADTS=$RC
+if grep -q "post-deploy verification log skipped (unparseable verification timestamp 'not-a-timestamp')" "$OUT"; then
+  pass "unparseable timestamp: a skip note quotes the raw value"
+else
+  fail "unparseable timestamp: no skip note quoting 'not-a-timestamp'"
+fi
+if [[ "$RC_BADTS" == "$BASE_RC" && "$FAILED" == "$BASE_FAILED" ]]; then
+  pass "unparseable timestamp: exit code and failures match the log-absent run"
+else
+  fail "unparseable timestamp: exit ${RC_BADTS}/${FAILED} failures, baseline ${BASE_RC}/${BASE_FAILED}"
+fi
+if [[ "$WARNED" == "$BASE_WARNED" ]]; then
+  pass "unparseable timestamp: no extra warning"
+else
+  fail "unparseable timestamp: warnings ${WARNED}, baseline ${BASE_WARNED}"
+fi
+
+# --- (9) 0-byte log -------------------------------------------------------
 run_doctor empty "$LOG_EMPTY"
 RC_EMPTY=$RC
 if grep -q "is empty: the post-deploy verifier never wrote anything" "$OUT"; then
@@ -290,26 +487,7 @@ else
   fail "0-byte log: summary failures ${FAILED}, baseline ${BASE_FAILED}"
 fi
 
-# --- (3) stale log --------------------------------------------------------
-run_doctor stale "$LOG_STALE"
-RC_STALE=$RC
-if grep -q "is older than the deployed commit" "$OUT"; then
-  pass "stale log: a warn says the deploy happened after the last write"
-else
-  fail "stale log: no warn about the log being older than the deployed commit"
-fi
-if [[ "$RC_STALE" != "2" && "$FAILED" == "$BASE_FAILED" ]]; then
-  pass "stale log: warning-only (exit ${RC_STALE}, no new failures)"
-else
-  fail "stale log: exit ${RC_STALE} with ${FAILED} failures, baseline ${BASE_FAILED} -- must stay warning-only"
-fi
-if [[ "$WARNED" == "$(( BASE_WARNED + 1 ))" ]]; then
-  pass "stale log: exactly one extra warning in the summary"
-else
-  fail "stale log: warnings ${WARNED}, expected $(( BASE_WARNED + 1 ))"
-fi
-
-# --- (5) unreadable log, and an unreadable git dir ------------------------
+# --- (10) unreadable log, and an unreadable git dir -----------------------
 if [[ "$(id -u)" != "0" ]]; then
   run_doctor unreadable "$LOG_UNREADABLE"
   if grep -q "post-deploy verification log skipped (log not readable" "$OUT"; then
@@ -333,7 +511,7 @@ else
   echo "skip: running as root, so the unreadable-log case is covered by the git dir case"
 fi
 
-run_doctor notgit "$LOG_FRESH" "$NOTGIT"
+run_doctor notgit "$LOG_PASS" "$NOTGIT"
 RC_NOTGIT=$RC
 if grep -q "post-deploy verification log skipped (deployed tree not readable with git" "$OUT"; then
   pass "unreadable git dir: a skip note is printed"
@@ -345,6 +523,11 @@ if [[ "$RC_NOTGIT" == "$BASE_RC" && "$FAILED" == "$BASE_FAILED" ]]; then
 else
   fail "unreadable git dir: exit ${RC_NOTGIT}/${FAILED} failures, baseline ${BASE_RC}/${BASE_FAILED}"
 fi
+if [[ "$WARNED" == "$BASE_WARNED" ]]; then
+  pass "unreadable git dir: no extra warning"
+else
+  fail "unreadable git dir: warnings ${WARNED}, baseline ${BASE_WARNED}"
+fi
 
 echo "---"
 if (( FAILURES != 0 )); then
@@ -353,4 +536,3 @@ if (( FAILURES != 0 )); then
 fi
 echo "All post-deploy-log assertions passed (${PASS})."
 exit 0
-
