@@ -87,6 +87,8 @@ VLLM_PORT = os.getenv("VLLM_PORT", "8000")
 WEBUI_DATA = os.getenv("WEBUI_DATA_PATH", "/data/webui_data")
 BACKUP_LOG = os.getenv("BACKUP_LOG_PATH", "/data/backup.log")
 INSTALL_LOG = os.getenv("INSTALL_LOG_PATH", "/data/install.log")
+POST_DEPLOY_VERIFY_LOG = os.getenv("POST_DEPLOY_VERIFY_LOG_PATH",
+                                   "/data/post-deploy-verify.log")
 
 WATCHED = [
     "ollama",
@@ -386,6 +388,69 @@ def probe_backups() -> Dict[str, Any]:
     return {"name": "Backups", "state": lvl, "detail": detail, "hint": hint}
 
 
+_WAITING_RE = re.compile(r"^waiting for ([0-9a-fA-F]{40}) at (.+)$")
+
+
+def probe_deploy_verification() -> Dict[str, Any]:
+    """Latest post-deploy verifier verdict, read from the verification log.
+
+    The log is appended across deploys: each run writes one
+    `waiting for <sha> at <ts>` header and then one verdict line (`PASS`,
+    `FAIL: <detail>` or `TIMEOUT: <detail>`). The LAST waiting line names the
+    run of interest and the first verdict line after it is its outcome -- the
+    same parse semantics doctor.sh uses. Nothing but the sha, the timestamp
+    and the verdict is ever emitted, and every string passes redact().
+    """
+    name = "Deploy verification"
+
+    def warn(detail: str) -> Dict[str, Any]:
+        return {"name": name, "state": "warn", "detail": detail, "hint": ""}
+
+    if os.path.isdir(POST_DEPLOY_VERIFY_LOG):
+        # A missing single-file bind source becomes a directory.
+        return warn("log path is a directory; no verdict recorded yet")
+    if not os.path.exists(POST_DEPLOY_VERIFY_LOG):
+        return warn("no verdict recorded yet")
+    try:
+        with open(POST_DEPLOY_VERIFY_LOG, "r", encoding="utf-8",
+                  errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return warn("verification log unreadable by the status container")
+
+    if not lines:
+        return warn("log is empty; no verdict recorded yet")
+
+    seen = False
+    sha = ""
+    ts = ""
+    verdict: Optional[str] = None
+    for line in lines:
+        match = _WAITING_RE.match(line)
+        if match:
+            sha, ts = match.group(1), match.group(2)
+            verdict = None
+            seen = True
+        elif seen and verdict is None:
+            stripped = re.sub(r"[\x00-\x1f\x7f]", "", line)
+            if stripped in ("PASS",) or stripped.startswith(("FAIL:", "TIMEOUT:")):
+                verdict = stripped
+
+    if not seen:
+        return warn("no parseable 'waiting for <sha> at <ts>' line")
+
+    short = redact(sha[:12])
+    stamp = redact(ts)
+    if verdict is None:
+        return warn(f"waiting for {short} since {stamp} · no verdict yet")
+    if verdict == "PASS":
+        return {"name": name, "state": "ok",
+                "detail": f"verified {short} · {stamp}", "hint": ""}
+    return {"name": name, "state": "fail",
+            "detail": f"{redact(verdict)} for {short}",
+            "hint": "journalctl -u 'hybrid-ai-post-deploy-verify-*'"}
+
+
 def probe_data() -> Dict[str, Any]:
     db_path = os.path.join(WEBUI_DATA, "webui.db")
     if not os.path.exists(db_path):
@@ -590,6 +655,8 @@ def _collect_status_uncached() -> Dict[str, Any]:
             "resources": pool.submit(_safe, probe_resources, "Resources"),
             "models": pool.submit(_safe, probe_models, "Local models"),
             "backups": pool.submit(_safe, probe_backups, "Backups"),
+            "deploy_verify": pool.submit(_safe, probe_deploy_verification,
+                                         "Deploy verification"),
             "data": pool.submit(_safe, probe_data, "Data"),
             "jobs": pool.submit(_safe, probe_jobs, "Jobs"),
             "logs": pool.submit(lambda: {
@@ -608,7 +675,8 @@ def _collect_status_uncached() -> Dict[str, Any]:
         resources = get("resources", [])
         checks = (containers if isinstance(containers, list) else [containers])
         checks += (resources if isinstance(resources, list) else [resources])
-        checks += [get("models", {}), get("backups", {}), get("data", {})]
+        checks += [get("models", {}), get("backups", {}),
+                   get("deploy_verify", {}), get("data", {})]
         jobs_result = get("jobs", [])
         jobs = jobs_result if isinstance(jobs_result, list) else [jobs_result]
         logs = get("logs", {})

@@ -45,7 +45,7 @@ It shows:
 
 - **Services** — Open WebUI, Ollama, Hermes Agent, OpenHands, and the GPU pod, with response times
 - **Scheduled jobs** — the last outcome of every backup, integrity check, restore rehearsal, retention prune and install, with staleness detection
-- **System checks** — container states, disk, memory, installed models, backup freshness, database health
+- **System checks** — container states, disk, memory, installed models, backup freshness, deploy verification, database health
 - **Recent errors** — filtered from the last 120 log lines of each service
 - **Log tails** — collapsible, last 40 lines per service
 - **Download diagnostic** — one click, no terminal
@@ -62,7 +62,7 @@ This page reveals service state, log excerpts, and offers a downloadable bundle.
 
 ### It holds no secrets
 
-The status container is **not given `.env`**, any API key, or any credential. It cannot leak what it was never given. Its whole configuration is `TAILSCALE_IP`, `STATUS_PORT`, `LOCAL_DOMAIN`, `OLLAMA_URL`, `WEBUI_URL`, `HERMES_URL`, `OPENHANDS_URL`, `WEBUI_DATA_PATH`, `BACKUP_LOG_PATH`, `INSTALL_LOG_PATH`, `RUNPOD_HOST`, `PI_HOST`, `VLLM_PORT`, `PYTHONDONTWRITEBYTECODE` and `DO_NOT_TRACK` — service addresses, host names, port numbers, container-side file paths and two static flags. None of it is a secret; the one hostname that could be sensitive, `RUNPOD_HOST`, is masked in all output anyway.
+The status container is **not given `.env`**, any API key, or any credential. It cannot leak what it was never given. Its whole configuration is `TAILSCALE_IP`, `STATUS_PORT`, `LOCAL_DOMAIN`, `OLLAMA_URL`, `WEBUI_URL`, `HERMES_URL`, `OPENHANDS_URL`, `WEBUI_DATA_PATH`, `BACKUP_LOG_PATH`, `INSTALL_LOG_PATH`, `POST_DEPLOY_VERIFY_LOG_PATH`, `RUNPOD_HOST`, `PI_HOST`, `VLLM_PORT`, `PYTHONDONTWRITEBYTECODE` and `DO_NOT_TRACK` — service addresses, host names, port numbers, container-side file paths and two static flags. None of it is a secret; the one hostname that could be sensitive, `RUNPOD_HOST`, is masked in all output anyway.
 
 This is why the web diagnostic is deliberately narrower than `./collect-diagnostics.sh`: the CLI tool can report which config keys are set and how long their values are, because it runs as you on the host. The web service cannot, because giving it that access would make it worth attacking.
 
@@ -75,6 +75,31 @@ Chat databases, uploads, and the vector store are **measured** — file sizes, r
 Caddy allows `/status`, `/hub` and `/ollama` only from loopback, RFC1918 private ranges, the Tailscale mesh (100.64.0.0/10), and the Tailscale IPv6 ULA range (fd7a:115c:a1e0::/48). The `trusted_only` snippet is imported inside each protected `handle` block, not at site level, because Caddy evaluates a matching `handle` before a site-level `abort`/`respond` — a site-level import on its own is bypassed by the handle routes. Anything else gets the connection closed with no response body, revealing nothing about what runs here.
 
 The status container publishes **no ports of its own**. The proxy is the only route in, which is what stops the allowlist being bypassed by connecting directly.
+
+### System checks
+
+Each system check is a row with a state (`ok`, `warn`, `fail` or `info`), a one-line detail, and — when something needs attention — the exact command to run next.
+
+| Tile | Reads | States |
+|---|---|---|
+| Containers | Docker socket (GET only) | `ok` running, `warn` not found / unhealthy, `info` stopped |
+| Resources | Disk and memory | `ok`, `warn` above 80 %, `fail` above 90 % |
+| Local models | Ollama `/api/tags` | `ok`, `warn` none installed, `fail` unreachable |
+| Backups | `backup.log` | `ok` within 36 h, `warn` within 168 h, `fail` older |
+| Deploy verification | The post-deploy verifier log | `ok` on `PASS`, `fail` on `FAIL`/`TIMEOUT`, `warn` when nothing is readable yet |
+| Data | `webui.db` (read-only) | `ok`, `warn` missing or unreadable |
+
+#### Deploy verification
+
+A deploy runs `scripts/run-post-deploy-verify.sh` in a transient unit after every deploy. That unit appends one block per run to its log: a header `waiting for <40-hex-sha> at <UTC-timestamp>`, then exactly one verdict — `PASS`, `FAIL: <detail>` or `TIMEOUT: <detail>`. The **Deploy verification** tile reads the **last** block:
+
+- **`ok`** — the revision verified: the tile names the short sha and the timestamp.
+- **`fail`** — the verifier reported `FAIL` or `TIMEOUT`; the tile quotes the verdict and points at `journalctl -u 'hybrid-ai-post-deploy-verify-*'` for the full run.
+- **`warn`** — no verdict is readable: the log is absent, empty, a directory (Docker creates one when the bind source does not exist yet), unreadable by the status container, or has no parseable `waiting for` line. The detail says which.
+
+The log is mounted **read-only, single file** into the container at `/data/post-deploy-verify.log` from `${HYBRID_AI_POST_DEPLOY_VERIFY_LOG:-/var/log/hybrid-ai-post-deploy-verify.log}`, the same pattern as `backup.log` and `install.log`. It holds only shas, timestamps and verdict lines — no credential, no environment value — and every emitted string still passes `redact()`.
+
+This complements the check `doctor.sh` added in PR #94, which surfaces the verdict at the **next** deploy; this tile is visible within about a minute of the verdict being written.
 
 ### Response headers are uniform across the proxy
 

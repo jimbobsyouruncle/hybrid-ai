@@ -742,6 +742,12 @@ HYBRID_AI_GID=${HYBRID_AI_GID:-}
 #HYBRID_AI_LOG_DIR=${LOG_DIR}
 #HYBRID_AI_WORK_DIR=${WORK_DIR}
 
+# The post-deploy verifier's log. Unlike the paths above this one is WRITTEN,
+# not commented: docker-compose.yml interpolates it for the status service's
+# read-only mount and refuses a bind whose source is unset. Written as
+# ${VAR:-default} so an owner override in this file survives every reinstall.
+HYBRID_AI_POST_DEPLOY_VERIFY_LOG=${HYBRID_AI_POST_DEPLOY_VERIFY_LOG:-/var/log/hybrid-ai-post-deploy-verify.log}
+
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
 OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE}

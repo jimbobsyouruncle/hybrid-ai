@@ -96,6 +96,8 @@ The status page shows the last outcome of every job, parsed from the structured 
 
 A job goes **warn** when it is overdue (a backup older than 36 hours, an integrity check older than 45 days) and **fail** when its last run errored. "Never run" is reported for backups and integrity checks, since those are expected to have happened.
 
+The **Deploy verification** tile is not a scheduled job: it reports the latest post-deploy verifier verdict, parsed from that verifier's own log. `ok` names the verified revision and when the verdict was written; `fail` quotes a `FAIL`/`TIMEOUT` verdict; `warn` means no verdict is readable yet (the log is absent, empty, a directory, unreadable by the status container, or has no parseable header). See the tile table in [`status/README.md`](../status/README.md) for the detail.
+
 From the CLI:
 
 ```bash
