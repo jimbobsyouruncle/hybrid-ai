@@ -178,15 +178,24 @@ result line:
 
 The most common **silent** failure used to be a 0-byte log: the verifier was
 killed when the deploy unit exited, so nothing was written and nothing said so.
-`doctor.sh` now catches it. It looks at the resolved log path and:
+`doctor.sh` now catches it. It reads the log as data, takes the **last**
+`waiting for <sha> at <ts>` line as the run of interest, and reads the first
+verdict line after it. It never compares the log's mtime with anything: `doctor`
+runs during a deploy, after the new tree is checked out but before that deploy's
+verifier can have written, so an mtime comparison would warn on every deploy by
+construction. Instead, the previous deploy's verdict is surfaced in the **next**
+deploy's Actions log through these warnings.
 
 | Situation | doctor.sh |
 |---|---|
 | Log absent | prints `- post-deploy verification log skipped (log not present (...))`, counts nothing |
 | Log is 0 bytes | **warns**: "the post-deploy verifier never wrote anything", with the `journalctl` remedy |
-| Log is more than 10 minutes older than the deployed HEAD's commit time | **warns**: a deploy happened after the last verification write |
-| Log is fresh and non-empty | passes |
-| Log unreadable, or the git tree unreadable | prints a skip note, counts nothing |
+| Last waiting line, verdict `PASS` | **passes**: `post-deploy verification passed for <sha12> (verdict written <ts>)`. There is no comparison with the deployed `HEAD`, so a `PASS` for any sha passes |
+| Verdict `FAIL: ...` or `TIMEOUT: ...` | **warns**: "post-deploy verification reported '\<verdict\>' for \<sha12\>", with the `journalctl` remedy |
+| Waiting line, no verdict, wait started more than 65 minutes ago | **warns**: the verification was abandoned |
+| Waiting line, no verdict, wait started within 65 minutes | prints a skip note: the verification is still running. Back-to-back deploys are legitimate |
+| Non-empty log with no parseable waiting line | **warns**: the waiting line cannot be parsed. It never passes silently |
+| Log unreadable, git tree unreadable, or unparseable waiting timestamp | prints a skip note, counts nothing |
 
 None of these can fail the host: the check is warning-only, so the worst it can
 do is exit 1. If the deploy printed `::warning::post-deploy verification script
