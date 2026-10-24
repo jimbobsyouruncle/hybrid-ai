@@ -21,7 +21,7 @@ The `http://{$LOCAL_DOMAIN}` block:
 | `/chat*` | 302 to the site root (deep links preserved) | open |
 | anything else | Open WebUI, proxied straight through | open |
 
-Two more site blocks: `http://status.{$LOCAL_DOMAIN}` redirects `/` to `/status` with a 302 and proxies to `status:8088`; `http://hermes.{$LOCAL_DOMAIN}` proxies to `hermes:8501`. Both import the same allowlist.
+Two more site blocks: `http://status.{$LOCAL_DOMAIN}` redirects `/` to `/status` with a 302 and proxies to `status:8088`; `http://hermes.{$LOCAL_DOMAIN}` proxies to `hermes:8501`. Both import the same allowlist and the same response-header snippet. The `/openwebui` and `/chat` aliases redirect to the site root; they carry no allowlist, because their only target is the open catch-all below, which has its own login.
 
 ### Why Open WebUI is served at the root
 
@@ -75,6 +75,30 @@ Chat databases, uploads, and the vector store are **measured** — file sizes, r
 Caddy allows `/status`, `/hub` and `/ollama` only from loopback, RFC1918 private ranges, the Tailscale mesh (100.64.0.0/10), and the Tailscale IPv6 ULA range (fd7a:115c:a1e0::/48). The `trusted_only` snippet is imported inside each protected `handle` block, not at site level, because Caddy evaluates a matching `handle` before a site-level `abort`/`respond` — a site-level import on its own is bypassed by the handle routes. Anything else gets the connection closed with no response body, revealing nothing about what runs here.
 
 The status container publishes **no ports of its own**. The proxy is the only route in, which is what stops the allowlist being bypassed by connecting directly.
+
+### Response headers are uniform across the proxy
+
+Every route through the proxy answers with the same four response-header operations, defined once in the `(secure_headers)` snippet:
+
+```
+(secure_headers) {
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+        -Server
+    }
+}
+```
+
+- `X-Content-Type-Options: nosniff` stops a browser from guessing a content type and running, say, a log tail as HTML.
+- `X-Frame-Options: DENY` stops the status page being framed, which blocks clickjacking.
+- `Referrer-Policy: no-referrer` stops URLs leaving your network when you follow a link from a page it serves.
+- `-Server` deletes the `Server` header, so neither Caddy's version nor an upstream's is advertised. It applies to proxied responses and to the 302s Caddy generates itself.
+
+The snippet deliberately adds **no** `Content-Security-Policy` and **no** `Cache-Control`. `app.py` already sets a strict CSP and `Cache-Control: no-store` on every response it serves, and the bare `header` form replaces rather than appends, so the app's values pass through untouched.
+
+`secure_headers` is imported inside every handle and on every site, not once at site level. Caddy runs a matching `handle` before site-level directives, so a site-level import alone would leave the catch-all (Open WebUI), `/ollama/*`, the `hermes.` site, and the alias 302s unstamped. The two alias handles import it inside their `route { }` block so the header handler runs before the redirect and cannot be reordered out.
 
 ### The container is starved of privilege
 

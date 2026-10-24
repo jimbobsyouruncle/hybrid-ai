@@ -8,8 +8,18 @@
 	abort @untrusted
 }
 
+(secure_headers) {
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+}
+
 http://status.{$LOCAL_DOMAIN} {
 	import trusted_only
+	import secure_headers
 
 	redir / /status 302
 	reverse_proxy status:8088
@@ -17,31 +27,39 @@ http://status.{$LOCAL_DOMAIN} {
 
 http://hermes.{$LOCAL_DOMAIN} {
 	import trusted_only
+	import secure_headers
 
 	reverse_proxy hermes:8501
 }
 
 http://{$LOCAL_DOMAIN} {
-	# The allowlist must be imported inside each protected handle: Caddy runs a
-	# matching handle before the site-level abort/respond, so a site-level
-	# import alone would be bypassed and leave these routes unprotected.
+	# Both snippets must be imported inside each handle: Caddy runs a matching
+	# handle before the site-level directives, so a site-level import alone
+	# would be bypassed and would leave these routes unprotected and unstamped.
+	# trusted_only guards the sensitive routes; secure_headers applies the
+	# uniform response headers (and removes Server) on every route, including
+	# the open aliases and the catch-all.
 	handle /status* {
 		import trusted_only
+		import secure_headers
 		reverse_proxy status:8088
 	}
 
 	handle /hub* {
 		import trusted_only
+		import secure_headers
 		reverse_proxy status:8088
 	}
 
 	handle /health {
+		import secure_headers
 		rewrite * /status/health-summary
 		reverse_proxy status:8088
 	}
 
 	handle_path /ollama/* {
 		import trusted_only
+		import secure_headers
 		reverse_proxy ollama:11434
 	}
 
@@ -50,8 +68,12 @@ http://{$LOCAL_DOMAIN} {
 	# prefix). Deep links and query strings are preserved. These handles do not
 	# import trusted_only: their only target is the open catch-all below, which
 	# has its own login. See status/README.md.
+	#
+	# secure_headers is imported inside each route block so the header handler
+	# runs before the redirect, and so it cannot be reordered out of the block.
 	handle /openwebui* {
 		route {
+			import secure_headers
 			uri strip_prefix /openwebui
 			redir * {uri} 302
 		}
@@ -59,12 +81,14 @@ http://{$LOCAL_DOMAIN} {
 
 	handle /chat* {
 		route {
+			import secure_headers
 			uri strip_prefix /chat
 			redir * {uri} 302
 		}
 	}
 
 	handle {
+		import secure_headers
 		reverse_proxy open-webui:8080
 	}
 }

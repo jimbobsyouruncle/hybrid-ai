@@ -701,7 +701,7 @@ The status page at `/status` exposes service state, log excerpts, and a diagnost
 | Container hardening | `read_only`, `cap_drop: ALL`, `no-new-privileges`, unprivileged user, tmpfs `/tmp`, all data mounts read-only |
 | Output redacted | Log lines pass the same patterns as `collect-diagnostics.sh` — verified by testing all ten credential formats |
 | Minimal supply chain | Python standard library only. No pip dependencies, no custom image build |
-| Response hardening | Strict CSP, `nosniff`, `X-Frame-Options: DENY`, `no-referrer`, `no-store`; server version suppressed |
+| Response hardening | The status app sends a strict CSP and `Cache-Control: no-store`. Caddy's `(secure_headers)` snippet, imported inside every route, adds `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` uniformly across the proxy and removes `Server` from proxied and Caddy-generated responses |
 
 ### Residual risk: Docker socket access
 
