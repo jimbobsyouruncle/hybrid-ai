@@ -678,6 +678,17 @@
 - accept_matches()
 - line_of()
 
+## scripts/test-status-backup-log-env.sh
+- ok()
+- bad()
+- check()
+- write_layout()
+- run_install()
+- env_value()
+
+## scripts/test-status-backup-probe.sh
+- (no symbols)
+
 ## scripts/test-sync-agent-repos.sh
 - pass()
 - fail()
@@ -769,6 +780,15 @@
   - def do_GET(self)
   - def do_POST(self)
 - def main()
+
+## status/test_backup_probe.py
+- def ok(msg)
+- def bad(msg)
+- def check(label, got, want)
+- def write(text)
+- def remove()
+- def shape(tile)
+- def ts_hours_ago(hours)
 
 ## status/test_deploy_verification.py
 - def ok(msg)

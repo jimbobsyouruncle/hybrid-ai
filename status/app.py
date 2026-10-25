@@ -344,9 +344,11 @@ def probe_backups() -> Dict[str, Any]:
     last: Optional[str] = None
     failures = 0
     incomplete = 0
+    read_lines = 0
     try:
         with open(BACKUP_LOG, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                read_lines += 1
                 if "event=backup_success" in line:
                     match = re.search(r"ts=(\S+)", line)
                     if match:
@@ -361,7 +363,18 @@ def probe_backups() -> Dict[str, Any]:
                 elif "event=backup_incomplete" in line:
                     incomplete += 1
     except OSError:
-        pass
+        # Unreadable is indistinguishable from absent for this tile: both mean
+        # "there is nothing to report", never a crash.
+        return {"name": "Backups", "state": "warn",
+                "detail": "no backup log found",
+                "hint": "Configure backups by re-running ./install.sh."}
+
+    # A zero-byte file (a bind source Docker created empty) has no history yet,
+    # so it reads the same as an absent file rather than as a failed backup.
+    if read_lines == 0:
+        return {"name": "Backups", "state": "warn",
+                "detail": "no backup log found",
+                "hint": "Configure backups by re-running ./install.sh."}
 
     if not last:
         return {"name": "Backups", "state": "warn",

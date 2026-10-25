@@ -268,7 +268,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Measured, never read for content.
       - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data:/data/webui_data:ro
-      - ${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/backup.log:/data/backup.log:ro
+      # Writer and reader must name ONE path. The units (system mode) and
+      # backup.sh (user mode) write whatever scripts/lib/hybrid-ai-env.sh
+      # resolves BACKUP_LOG to; install.sh writes that resolved value into the
+      # stack env file, so this bind source is the file that is actually being
+      # written. Fail-closed: an unset value refuses the parse instead of
+      # mounting a path nothing writes.
+      - ${BACKUP_LOG:?BACKUP_LOG must be set - run ./install.sh}:/data/backup.log:ro
       - ${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/install.log:/data/install.log:ro
       # The post-deploy verifier's log: read-only display data for the Deploy
       # verification tile. Same single-file pattern as the two logs above.

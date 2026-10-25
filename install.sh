@@ -748,6 +748,13 @@ HYBRID_AI_GID=${HYBRID_AI_GID:-}
 # ${VAR:-default} so an owner override in this file survives every reinstall.
 HYBRID_AI_POST_DEPLOY_VERIFY_LOG=${HYBRID_AI_POST_DEPLOY_VERIFY_LOG:-/var/log/hybrid-ai-post-deploy-verify.log}
 
+# The backup log the status service mounts read-only. WRITTEN, not commented:
+# docker-compose.yml interpolates BACKUP_LOG fail-closed for that bind. The
+# value is the one scripts/lib/hybrid-ai-env.sh already resolved from the mode
+# (user: $HYBRID_AI_LOG_DIR/backup.log, system: the units' LogsDirectory=), so
+# the reader cannot drift from the writer.
+BACKUP_LOG=${BACKUP_LOG}
+
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}
 OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE}

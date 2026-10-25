@@ -307,6 +307,26 @@ jobs:
         # harness fails against an install.sh without the template line.
         run: bash scripts/test-post-deploy-verify-log-env.sh
 
+      - name: Status backup-log env tests
+        # Offline. Proves install.sh's STEP 8 template writes the RESOLVED
+        # BACKUP_LOG that docker-compose.yml now uses as the status service's
+        # backup-log mount source: user mode yields <log dir>/backup.log (the
+        # path the old compose expression rendered), system mode yields the
+        # units' LogsDirectory= path, and an owner override survives reruns
+        # byte-for-byte. Without the template line the mount would point at a
+        # file nothing writes on system-mode hosts. Docker and friends are
+        # stubbed on PATH; the run uses --no-start. The harness fails against an
+        # install.sh without the template line.
+        run: bash scripts/test-status-backup-log-env.sh
+
+      - name: Status backup-log probe tests
+        # Offline. Pins the reader half of the single-path contract in
+        # status/app.py: an absent, zero-byte or unreadable backup log degrades
+        # to a warn instead of raising, a log with no success line says so, and
+        # a recent success shows as ok in both the Backups and Jobs tiles. No
+        # Docker, no network, no root: fixture log files only.
+        run: bash scripts/test-status-backup-probe.sh
+
       - name: Agent-server image repository tests
         # Offline. Proves install.sh's STEP 2b migration moves the canonical
         # ghcr.io/openhands/agent-server repository in an existing .env to the
@@ -342,7 +362,8 @@ jobs:
           OPENHANDS_WORKSPACE=/tmp/agent-workspace \
           OPENHANDS_STATE_DIR=/tmp/openhands-state \
           HYBRID_AI_DATA_DIR=/tmp/agent-data \
-          HYBRID_AI_LOG_DIR=/tmp/agent-log
+          HYBRID_AI_LOG_DIR=/tmp/agent-log \
+          BACKUP_LOG=/tmp/agent-log/backup.log
           set +a
           docker compose -f docker-compose.yml config --quiet
           # The overlays are deployed on every install but were never validated
@@ -357,9 +378,11 @@ jobs:
           # --- Unset: compose fails closed ------------------------------------
           # With HYBRID_AI_DATA_DIR and HYBRID_AI_LOG_DIR unset the three-file
           # parse must be refused (non-zero) and name ./install.sh, so nobody
-          # starts the stack with silently-wrong bind sources.
+          # starts the stack with silently-wrong bind sources. BACKUP_LOG is a
+          # separate fail-closed bind (the status backup-log mount), so it is
+          # asserted unset on its own below.
           set +e
-          FAILCLOSED_OUT="$(env -u HYBRID_AI_DATA_DIR -u HYBRID_AI_LOG_DIR \
+          FAILCLOSED_OUT="$(env -u HYBRID_AI_DATA_DIR -u HYBRID_AI_LOG_DIR -u BACKUP_LOG \
             docker compose -f docker-compose.yml \
                            -f openhands/docker-compose.openhands.yml \
                            -f hermes/docker-compose.hermes.yml config 2>&1 >/dev/null)"
@@ -369,11 +392,27 @@ jobs:
             || { echo "::error::unset HYBRID_AI_DATA_DIR/HYBRID_AI_LOG_DIR did not fail closed"; exit 1; }
           printf '%s\n' "$FAILCLOSED_OUT" | grep -q './install.sh' \
             || { echo "::error::fail-closed compose error did not name ./install.sh"; exit 1; }
-          echo "Compose refuses to parse with the data/log dirs unset."
+
+          # BACKUP_LOG unset, everything else set: the status backup-log mount
+          # must still refuse the parse and name ./install.sh. This is the
+          # mount that decides whether `Backup: ok` can ever appear.
+          set +e
+          BACKUP_FAILCLOSED_OUT="$(env -u BACKUP_LOG \
+            docker compose -f docker-compose.yml \
+                           -f openhands/docker-compose.openhands.yml \
+                           -f hermes/docker-compose.hermes.yml config 2>&1 >/dev/null)"
+          BACKUP_FAILCLOSED_RC=$?
+          set -e
+          [ "$BACKUP_FAILCLOSED_RC" -ne 0 ] \
+            || { echo "::error::unset BACKUP_LOG did not fail closed"; exit 1; }
+          printf '%s\n' "$BACKUP_FAILCLOSED_OUT" | grep -q './install.sh' \
+            || { echo "::error::BACKUP_LOG fail-closed compose error did not name ./install.sh"; exit 1; }
+          echo "Compose refuses to parse with the data/log dirs or BACKUP_LOG unset."
 
           # --- Set to a temp tree: bind sources move under it -----------------
           TMPTREE="$(mktemp -d)"
           export HYBRID_AI_DATA_DIR="$TMPTREE/data" HYBRID_AI_LOG_DIR="$TMPTREE/log"
+          export BACKUP_LOG="$TMPTREE/log/backup.log"
           RENDER_SET="$(docker compose -f docker-compose.yml \
                                        -f openhands/docker-compose.openhands.yml \
                                        -f hermes/docker-compose.hermes.yml config)"
@@ -381,10 +420,31 @@ jobs:
             || { echo "::error::HYBRID_AI_DATA_DIR was not honoured"; exit 1; }
           printf '%s\n' "$RENDER_SET" | grep -q "source: $TMPTREE/data/webui_data" \
             || { echo "::error::HYBRID_AI_DATA_DIR was not honoured"; exit 1; }
-          printf '%s\n' "$RENDER_SET" | grep -q "source: $TMPTREE/log/backup.log" \
-            || { echo "::error::HYBRID_AI_LOG_DIR was not honoured"; exit 1; }
+          printf '%s\n' "$RENDER_SET" | grep -q "source: $BACKUP_LOG" \
+            || { echo "::error::BACKUP_LOG was not honoured for the status mount"; exit 1; }
           rm -rf "$TMPTREE"
           echo "Compose renders under a split layout."
+
+          # --- system mode: the helper's value IS the status mount source -----
+          # The regression this guards against: compose used to mount
+          # ${HYBRID_AI_LOG_DIR}/backup.log, a file nothing writes in system
+          # mode, so the status page could never report a successful backup.
+          # Resolve BACKUP_LOG through the shared helper exactly as install.sh
+          # does, then prove the status service mounts THAT path.
+          export HYBRID_AI_LOG_DIR="$(mktemp -d)/log"
+          SYS_BACKUP_LOG="$(env -u BACKUP_LOG HYBRID_AI_BACKUP_MODE=system \
+            HYBRID_AI_LOG_DIR="$HYBRID_AI_LOG_DIR" \
+            bash -c 'source scripts/lib/hybrid-ai-env.sh; printf "%s" "$BACKUP_LOG"')"
+          [ "$SYS_BACKUP_LOG" = "/var/log/hybrid-ai-backup/backup.log" ] \
+            || { echo "::error::system mode BACKUP_LOG is not the units' log: $SYS_BACKUP_LOG"; exit 1; }
+          RENDER_SYS="$(env BACKUP_LOG="$SYS_BACKUP_LOG" HYBRID_AI_BACKUP_MODE=system \
+            docker compose -f docker-compose.yml \
+                           -f openhands/docker-compose.openhands.yml \
+                           -f hermes/docker-compose.hermes.yml config)"
+          printf '%s\n' "$RENDER_SYS" | grep -q "source: $SYS_BACKUP_LOG" \
+            || { echo "::error::system mode status mount does not read $SYS_BACKUP_LOG"; exit 1; }
+          echo "System-mode status mount reads the units' log: $SYS_BACKUP_LOG"
+          rm -rf "$(dirname "$HYBRID_AI_LOG_DIR")"
 
       - name: Validate status/Caddyfile parses
         # The allowlist assertion below reads the Caddyfile as text, so it

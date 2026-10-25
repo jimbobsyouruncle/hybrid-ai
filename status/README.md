@@ -89,6 +89,22 @@ Each system check is a row with a state (`ok`, `warn`, `fail` or `info`), a one-
 | Deploy verification | The post-deploy verifier log | `ok` on `PASS`, `fail` on `FAIL`/`TIMEOUT`, `warn` when nothing is readable yet |
 | Data | `webui.db` (read-only) | `ok`, `warn` missing or unreadable |
 
+#### Backups
+
+The **Backups** tile reads the same log the backup system writes, mounted
+read-only as a single file at `/data/backup.log` (`BACKUP_LOG_PATH`). The host
+side of that mount is `${BACKUP_LOG:?BACKUP_LOG must be set - run ./install.sh}`:
+`scripts/lib/hybrid-ai-env.sh` resolves it once from the mode, and `install.sh`
+writes that resolved value into the stack env file. In system mode it is the
+units' `LogsDirectory=` file (`/var/log/hybrid-ai-backup/backup.log`); in user
+mode it is `$HYBRID_AI_LOG_DIR/backup.log`, exactly as before. Writer and reader
+therefore name one path, which is why `Backup: ok` appears after a real success.
+
+Three inputs degrade to `warn` instead of crashing or lying: a log that is
+absent, zero-byte, or unreadable by the container reports `no backup log found`.
+A log with history but no `event=backup_success` line reports `no successful
+backup recorded`.
+
 #### Deploy verification
 
 A deploy runs `scripts/run-post-deploy-verify.sh` in a transient unit after every deploy. That unit appends one block per run to its log: a header `waiting for <40-hex-sha> at <UTC-timestamp>`, then exactly one verdict — `PASS`, `FAIL: <detail>` or `TIMEOUT: <detail>`. The **Deploy verification** tile reads the **last** block:
@@ -213,7 +229,8 @@ It also means no build step: `app.py` is mounted read-only into the stock `pytho
 | Port 80 already in use | Another web server is running | `sudo ss -tlnp \| grep :80`; stop it, or change the published port in `docker-compose.yml` |
 | Containers show "not found" | Socket permissions | Confirm `DOCKER_GID` in `.env` matches `stat -c '%g' /var/run/docker.sock`, then re-run `./install.sh` |
 | Logs are empty on the page | The app cannot read the socket | Same as above — check `docker compose --env-file .env logs status` |
-| `backup.log` mounted as a directory | Docker created it before the file existed | `./install.sh` now detects and repairs this automatically. The host side is `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/backup.log` |
+| `backup.log` mounted as a directory | Docker created it before the file existed | `./install.sh` now detects and repairs this automatically. The host side is the resolved `BACKUP_LOG` (`${BACKUP_LOG:?BACKUP_LOG must be set - run ./install.sh}`) |
+| Backups says "no successful backup recorded" though backups succeed | The container is reading a different file than the units write | `BACKUP_LOG` must resolve to the units' log in system mode. Re-run `./install.sh` so the stack env file carries the resolved value; see `docs/TROUBLESHOOTING.md` |
 | Download button fails | The service errored while building | Check `docker compose --env-file .env logs status` |
 | Page loads but every check fails | The status container cannot reach the others | Confirm all are on the `hybrid-ai` network: `docker network inspect hybrid-ai` |
 
