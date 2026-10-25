@@ -303,6 +303,12 @@ sudo systemctl start hybrid-ai-backup-check.service      # monthly integrity che
 In system mode the log is `/var/log/hybrid-ai-backup/backup.log` (the same file
 `doctor.sh` reads), so watch it with `sudo grep '^EVENT' /var/log/hybrid-ai-backup/backup.log`.
 
+The status page reads that same file. `scripts/lib/hybrid-ai-env.sh` resolves
+`BACKUP_LOG` once from the mode, `install.sh` writes the resolved value into the
+stack env file, and `docker-compose.yml` mounts exactly that path read-only into
+the status container. There is one resolved path, not two: the reader cannot
+drift from the writer, so a real success shows as `Backup: ok`.
+
 ### Retention
 
 Seven daily, four weekly, six monthly snapshots — about 17 restore points covering six months, with deduplication meaning they cost far less than 17× a single backup. Override with `KEEP_DAILY`, `KEEP_WEEKLY`, `KEEP_MONTHLY`.
@@ -458,8 +464,10 @@ ONLY manual step; everything after it runs from the units. Card F must create:
    from the mode: in system mode it is `/var/log/hybrid-ai-backup/backup.log`,
    the units' `LogsDirectory=` (the one directory systemd grants write access to
    under `ProtectSystem=strict`); in user mode it stays
-   `$HYBRID_AI_LOG_DIR/backup.log`. `doctor.sh` reads the SAME resolved path, so
-   it watches the file the units actually write. The upload and check units each
+   `$HYBRID_AI_LOG_DIR/backup.log`. `doctor.sh` and the status page read the SAME
+   resolved path, so they watch the file the units actually write. The status
+   service's bind source is `${BACKUP_LOG:?...}`, written into the stack env file
+   by `install.sh`; an unset value refuses the compose parse. The upload and check units each
    carry `LogsDirectory=hybrid-ai-backup`; the capture unit already did.
 
    `HYBRID_AI_STACK_ENV_FILE` is pinned at the **0644 layout file**, not the

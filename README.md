@@ -649,7 +649,9 @@ The settings that already existed keep their names and defaults:
 `HYBRID_AI_GID`. One exception is mode-derived: `BACKUP_LOG` keeps its
 user-mode default (`$HYBRID_AI_LOG_DIR/backup.log`), but in system mode it
 resolves to the units' `LogsDirectory=` path,
-`/var/log/hybrid-ai-backup/backup.log`, the same file `doctor.sh` reads.
+`/var/log/hybrid-ai-backup/backup.log`, the same file `doctor.sh` reads and the
+same file the status page mounts (`docker-compose.yml` binds `${BACKUP_LOG:?...}`
+read-only, and `install.sh` writes the resolved value into the stack env file).
 
 A split layout for a dedicated system account looks like this (commented example
 in `.env.example`):

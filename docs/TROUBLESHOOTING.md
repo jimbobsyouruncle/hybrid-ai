@@ -119,8 +119,36 @@ curl -s http://localhost/status/api | jq '.jobs'
 | Port 80 in use, proxy will not start | Another web server on the Pi | `sudo ss -tlnp \| grep :80` |
 | Page loads, containers show "not found" | Socket group mismatch | Compare `DOCKER_GID` in `.env` with `stat -c '%g' /var/run/docker.sock`, then `./install.sh` |
 | Everything on the page fails | Status container cannot reach the others | `docker network inspect hybrid-ai` |
+| The Backups tile says "no successful backup recorded" although backups succeed | The status container is reading a different file than the backup units write. The reader and the writer must name ONE resolved path: `scripts/lib/hybrid-ai-env.sh` resolves `BACKUP_LOG` from the mode (system mode: the units' `LogsDirectory=` at `/var/log/hybrid-ai-backup/backup.log`; user mode: `$HYBRID_AI_LOG_DIR/backup.log`), `install.sh` writes that resolved value into the stack env file, and the status mount is `${BACKUP_LOG:?...}` | Confirm the value the helper resolves matches what compose mounted, then re-run `./install.sh` so the stack env file carries it. See [Relocated paths](#relocated-paths-split-layout) |
 
 Full detail in [`status/README.md`](../status/README.md). The status page is optional — chat works without it, which is why `doctor.sh` reports its absence as a warning rather than a failure.
+
+### "no successful backup recorded" but the backups work
+
+This is the single-path invariant. In system mode the backup units append to
+their `LogsDirectory=` file, `/var/log/hybrid-ai-backup/backup.log`. The status
+container reads whatever single file is bind-mounted at `/data/backup.log`.
+Both sides must be the same resolved path:
+
+1. `scripts/lib/hybrid-ai-env.sh` resolves `BACKUP_LOG` once from
+   `HYBRID_AI_BACKUP_MODE` (a set value still wins).
+2. `install.sh` STEP 8 writes `BACKUP_LOG=<resolved>` into the stack env file.
+3. `docker-compose.yml` mounts `${BACKUP_LOG:?...}` read-only into the status
+   service. An unset value refuses the parse rather than mounting a path nothing
+   writes.
+
+Check what was resolved and what compose renders:
+
+```bash
+bash -c 'source scripts/lib/hybrid-ai-env.sh; printf "%s\n" "$BACKUP_LOG"'
+docker compose --env-file .env -f docker-compose.yml config | grep -A2 'backup.log'
+```
+
+If the first command prints the units' log but the second shows an old
+`$HYBRID_AI_LOG_DIR/backup.log`, the stack env file predates the fix: re-run
+`./install.sh`. The status tile also reports `no backup log found` (rather than
+"no successful backup recorded") when the mounted file is absent, empty, or
+unreadable by the container.
 
 ---
 
@@ -1883,7 +1911,7 @@ Both the installer and the pod emit structured, greppable records of what happen
 | Log | Location | Contents |
 |---|---|---|
 | Installer | `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/install.log` on the Pi (gitignored, mode 0600) | One entry per `install.sh` run |
-| Backup | `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/backup.log` on the Pi | One entry per backup/restore run |
+| Backup | the resolved `BACKUP_LOG`: `${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/backup.log` in user mode, the units' `/var/log/hybrid-ai-backup/backup.log` in system mode | One entry per backup/restore run |
 | Pod | `/var/log/hybrid-ai-events.log` and the RunPod console | Pod lifecycle, watchdog, vLLM health |
 | Pipe | `docker compose --env-file .env -f docker-compose.yml -f openhands/docker-compose.openhands.yml -f hermes/docker-compose.hermes.yml logs open-webui` | Per-request outcomes |
 

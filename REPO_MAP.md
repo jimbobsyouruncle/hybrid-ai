@@ -145,6 +145,8 @@
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
 - scripts/test-run-post-deploy-verify.sh
 - scripts/test-sandbox-firewall.sh
+- scripts/test-status-backup-log-env.sh - FILE: scripts/test-status-backup-log-env.sh
+- scripts/test-status-backup-probe.sh - FILE: scripts/test-status-backup-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
 - scripts/test-uninstall.sh - FILE: scripts/test-uninstall.sh
 - scripts/uninstall.sh - FILE: scripts/uninstall.sh
@@ -158,4 +160,5 @@
 - status/Caddyfile
 - status/README.md - status/ — Status Page
 - status/app.py - FILE: status/app.py
+- status/test_backup_probe.py - FILE: status/test_backup_probe.py
 - status/test_deploy_verification.py - FILE: status/test_deploy_verification.py
