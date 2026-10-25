@@ -67,7 +67,7 @@ done
 REAL_JQ="$(command -v jq || true)"
 # The host-side bind doctor.sh expects when it reads the port bindings. Taken
 # from doctor.sh itself so the stub can never drift from the real check.
-BRIDGE_IP="$(sed -n 's/.*"\$BINDINGS" == \*"\([^:"]*\):\${OH_PORT}".*/\1/p' "$DOCTOR" | head -1)"
+BRIDGE_IP="$(sed -n "s/.*\"\\\$BINDINGS\" == \\*\"\\([^:\"]*\\):\\\${OH_PORT}\".*/\\1/p" "$DOCTOR" | head -1)"
 BRIDGE_IP="${BRIDGE_IP:-[IP_ADDRESS]}"
 
 WORK="$(mktemp -d)"
