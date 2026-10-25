@@ -214,6 +214,18 @@ Paths (both resolved in `scripts/lib/hybrid-ai-env.sh`):
 | Verifier | `/usr/local/sbin/run-post-deploy-verify.sh`, installed root:root 0755 by `install.sh` |
 | Log | `/var/log/hybrid-ai-post-deploy-verify.log`, appended by the transient unit |
 
+After the tree check the verifier also runs the **Backups tile gate**. It reads
+`BACKUP_LOG`, `BACKUP_GROUP_GID` and `LOCAL_DOMAIN` from the layout file as data
+(never sourced, values never printed), asserts the log is a regular non-empty
+file, probes readability **as the status container's identity** by dropping from
+root with `setpriv` (uid 1000, primary gid 999, supplementary
+`BACKUP_GROUP_GID`) — a root read is never claimed as a pass — and queries
+`GET /status/api` through Caddy's `status.{$LOCAL_DOMAIN}` route with
+`--resolve` to loopback. It FAILs (exit 1) when the Backups tile is `warn` while
+the writer's log holds `event=backup_success`, and when the log is missing or
+empty. A probe it cannot run prints a `skip:` note on stderr and leaves the
+verdict to the probes that did run.
+
 The hook is a warning, never a gate. All three paths leave the deploy's exit
 code untouched: scheduled, scheduling failed
 (`::warning::post-deploy verification could not be scheduled`), and script

@@ -241,7 +241,8 @@ services:
   #   - It is given NO credentials. Not .env, not an API key, nothing. It
   #     cannot leak what it was never given.
   #   - Its filesystem is read-only, it drops every Linux capability, and it
-  #     runs as an unprivileged user.
+  #     runs as an unprivileged user. Its ONLY supplementary group is the
+  #     backup account's gid, so it can read the 0640 backup log (BACKUP_GROUP_GID).
   #   - It mounts only what it measures: webui_data and two log files, all
   #     read-only.
   #   - Docker socket access is read-only AND the app only ever issues GET
@@ -300,6 +301,15 @@ services:
     dns:
       - 100.100.100.100
     user: "${HYBRID_AI_UID:-${STATUS_UID:-1000}}:${DOCKER_GID:-999}"
+    # Exactly ONE supplementary group: the backup account's gid, so the
+    # read-only backup log (0640, group hybrid-ai-backup) is readable without
+    # widening the file to the world and without running this service as root.
+    # In user mode install.sh writes the same value as the primary gid, so the
+    # container gains no access it did not already have. Fail-closed for the
+    # same reason as BACKUP_LOG: an unset value would silently leave the
+    # Backups tile blind.
+    group_add:
+      - "${BACKUP_GROUP_GID:?BACKUP_GROUP_GID must be set - run ./install.sh}"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

@@ -480,7 +480,18 @@ cleanup() {
 trap cleanup EXIT
 trap 'die "Failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
 
-touch "$BACKUP_LOG" 2>/dev/null && chmod 600 "$BACKUP_LOG" 2>/dev/null || true
+# The log's mode follows the mode. In system mode the status container reads
+# this file as a NON-owner (uid 1000, plus exactly one supplementary gid), so
+# group-read on the backup account's group is what makes the tile work; the file
+# is never world-readable. User mode keeps 0600, byte-identical to before.
+if [[ "$HYBRID_AI_BACKUP_MODE" == "system" ]]; then
+  LOG_MODE=640
+else
+  LOG_MODE=600
+fi
+if touch "$BACKUP_LOG" 2>/dev/null; then
+  chmod "$LOG_MODE" "$BACKUP_LOG" 2>/dev/null || true
+fi
 
 # Which backup unit names apply? The shared helper resolved them from
 # HYBRID_AI_BACKUP_MODE, so this script and doctor.sh/install.sh cannot

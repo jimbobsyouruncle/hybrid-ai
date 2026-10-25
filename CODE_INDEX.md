@@ -359,6 +359,12 @@
 - usage_refuse()
 - finish()
 - resolve_app_dir()
+- gate_skip()
+- layout_value()
+- log_has_success()
+- probe_read_as_status()
+- probe_tile()
+- check_backup_tile()
 - probe_runs()
 - conclusion_list()
 
@@ -645,6 +651,7 @@
 - make_tree()
 - write_layout()
 - run_verify()
+- write_gate_layout()
 
 ## scripts/test-sandbox-firewall.sh
 - ok()
@@ -758,6 +765,7 @@
 - def probe_pod()
 - def probe_resources()
 - def probe_models()
+- def _owner_ids(path)
 - def probe_backups()
 - def probe_deploy_verification()
 - def probe_data()
@@ -789,6 +797,7 @@
 - def remove()
 - def shape(tile)
 - def ts_hours_ago(hours)
+- def probe_backups_as(uid, gid)
 
 ## status/test_deploy_verification.py
 - def ok(msg)

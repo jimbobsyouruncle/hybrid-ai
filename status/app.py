@@ -336,10 +336,29 @@ def probe_models() -> Dict[str, Any]:
                 "hint": "Check the ollama container logs."}
 
 
+ABSENT_BACKUP_DETAIL = "no backup log found"
+UNREADABLE_BACKUP_DETAIL = "backup log not readable"
+EMPTY_BACKUP_DETAIL = "backup log is empty"
+NO_SUCCESS_BACKUP_DETAIL = "no successful backup recorded"
+
+
+def _owner_ids(path: str) -> str:
+    """Owner uid:gid of the log, or "owner unknown" if stat itself fails.
+
+    Numeric ids only: the tile already names the path, and nothing here adds a
+    host account name or file content.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return "owner unknown"
+    return f"owner {st.st_uid}:{st.st_gid}"
+
+
 def probe_backups() -> Dict[str, Any]:
     if not os.path.exists(BACKUP_LOG):
         return {"name": "Backups", "state": "warn",
-                "detail": "no backup log found",
+                "detail": ABSENT_BACKUP_DETAIL,
                 "hint": "Configure backups by re-running ./install.sh."}
     last: Optional[str] = None
     failures = 0
@@ -363,22 +382,26 @@ def probe_backups() -> Dict[str, Any]:
                 elif "event=backup_incomplete" in line:
                     incomplete += 1
     except OSError:
-        # Unreadable is indistinguishable from absent for this tile: both mean
-        # "there is nothing to report", never a crash.
+        # A log that EXISTS but cannot be opened is a DIFFERENT fault from an
+        # absent one: the backups may be fine and the reader blind. Say so, and
+        # name the identity that failed and the file's owner so the fix (one
+        # supplementary gid, or a log mode) is obvious from the tile.
         return {"name": "Backups", "state": "warn",
-                "detail": "no backup log found",
-                "hint": "Configure backups by re-running ./install.sh."}
+                "detail": (f"{UNREADABLE_BACKUP_DETAIL} — permission denied for "
+                           f"uid {os.geteuid()}, {_owner_ids(BACKUP_LOG)}"),
+                "hint": ("Give the status container read access: BACKUP_GROUP_GID "
+                         "must be the backup group's gid.")}
 
-    # A zero-byte file (a bind source Docker created empty) has no history yet,
-    # so it reads the same as an absent file rather than as a failed backup.
+    # A zero-byte file (a bind source Docker created empty) has no history yet.
+    # It is neither absent nor unreadable, so it says exactly what it is.
     if read_lines == 0:
         return {"name": "Backups", "state": "warn",
-                "detail": "no backup log found",
-                "hint": "Configure backups by re-running ./install.sh."}
+                "detail": EMPTY_BACKUP_DETAIL,
+                "hint": "The log exists but holds no lines yet; run ./backup/backup.sh."}
 
     if not last:
         return {"name": "Backups", "state": "warn",
-                "detail": "no successful backup recorded",
+                "detail": NO_SUCCESS_BACKUP_DETAIL,
                 "hint": "Run one now: ./backup/backup.sh"}
     try:
         when = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)

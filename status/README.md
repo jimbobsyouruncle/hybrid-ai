@@ -85,7 +85,7 @@ Each system check is a row with a state (`ok`, `warn`, `fail` or `info`), a one-
 | Containers | Docker socket (GET only) | `ok` running, `warn` not found / unhealthy, `info` stopped |
 | Resources | Disk and memory | `ok`, `warn` above 80 %, `fail` above 90 % |
 | Local models | Ollama `/api/tags` | `ok`, `warn` none installed, `fail` unreachable |
-| Backups | `backup.log` | `ok` within 36 h, `warn` within 168 h, `fail` older |
+| Backups | `backup.log` | `ok` within 36 h, `warn` within 168 h, `fail` older; `warn` when the log is absent, unreadable or empty |
 | Deploy verification | The post-deploy verifier log | `ok` on `PASS`, `fail` on `FAIL`/`TIMEOUT`, `warn` when nothing is readable yet |
 | Data | `webui.db` (read-only) | `ok`, `warn` missing or unreadable |
 
@@ -100,10 +100,30 @@ units' `LogsDirectory=` file (`/var/log/hybrid-ai-backup/backup.log`); in user
 mode it is `$HYBRID_AI_LOG_DIR/backup.log`, exactly as before. Writer and reader
 therefore name one path, which is why `Backup: ok` appears after a real success.
 
-Three inputs degrade to `warn` instead of crashing or lying: a log that is
-absent, zero-byte, or unreadable by the container reports `no backup log found`.
-A log with history but no `event=backup_success` line reports `no successful
-backup recorded`.
+A log the container cannot open, a log that does not exist, and a log that
+exists but is empty are three different faults, so the tile gives three
+different messages. Each one is `warn`; none is ever reported as `ok`.
+
+| Situation | Detail | Hint says |
+|---|---|---|
+| The mounted path does not exist | `no backup log found` | Re-run `./install.sh` |
+| The file exists but `open()` raises `OSError` | `backup log not readable — permission denied for uid <n>, owner <uid>:<gid>` | `BACKUP_GROUP_GID` must be the backup group's gid |
+| The file exists but holds no lines | `backup log is empty` | Run `./backup/backup.sh` |
+| Lines exist, no `event=backup_success` | `no successful backup recorded` | Run one now: `./backup/backup.sh` |
+
+The unreadable case names the reader's uid and the file's **numeric** owner ids
+from `os.stat` — the same kind of detail the tile already shows, and no path or
+file content beyond it. This matters because the two cases used to look
+identical: a host whose backups worked but whose log the container could not
+read reported the same quiet message as a host with no log at all.
+
+The reader reaches the log through exactly one supplementary group. In system
+mode the writer keeps the log at mode **0640** owned by `hybrid-ai-backup`, and
+`docker-compose.yml` gives this service that group's gid through
+`BACKUP_GROUP_GID` (`group_add`). The service still runs as uid 1000, keeps its
+primary gid for the Docker socket, drops every capability, and stays read-only
+with `no-new-privileges`. In user mode `BACKUP_GROUP_GID` is the container's own
+primary gid, so it gains nothing.
 
 #### Deploy verification
 

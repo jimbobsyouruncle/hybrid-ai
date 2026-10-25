@@ -9,9 +9,9 @@
 #
 #   WHY THE TILE IS PINNED: the status mount now derives its source from
 #   BACKUP_LOG, the same path the backup units write. This suite keeps the
-#   reader's half of that contract honest -- an absent, empty or unreadable log
-#   degrades to a warn instead of raising, and a fresh success genuinely shows
-#   as `Backup: ok`.
+#   reader's half of that contract honest -- absent, unreadable and empty are
+#   three DISTINCT warn messages, never one vague "no log" that hides a broken
+#   read -- and a fresh success genuinely shows as `Backup: ok`.
 #
 # USAGE:
 #   bash scripts/test-status-backup-probe.sh

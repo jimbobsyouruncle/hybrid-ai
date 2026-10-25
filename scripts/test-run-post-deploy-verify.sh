@@ -44,20 +44,31 @@ fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 cat > "$BINDIR/curl" <<'EOF'
 #!/usr/bin/env bash
 out=""
+url=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    --max-time|-A) shift 2 ;;
+    --max-time|-A|--resolve) shift 2 ;;
     -w|-sS) shift ;;
+    http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
+# The status API is a different endpoint from the GitHub API: a case sets
+# CURL_TILE_CODE/CURL_TILE_BODY to control the Backups tile, or CURL_TILE_CODE=000
+# to make the service unreachable.
+if [[ "$url" == *"/status/api"* ]]; then
+  [[ -n "$out" ]] && printf '%s' "${CURL_TILE_BODY:-}" > "$out"
+  printf '%s' "${CURL_TILE_CODE:-200}"
+  exit 0
+fi
 [[ -n "$out" ]] && printf '%s' "${CURL_STUB_BODY:-}" > "$out"
 printf '%s' "${CURL_STUB_CODE:-200}"
 exit 0
 EOF
 
-# jq: answer only the two filters the verifier uses. Rows come from JQ_STUB_ROWS.
+# jq: answer only the filters the verifier uses. Rows come from JQ_STUB_ROWS; the
+# Backups tile state comes from JQ_STUB_TILE.
 cat > "$BINDIR/jq" <<'EOF'
 #!/usr/bin/env bash
 mode=""
@@ -65,11 +76,13 @@ for a in "$@"; do
   case "$a" in
     *'has("workflow_runs")'*) mode=has ;;
     *'workflow_runs[]'*) mode=rows ;;
+    *'Backups'*) mode=tile ;;
   esac
 done
 case "$mode" in
   has) exit "${JQ_STUB_HAS_EXIT:-0}" ;;
   rows) printf '%b' "${JQ_STUB_ROWS:-}"; exit 0 ;;
+  tile) printf '%s' "${JQ_STUB_TILE:-}"; exit 0 ;;
   *) exit 1 ;;
 esac
 EOF
@@ -142,7 +155,10 @@ run_verify() {
 
   rm -f "$GIT_CALL_LOG"
   set +e
-  env "${env_args[@]}" GIT_CALL_LOG="$GIT_CALL_LOG" \
+  # Scrub the gate's inputs so a value leaked into the caller's environment
+  # cannot make a case pass: the layout file must be the only source here.
+  env -u BACKUP_LOG -u BACKUP_GROUP_GID -u LOCAL_DOMAIN -u VERIFY_STATUS_UID \
+    -u VERIFY_STATUS_GID "${env_args[@]}" GIT_CALL_LOG="$GIT_CALL_LOG" \
     "$VERIFY_SCRIPT" --wait-for "$SHA_A" > "$WORKDIR/out" 2>&1
   RC=$?
   set -e
@@ -210,6 +226,71 @@ if [[ "$RESOLVED" == "/workspace" ]]; then
 else
   fail "expected a non-absolute layout value to be ignored, resolved '$RESOLVED'"
 fi
+
+# --- Backups tile gate ------------------------------------------------------
+# These cases need a layout file that names the log, the supplementary gid and
+# the domain, plus a real log file. They run as whoever runs the suite; the
+# readability probe then prints a skip note (it never claims a root read as a
+# pass), so the verdict is driven by (a) the file check and (c) the tile query,
+# which is exactly the contract.
+BLOG="$WORKDIR/backup.log"
+write_gate_layout() { # <app-dir> <log-path>
+  printf 'HYBRID_AI_APP_DIR=%s\n' "$1" > "$LAYOUT"
+  printf 'BACKUP_LOG=%s\n' "$2" >> "$LAYOUT"
+  printf 'BACKUP_GROUP_GID=982\n' >> "$LAYOUT"
+  printf 'LOCAL_DOMAIN=example.test\n' >> "$LAYOUT"
+}
+
+printf 'EVENT ts=2026-01-01T00:00:00Z event=backup_success detail=stub\n' > "$BLOG"
+
+# Case 7: the writer's log holds a success but the live tile says warn -> FAIL.
+# This is the whole point of the gate: a release that leaves the reader blind.
+write_gate_layout "$TREE_A" "$BLOG"
+export CURL_TILE_CODE=200 JQ_STUB_TILE=warn
+run_verify "__unset__" "$LAYOUT"
+if [[ "$RC" -eq 1 ]] \
+   && grep -qxF 'FAIL: the backup log records event=backup_success but the Backups tile reports warn' <<<"$OUT"; then
+  pass "log success + warn tile -> FAIL exit 1"
+else
+  fail "expected the blind-tile FAIL, got rc $RC, out '$OUT'"
+fi
+
+# Case 8: the same log, a healthy tile -> the verdict is unchanged (PASS).
+export JQ_STUB_TILE=ok
+run_verify "__unset__" "$LAYOUT"
+if [[ "$RC" -eq 0 ]] && grep -qx 'PASS' <<<"$OUT"; then
+  pass "log success + ok tile -> PASS exit 0 (verdict unchanged)"
+else
+  fail "expected PASS with a healthy tile, got rc $RC, out '$OUT'"
+fi
+
+# Case 9: an unreachable status API is a skip note, never a pass or a FAIL on
+# its own account -- with a healthy tree the verdict stays PASS.
+export CURL_TILE_CODE=000 JQ_STUB_TILE=""
+run_verify "__unset__" "$LAYOUT"
+if [[ "$RC" -eq 0 ]] && grep -qx 'PASS' <<<"$OUT"; then
+  if grep -q 'skip: the status API was unreachable' <<<"$OUT"; then
+    pass "unreachable status API -> skip note, verdict unchanged (PASS)"
+  else
+    fail "an unreachable API did not print a skip note: '$OUT'"
+  fi
+else
+  fail "an unreachable API should not change the verdict: rc $RC, out '$OUT'"
+fi
+
+# Case 10: the log is not a regular, non-empty file -> FAIL, because the reader
+# can never work from it whatever the tile says.
+: > "$BLOG"
+export CURL_TILE_CODE=200 JQ_STUB_TILE=ok
+run_verify "__unset__" "$LAYOUT"
+if [[ "$RC" -eq 1 ]] \
+   && grep -qxF 'FAIL: the backup log is not a regular, non-empty file' <<<"$OUT"; then
+  pass "empty backup log -> FAIL exit 1"
+else
+  fail "expected the empty-log FAIL, got rc $RC, out '$OUT'"
+fi
+printf 'EVENT ts=2026-01-01T00:00:00Z event=backup_success detail=stub\n' > "$BLOG"
+unset CURL_TILE_CODE JQ_STUB_TILE
 
 echo "== done =="
 if [[ "$failures" -ne 0 ]]; then
