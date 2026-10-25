@@ -46,9 +46,20 @@ set -Eeuo pipefail
 #
 #   IDEMPOTENT, AND IT NEVER TOUCHES A FOREIGN RULE. Each rule this script owns
 #   carries the comment tag below. Before inserting, the script checks for the
-#   exact rule with `-C`; if it is already there, nothing is added. There is no
-#   flush, no delete and no chain removal anywhere. Rules inserted by Docker,
-#   by another tool, or by hand survive byte-untouched.
+#   exact rule with `-C`; if it is already there, nothing is added. A rule
+#   inserted by Docker, by another tool, or by hand is left byte-untouched: the
+#   only rule the script ever deletes is one the current RULES set itself
+#   generates, and it deletes those only on the repair path below. There is no
+#   flush and no chain removal anywhere.
+#
+#   PARTIAL STATE IS REPAIRED, NOT PATCHED OVER. A chain may hold some, but not
+#   all, of the owned rules: an interrupted apply, a hand-edit, or a release
+#   whose rule set changed. Prepending only the missing rules would put each at
+#   the head of the chain, so a missing DROP could land above the DNS ACCEPTs.
+#   When the script sees that state it deletes every owned rule and applies the
+#   whole set again through the same bottom-up path a fresh host uses, which is
+#   what reproduces the written order. Owned rules only: a tagged rule outside
+#   the current policy is never deleted, and is reported instead.
 #
 #   ORDERING. Every owned ACCEPT is kept strictly above every owned DROP, so no
 #   drop can swallow an accepted path. That matters most for the DNS ACCEPT: its
@@ -72,12 +83,12 @@ set -Eeuo pipefail
 #   everything else alone.
 #
 # EXIT CODES:
-#   0  rules present (some added, or all already present)
+#   0  rules present (some added, repaired, or all already present)
 #   1  the ordering self-check found an owned ACCEPT below an owned DROP
 #   2  bad usage
 #   3  iptables is not installed
 #   4  the DOCKER-USER chain does not exist (Docker is not up yet)
-#   5  iptables refused an insert
+#   5  iptables refused an insert, or a repair could not complete a delete
 # ---------------------------------------------------------------------------
 
 readonly TAG="hybrid-ai-sandbox-egress"
@@ -184,34 +195,13 @@ done
 # docker0 is not a routable path, so `! -i lo` is the whole guard.
 RULES+=("! -i lo -o docker0 -m comment --comment $TAG -j DROP")
 
-added=0
-present=0
-
-apply_rule() {
-  local -a rule=("$@")
-  if "${IPT[@]}" -C "$CHAIN" "${rule[@]}" >/dev/null 2>&1; then
-    present=$(( present + 1 ))
-    return 0
-  fi
-  if ! "${IPT[@]}" -I "$CHAIN" 1 "${rule[@]}" >/dev/null; then
-    printf 'sandbox-firewall: iptables refused to insert a rule into %s.\n' "$CHAIN" >&2
-    exit 5
-  fi
-  added=$(( added + 1 ))
-}
-
-# Insert bottom-up, so the chain ends in the order RULES was written.
-for (( idx = ${#RULES[@]} - 1; idx >= 0; idx-- )); do
-  read -r -a rule <<< "${RULES[idx]}"
-  apply_rule "${rule[@]}"
-done
-
-# -- Ordering self-check ----------------------------------------------------
-# Read the chain back: no ACCEPT this run installed may sit below a DROP it
-# installed, because a drop above an accept silently swallows the path the
-# accept was there to open. Only rules in the current set count: a tagged rule
-# outside the current policy is not ours to judge and is never deleted, so it is
-# reported for inspection instead of failing every boot.
+# -- Rule identity ----------------------------------------------------------
+# The set this script owns is exactly RULES, and nothing else. A chain rule is
+# recognised as ours by normalising it into the form a chain listing prints and
+# comparing that with the same normalisation of a RULES member. The apply path
+# uses the test to skip a rule that is already there; the repair path uses the
+# same test to decide which rules it may remove, so it can never reach past the
+# owned set.
 #
 # Spelled in two pieces: it is text in a message, not an invocation, and the
 # static check that every iptables call carries the lock wait must keep matching
@@ -301,11 +291,88 @@ is_owned() { # rule-line with the "-A CHAIN " prefix already stripped
   return 1
 }
 
+# -- Apply ------------------------------------------------------------------
+added=0
+present=0
+
+apply_rule() {
+  local -a rule=("$@")
+  if "${IPT[@]}" -C "$CHAIN" "${rule[@]}" >/dev/null 2>&1; then
+    present=$(( present + 1 ))
+    return 0
+  fi
+  if ! "${IPT[@]}" -I "$CHAIN" 1 "${rule[@]}" >/dev/null; then
+    printf 'sandbox-firewall: iptables refused to insert a rule into %s.\n' "$CHAIN" >&2
+    exit 5
+  fi
+  added=$(( added + 1 ))
+}
+
+# The chain as it stands now, printed in the listing form. The listing does not
+# echo the text that built a rule, so every comparison below goes through the
+# same normalisation the identity test uses.
+listing="$("${IPT[@]}" -S "$CHAIN" 2>/dev/null || true)"
+line_prefix="-A $CHAIN "
+
+owned_present=0
+while IFS= read -r line; do
+  [[ "$line" == "$line_prefix"* ]] || continue
+  body="${line#"$line_prefix"}"
+  [[ "$body" == *"$TAG"* ]] || continue
+  is_owned "$body" || continue
+  owned_present=$(( owned_present + 1 ))
+done <<< "$listing"
+
+# The owned set is incomplete exactly when the chain holds fewer owned rules
+# than RULES generates. A tagged rule the identity test rejects is not counted,
+# so an out-of-policy rule can neither trigger a repair nor hide one.
+owned_missing=0
+if (( owned_present < ${#OWNED[@]} )); then
+  owned_missing=1
+fi
+
+# A chain that holds some, but not all, of the owned rules is a partially
+# applied host: an interrupted run, a hand-edit, or a release whose rule set
+# changed. Prepending the missing rules one by one would put each at the head
+# of the chain, so a missing DROP can land above the DNS ACCEPTs and the
+# ordering self-check then fails on every deploy. Delete every owned rule and
+# re-apply the whole set through the bottom-up path below, which is the only
+# thing that reproduces the written order.
+#
+# The delete is scoped by the identity test: it removes a rule only when that
+# rule is one RULES generates. A tagged rule from an older release is not owned,
+# so it is left in place and reported by the self-check below, exactly as before.
+if (( owned_missing && owned_present > 0 )); then
+  printf 'sandbox-firewall: %s holds %d of %d owned rules; re-applying the full set to restore the written order.\n' \
+    "$CHAIN" "$owned_present" "${#OWNED[@]}"
+  # Bottom-up, so deleting at position 1 never shifts a rule still to come.
+  for (( idx = ${#RULES[@]} - 1; idx >= 0; idx-- )); do
+    read -r -a rule <<< "${RULES[idx]}"
+    while "${IPT[@]}" -C "$CHAIN" "${rule[@]}" >/dev/null 2>&1; do
+      if ! "${IPT[@]}" -D "$CHAIN" "${rule[@]}" >/dev/null; then
+        printf 'sandbox-firewall: iptables refused to delete an owned rule from %s.\n' "$CHAIN" >&2
+        exit 5
+      fi
+    done
+  done
+fi
+
+# Insert bottom-up, so the chain ends in the order RULES was written.
+for (( idx = ${#RULES[@]} - 1; idx >= 0; idx-- )); do
+  read -r -a rule <<< "${RULES[idx]}"
+  apply_rule "${rule[@]}"
+done
+
+# -- Ordering self-check ----------------------------------------------------
+# Read the chain back: no ACCEPT may sit below a DROP, because a drop above an
+# accept silently swallows the path the accept was there to open. Only rules in
+# the current set count: a tagged rule outside the current policy is not ours to
+# judge and is never deleted, so it is reported for inspection instead of
+# failing every boot. The listing read above predates the apply, so re-read it.
 listing="$("${IPT[@]}" -S "$CHAIN" 2>/dev/null || true)"
 pos=0
 first_drop=0
 last_accept=0
-line_prefix="-A $CHAIN "
 while IFS= read -r line; do
   pos=$(( pos + 1 ))
   [[ "$line" == *"$TAG"* ]] || continue

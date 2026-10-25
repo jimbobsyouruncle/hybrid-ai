@@ -238,10 +238,13 @@ Loopback is untouched — the external-to-`docker0` DROP carries `! -i lo` and t
 `docker0`-to-networks DROPs match `-i docker0` — so the loopback-only OpenHands UI stays
 reachable over an SSH tunnel or Tailscale.
 
-The script is idempotent and inserts nothing when a rule is already present. It never
-flushes, deletes or removes a chain, so rules owned by Docker or by an operator survive
-untouched. It is applied by `install.sh` and `scripts/deploy-remote.sh` after the stack is
-up, and re-applied on every boot by `hybrid-ai-firewall.service`.
+The script is idempotent. It inserts nothing when a rule is already present. When the chain
+holds only some of the owned rules it repairs it: it deletes every owned rule and applies the
+full set again, so the written order is restored rather than the missing rules landing at the
+head of the chain. The only rule it ever deletes is one the current `RULES` set itself
+generates. It never flushes the chain and never removes a chain, so rules owned by Docker or
+by an operator survive untouched. It is applied by `install.sh` and `scripts/deploy-remote.sh`
+after the stack is up, and re-applied on every boot by `hybrid-ai-firewall.service`.
 
 `./doctor.sh` inspects the chain read-only (`iptables -S DOCKER-USER`) and warns when a rule
 is missing. The check is warning-only by design and never contributes to exit 2; it prints a
