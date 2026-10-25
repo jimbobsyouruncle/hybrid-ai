@@ -682,6 +682,7 @@ fi
 OH_PORT="$(env_get OPENHANDS_PORT)"
 OH_PORT="${OH_PORT:-3001}"
 OH_RUNNING=0
+declare -a SANDBOXES=()
 [[ "$(docker inspect -f '{{.State.Status}}' hybrid-ai-openhands 2>/dev/null)" == "running" ]] && OH_RUNNING=1
 if (( OH_RUNNING )); then
   if curl -fsS --max-time 5 "http://127.0.0.1:${OH_PORT}" >/dev/null 2>&1; then
@@ -720,6 +721,67 @@ else
   warn "Status page not reachable on port 80" \
        "Optional feature. Chat still works on :3000. Check: docker logs --tail 30 hybrid-ai-proxy; docker logs --tail 30 hybrid-ai-status"
 fi
+
+# --- Pinned sandbox image reaches the app-server, and the sandboxes --------
+# The stack pins the hybrid agent-server image, but two independent things
+# can leave a stock image running: the env pair never reaching the app-server
+# (host .env carries explicit OPENHANDS_AGENT_IMAGE_* values), or the
+# app-server build ignoring the override. Neither is visible from the UI, so
+# this probe compares the container env AND every live sandbox's real image
+# against the resolved pin. It is WARNING-ONLY: warn/pass/skip, never fail().
+# Anything it cannot read is a skip, so a host without Docker stays quiet.
+sandbox_image_probe() {  # uses the SANDBOXES array already collected above
+  local repo_want tag_want want skip seen_repo seen_tag unreadable=() drift=0 sb img
+  repo_want="$(env_get OPENHANDS_AGENT_IMAGE_REPOSITORY)"
+  repo_want="${repo_want:-ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid}"
+  tag_want="$(env_get OPENHANDS_AGENT_IMAGE_TAG)"
+  tag_want="${tag_want:-1.37.1-python-hybrid.3}"
+  want="${repo_want}:${tag_want}"
+
+  skip=""
+  if ! command -v docker >/dev/null 2>&1; then
+    skip="docker is not installed"
+  elif ! docker inspect -f '{{.Id}}' hybrid-ai-openhands >/dev/null 2>&1; then
+    skip="cannot read the app-server container hybrid-ai-openhands"
+  fi
+  if [[ -n "$skip" ]]; then
+    (( QUIET )) || printf '  %s-%s sandbox image check skipped (%s)\n' "$C_DIM" "$C_RST" "$skip"
+    return 0
+  fi
+
+  seen_repo="$(container_env hybrid-ai-openhands AGENT_SERVER_IMAGE_REPOSITORY)"
+  seen_tag="$(container_env hybrid-ai-openhands AGENT_SERVER_IMAGE_TAG)"
+  if [[ "${seen_repo}:${seen_tag}" == "$want" ]]; then
+    pass "App-server carries the pinned sandbox image env (${want})"
+  else
+    warn "OpenHands app-server does not carry the pinned sandbox image env" \
+         "Running container has AGENT_SERVER_IMAGE_REPOSITORY=${seen_repo:-unset} and AGENT_SERVER_IMAGE_TAG=${seen_tag:-unset}; the pin resolves to ${want}. A host .env with explicit OPENHANDS_AGENT_IMAGE_* values overrides the default: unset them by name, then re-run ./install.sh so the overlay env is recreated, and start a NEW conversation."
+  fi
+
+  for sb in "${SANDBOXES[@]}"; do
+    img="$(docker inspect -f '{{.Config.Image}}' "$sb" 2>/dev/null)"
+    if [[ -z "$img" ]]; then
+      unreadable+=("$sb")
+      continue
+    fi
+    if [[ "$img" != "$want" ]]; then
+      drift=$(( drift + 1 ))
+      warn "${sb} runs image ${img}, not the pinned ${want}" \
+           "A sandbox keeps the config it was created with, so fixing the env never reaches it: start a NEW conversation (and remove the old one: docker rm -f ${sb}). If a FRESH sandbox still runs ${img} while the app-server carries ${want}, the app-server build does not honour the override - report that finding and investigate upstream at the deployed app-server tag, or bump the pin. Do not patch around it here."
+    fi
+  done
+
+  if (( ${#SANDBOXES[@]} == 0 )); then
+    pass "Sandbox image pin ${want}: no live sandbox to compare yet (one starts with each new conversation)"
+  elif (( drift == 0 && ${#unreadable[@]} == 0 )); then
+    pass "Every live sandbox runs the pinned image ${want}"
+  fi
+  if (( ${#unreadable[@]} > 0 )); then
+    (( QUIET )) || printf '  %s-%s sandbox image check skipped for %d sandbox(es): cannot read the container image (%s)\n' \
+      "$C_DIM" "$C_RST" "${#unreadable[@]}" "${unreadable[*]}"
+  fi
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # 5. OpenHands sandbox wiring
@@ -826,6 +888,9 @@ if (( OH_RUNNING )); then
   if (( ${#SANDBOXES[@]} == 0 )); then
     pass "No sandbox running (one starts with each new conversation)"
   fi
+
+  sandbox_image_probe
+
   for sb in "${SANDBOXES[@]}"; do
     WH="$(container_env "$sb" OH_WEBHOOKS_0_BASE_URL)"
     if [[ "$WH" == *":${OH_PORT}/"* ]]; then
@@ -918,6 +983,11 @@ if (( OH_RUNNING )); then
       pass "No root-owned files at the top of the workspace"
     fi
   fi
+else
+  # The app-server is not running, so section 5 cannot inspect containers --
+  # but the image pin is still checkable, and a stock sandbox left over from
+  # before the cut-over is exactly the drift this probe exists to surface.
+  sandbox_image_probe
 fi
 
 # ---------------------------------------------------------------------------
