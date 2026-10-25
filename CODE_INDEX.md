@@ -116,6 +116,7 @@
 - env_key_state()
 - container_env()
 - install_hint()
+- sandbox_image_probe()
 - grace_epoch()
 
 ## hermes/Dockerfile
@@ -562,6 +563,16 @@
 - count_of()
 - run_doctor()
 - check_skip_flavour()
+
+## scripts/test-doctor-sandbox-image.sh
+- pass()
+- fail()
+- summary_count()
+- run_doctor()
+- check_env_flavour()
+- run_pair()
+- check_skip_flavour()
+- run_no_docker()
 
 ## scripts/test-doctor-startup-grace.sh
 - pass()

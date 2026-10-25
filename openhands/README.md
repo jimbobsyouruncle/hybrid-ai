@@ -365,6 +365,49 @@ still runs as the unprivileged `openhands` account.
   the migration already rewrote it. A rollback must re-set the old pin in `.env`
   (or unset both variables) and re-run `install.sh`.
 
+**`./doctor.sh` now detects drift.** A live sandbox was seen running the stock
+`docker.openhands.dev/openhands/agent-server:1.33.0-python` (no shellcheck, no
+semgrep) even though the stack had defaulted to the hybrid pin since
+2026-10-19. Two different faults look identical from the UI, so the
+"OpenHands sandbox" section grew a warn-only probe. It resolves the expected
+pin from `OPENHANDS_AGENT_IMAGE_REPOSITORY` / `OPENHANDS_AGENT_IMAGE_TAG`
+(same defaults as `install.sh`, so the two cannot disagree), then:
+
+1. reads `AGENT_SERVER_IMAGE_REPOSITORY` and `AGENT_SERVER_IMAGE_TAG` from the
+   `hybrid-ai-openhands` container and compares the pair with the pin;
+2. reads every live `oh-agent-server-*` container's real image with
+   `docker inspect -f '{{.Config.Image}}'` and compares it with
+   `repository:tag`.
+
+The two warn branches mean different things:
+
+- **`OpenHands app-server does not carry the pinned sandbox image env`** — the
+  env never reached the app-server. The host `.env` carries explicit
+  `OPENHANDS_AGENT_IMAGE_*` values, which `${VAR:-default}` in `install.sh`
+  preserves on every deploy.
+- **`<sandbox> runs image <stock>, not the pinned <pin>`** — a sandbox keeps
+  the config it was created with, so an env fix never reaches a running one.
+  If a **fresh** sandbox is still stock while the app-server carries the
+  hybrid pair, then the app-server build does not honour the override. That is
+  a finding to report and investigate upstream at the deployed app-server tag
+  (or answer with a pin bump) — not something to patch around in this stack.
+
+The probe is warning-only: it calls `warn`/`pass` and a skip note, never
+`fail()`, so it can never turn a deploy red. Docker absent, `docker inspect`
+failing, or `hybrid-ai-openhands` missing each print a skip note and leave the
+exit code untouched.
+
+**Post-merge decision tree:**
+
+| What doctor reports | Meaning | What to do |
+|---|---|---|
+| app env ≠ hybrid pair | host `.env` carries explicit `OPENHANDS_AGENT_IMAGE_*` | unset them by name, re-run `./install.sh`, start a fresh sandbox |
+| app env = hybrid pair, but a fresh sandbox is stock | the app-server build ignores the override | investigate upstream at the deployed app-server tag, or bump the pin |
+| app env and every sandbox are hybrid | the earlier stock observation was a stale pre-cutover sandbox | remove stale sandboxes and re-check |
+
+`scripts/test-doctor-sandbox-image.sh` proves all of this offline against a
+fixture-driven docker stub, without a daemon or network.
+
 **Publishing is automatic on a merge to `main`.** A push to `main` that changes
 `openhands/agent-server/Dockerfile` builds and pushes the image with no human in
 the loop. The tag is not supplied by hand: it is read from the `default:` of the

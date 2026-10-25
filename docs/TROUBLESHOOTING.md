@@ -1198,6 +1198,77 @@ explicit owner value too. A clone made before the upgrade can still carry a stal
 embedded credential, so rotate the token and re-check to confirm the old value is
 gone.
 
+### A sandbox is running the stock image, not the hybrid one
+
+Symptom: tools that only the hybrid image carries are missing inside a
+conversation (`shellcheck`, `semgrep`, `sqlite3`, `rsync`, `restic`), or you
+spot a live sandbox running `docker.openhands.dev/openhands/agent-server` with a
+stock tag such as `1.33.0-python` or `1.37.1-python` — even though the stack
+defaults to the hybrid pin. Before 2026-10-19 this was invisible: the UI looks
+the same either way.
+
+`./doctor.sh` now says which of two very different faults you have. In the
+"OpenHands sandbox" section, immediately after the live-sandbox list, a
+warning-only probe resolves the expected pin from
+`OPENHANDS_AGENT_IMAGE_REPOSITORY` / `OPENHANDS_AGENT_IMAGE_TAG` (the same
+defaults `install.sh` uses: `ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid`
+and `1.37.1-python-hybrid.3`). It then compares the `hybrid-ai-openhands`
+container's own `AGENT_SERVER_IMAGE_REPOSITORY` / `AGENT_SERVER_IMAGE_TAG` pair
+with that pin, and every live `oh-agent-server-*` container's real image
+(`docker inspect -f '{{.Config.Image}}'`) with `repository:tag`.
+
+The probe never fails a run. It warns, passes, or prints a skip note, so a
+warning here is never the reason a deploy stopped. Docker absent, `docker
+inspect` erroring, or the app-server container missing each print a skip note
+and leave the exit code alone.
+
+**Warn branch 1 — the env is not reaching the app-server.**
+
+```text
+! OpenHands app-server does not carry the pinned sandbox image env
+```
+
+The warning names both values it actually saw, for example
+`AGENT_SERVER_IMAGE_REPOSITORY=docker.openhands.dev/openhands/agent-server` and
+`AGENT_SERVER_IMAGE_TAG=1.37.1-python`. Image pins are not secrets, so they are
+printed in full. The cause is a host `.env` that carries explicit
+`OPENHANDS_AGENT_IMAGE_*` lines. `install.sh` writes
+`${OPENHANDS_AGENT_IMAGE_REPOSITORY:-…}` in STEP 8, so an explicit value
+survives every deploy. The STEP 2b migration only unsets the exact stale pairs
+it knows about.
+
+Remedy: unset those variables **by name** in the host `.env` (do not delete the
+file), re-run `./install.sh` so the overlay env is recreated, then start a NEW
+conversation. A running sandbox keeps the config it was created with, so the fix
+cannot reach it.
+
+**Warn branch 2 — the app-server build is not honouring the override.**
+
+```text
+! oh-agent-server-xxxxx runs image docker.openhands.dev/openhands/agent-server:1.33.0-python, not the pinned ghcr.io/jimbobsyouruncle/openhands-agent-server-hybrid:1.37.1-python-hybrid.3
+```
+
+If that sandbox is old, it is simply pre-cutover: remove it
+(`docker rm -f <name>`) and start a new conversation. But if a **fresh**
+sandbox still runs the stock image while the app-server carries the hybrid
+pair, the app-server build is ignoring the override. OpenHands reserves the
+canonical `ghcr.io/openhands/agent-server` repository and re-pins its tag; the
+hybrid repository is deliberately not canonical so the pin should take effect.
+When it does not, that is an upstream finding: report it and investigate at the
+deployed app-server tag (or bump the pin). Do not patch the stack around it.
+
+**Post-merge decision tree:**
+
+| What doctor reports | Meaning | What to do |
+|---|---|---|
+| app env ≠ hybrid pair | host `.env` carries explicit `OPENHANDS_AGENT_IMAGE_*` values | unset them by name, re-run `./install.sh`, start a fresh sandbox |
+| app env = hybrid pair, but a fresh sandbox is stock | the app-server build ignores the override | investigate upstream at the deployed app-server tag, or bump the pin |
+| app env and every sandbox are hybrid | the earlier stock observation was a stale pre-cutover sandbox | remove stale sandboxes and re-check |
+
+`scripts/test-doctor-sandbox-image.sh` covers all of it offline: a fixture-driven
+`docker` stub on `PATH`, no daemon, no network. It also proves the probe is
+warning-only — a drift case exits 1 and never 2.
+
 ---
 
 ## Agent repo reference tree: inventory rows and skips

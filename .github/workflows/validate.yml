@@ -166,6 +166,21 @@ jobs:
         # the check.
         run: bash scripts/test-doctor-sandbox-firewall.sh
 
+      - name: Doctor sandbox-image tests
+        # Offline. RUNS doctor.sh (a fixture-driven docker stub on PATH) to prove
+        # the new warning-only sandbox-image drift probe: the app-server's
+        # AGENT_SERVER_IMAGE_* pair is compared with the resolved pin, and every
+        # live oh-agent-server container's real image is compared with that same
+        # repository:tag. A fully hybrid stack passes at the probe-free baseline
+        # exit code; a stock sandbox image warns naming the container and warns
+        # that the app-server build may not honour the override, exit 1, never 2;
+        # a stock or half or absent env pair warns naming BOTH seen values, exit
+        # 1; and no docker, an erroring docker, an absent app-server container or
+        # an unreadable sandbox image each print a skip note and leave every
+        # summary count as the baseline had it. The harness fails against a
+        # doctor.sh without the probe.
+        run: bash scripts/test-doctor-sandbox-image.sh
+
       - name: Sandbox firewall tests
         # Offline. RUNS scripts/sandbox-firewall.sh against stubbed docker and
         # iptables to prove the bridge-scoped rule set: the stateful conntrack

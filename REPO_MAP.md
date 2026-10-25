@@ -134,6 +134,7 @@
 - scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
 - scripts/test-doctor-post-deploy-log.sh - FILE: scripts/test-doctor-post-deploy-log.sh
 - scripts/test-doctor-sandbox-firewall.sh - FILE: scripts/test-doctor-sandbox-firewall.sh
+- scripts/test-doctor-sandbox-image.sh - FILE: scripts/test-doctor-sandbox-image.sh
 - scripts/test-doctor-startup-grace.sh - FILE: scripts/test-doctor-startup-grace.sh
 - scripts/test-env-pin-migration.sh - FILE: scripts/test-env-pin-migration.sh
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
