@@ -126,9 +126,11 @@ def probe_backups_as(uid: int, gid: int):
     """
     if os.geteuid() != 0:
         return None
-    # The scratch tree is 0700 by default; the dropped child must still be able
-    # to traverse it and open the file it is denied.
-    os.chmod(WORK, 0o711)
+    # The scratch tree stays 0700; hand ownership of it to the dropped child so
+    # it can traverse the tree and open the file it is denied. Ownership is
+    # strictly narrower than any chmod: no group or other permission bit is
+    # ever granted.
+    os.chown(WORK, uid, gid)
     read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid == 0:  # child
