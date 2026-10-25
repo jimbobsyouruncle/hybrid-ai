@@ -24,6 +24,11 @@ set -Eeuo pipefail
 #     both TCP and UDP) still matches an owned DROP and no owned ACCEPT (fails if
 #     either DNS ACCEPT is widened, whichever protocol it speaks)
 #   * migrated host: pre-existing foreign rules survive byte-untouched
+#   * partially present owned set: a strict subset of the owned rules, in a
+#     scrambled order, is repaired by deleting every owned rule and re-applying
+#     the whole set through the bottom-up path, so the chain ends as exactly the
+#     written RULES set; a tagged rule outside that set is never deleted, is not
+#     counted as owned, and still produces its note
 #   * a correct chain stored in `-S` normalised form (implied -m tcp / -m udp,
 #     -d before -i, RELATED,ESTABLISHED) is recognised as owned: no note, no
 #     insert, "unchanged"
@@ -182,6 +187,24 @@ case "$verb" in
       exit 1
     }
     printf '%s\n' "$*" >> "$state/rules"
+    ;;
+  -D)
+    # Delete the FIRST rule that matches, in the same normal form `-C` uses, so
+    # the stub's notion of "the same rule" is one thing, not two.
+    chain="${1:-}"; shift || true
+    chain_exists "$chain" || exit 1
+    needle="$(normalise "$*")"
+    found=0
+    while IFS= read -r rule; do
+      [[ -n "$rule" ]] || continue
+      if (( ! found )) && [[ "$(normalise "$rule")" == "$needle" ]]; then
+        found=1
+        continue
+      fi
+      printf '%s\n' "$rule"
+    done < "$state/rules" > "$state/rules.new"
+    mv -f "$state/rules.new" "$state/rules"
+    (( found )) || exit 1
     ;;
   *)
     printf 'stub iptables: unsupported invocation: %s\n' "$verb" >&2
@@ -366,6 +389,96 @@ check "the foreign rules keep their relative order at the bottom" \
 
 # ---------------------------------------------------------------------------
 echo
+echo "== a partially present owned set is repaired to the written order =="
+# A host can end up holding some, but not all, of the owned rules: an
+# interrupted apply, a hand-edit, or a release whose rule set changed. If only
+# the missing rules were prepended, each would land at the head of the chain, so
+# a missing DROP could end up above the DNS ACCEPTs and the ordering self-check
+# would fail on every deploy. The seed below is a strict subset of the fixture's
+# OWN rules, in a scrambled order, with DROPs first so a prepend-only repair
+# cannot pass. The expected result is written from those same fixture helpers,
+# so neither the count nor the order is a hardcoded host number.
+written_rules() { # the fixture's own RULES set, in the order the script writes it
+  printf '%s\n' "$CONNTRACK"
+  for br in "$BR_HYBRID" "$BR_CODER"; do
+    printf '%s\n' "$(accept_app_to_sandbox "$br")"
+    printf '%s\n' "$(accept_sandbox_to_app "$br")"
+  done
+  printf '%s\n' "$(accept_sandbox_dns udp)"
+  printf '%s\n' "$(accept_sandbox_dns tcp)"
+  for br in "$BR_HYBRID" "$BR_CODER"; do
+    printf '%s\n' "$(drop_stack "$br")"
+  done
+  for cidr in "${CIDRS[@]}"; do
+    printf '%s\n' "$(drop_dest "$cidr")"
+  done
+  printf '%s\n' "$INBOUND"
+}
+seed_partial() { # state-dir -- a strict, scrambled subset of the owned set
+  {
+    printf '%s\n' "$(drop_stack "$BR_CODER")"
+    printf '%s\n' "$(drop_dest "$CIDR_16")"
+    printf '%s\n' "$(accept_sandbox_dns tcp)"
+    printf '%s\n' "$(accept_sandbox_to_app "$BR_HYBRID")"
+    printf '%s\n' "$INBOUND"
+  } > "$1/rules"
+}
+
+S9="$(new_fixture partial-owned DOCKER-USER)"
+seed_partial "$S9"
+PARTIAL_BEFORE="$(grep -c . "$S9/rules")"
+if (( PARTIAL_BEFORE > 0 && PARTIAL_BEFORE < TOTAL )); then
+  ok "the fixture starts partial ($PARTIAL_BEFORE of the $TOTAL owned rules)"
+else
+  bad "the partial fixture is not a strict subset ($PARTIAL_BEFORE of $TOTAL)"
+fi
+rc=0; run_firewall "$S9" "$WORK/partial-owned.log" || rc=$?
+check "a partially present chain exits 0" "0" "$rc"
+have "the run says it is re-applying the full set" "$(cat "$WORK/partial-owned.log")" \
+  "re-applying the full set to restore the written order"
+absent "the ordering self-check did not fail" "$(cat "$WORK/partial-owned.log")" \
+  "ordering self-check FAILED"
+check "every pre-existing owned rule was deleted" "$PARTIAL_BEFORE" \
+  "$(grep -cE ' -D ' "$S9/calls" || true)"
+check "the repaired chain holds the fixture's own rule count" "$TOTAL" \
+  "$(grep -c . "$S9/rules")"
+check "the repaired chain is the written RULES set, in order" "" \
+  "$(diff <(written_rules) "$S9/rules")"
+check "the stateful ACCEPT is back at line 1" "$CONNTRACK" "$(sed -n '1p' "$S9/rules")"
+check "every owned ACCEPT is above every owned DROP" "0" \
+  "$(awk -v tag="$TAG" '
+       index($0, tag) && /-j DROP/ { seen_drop = 1; next }
+       index($0, tag) && /-j ACCEPT/ && seen_drop { n++ }
+       END { print n + 0 }' "$S9/rules")"
+
+# The repair must not reach past the owned set: a tagged rule from an older
+# release is not owned, so it is neither deleted nor counted, and it is still
+# reported for inspection exactly as before.
+S10="$(new_fixture partial-owned-foreign DOCKER-USER)"
+seed_partial "$S10"
+printf '%s\n' "$FOREIGN_TAGGED" >> "$S10/rules"
+SEED10="$(grep -c . "$S10/rules")"
+rc=0; run_firewall "$S10" "$WORK/partial-owned-foreign.log" || rc=$?
+check "a partial chain with a foreign tagged rule exits 0" "0" "$rc"
+check "the foreign tagged rule is reported exactly once" "1" \
+  "$(grep -c 'sandbox-firewall: note:' "$WORK/partial-owned-foreign.log" || true)"
+have "the note names the foreign rule body" "$(cat "$WORK/partial-owned-foreign.log")" "$FOREIGN_TAGGED"
+check "the foreign tagged rule survives byte-untouched" "1" \
+  "$(grep -cxF -- "$FOREIGN_TAGGED" "$S10/rules")"
+check "only the owned subset was deleted, not the foreign rule" "$PARTIAL_BEFORE" \
+  "$(grep -cE ' -D ' "$S10/calls" || true)"
+check "the chain is the written set plus the foreign rule" "$(( TOTAL + 1 ))" \
+  "$(grep -c . "$S10/rules")"
+check "the foreign rule still sits below the repaired owned set" "$FOREIGN_TAGGED" \
+  "$(tail -1 "$S10/rules")"
+if (( SEED10 == PARTIAL_BEFORE + 1 )); then
+  ok "the second fixture also starts partial ($SEED10 lines)"
+else
+  bad "the second partial fixture has an unexpected shape ($SEED10 lines)"
+fi
+
+# ---------------------------------------------------------------------------
+echo
 echo "== a chain stored in -S normalised form is recognised as owned =="
 # `iptables -S` does not echo the text that built a rule: it adds the implied
 # module (-m tcp, -m udp), puts -d before -i, and sorts --ctstate. These
@@ -498,15 +611,28 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "== the ordering self-check fails loudly =="
-# A chain that already holds the full rule set, but with an owned ACCEPT below
-# an owned DROP: -C finds every rule, nothing is inserted, and the self-check
-# must reject the ordering rather than report success.
+# A chain that already holds the FULL owned rule set, but with an owned ACCEPT
+# below an owned DROP: -C finds every rule, so the repair path does not fire and
+# nothing is inserted, and the self-check must reject the ordering rather than
+# report success. The set is complete on purpose -- a strict subset is now the
+# repaired case above, not this one.
 S6="$(new_fixture misordered DOCKER-USER)"
 {
-  printf '%s\n' "$CONNTRACK"
   printf '%s\n' "$(drop_stack "$BR_HYBRID")"
-  printf '%s\n' "$(accept_sandbox_to_app "$BR_HYBRID")"
+  printf '%s\n' "$CONNTRACK"
+  for br in "$BR_HYBRID" "$BR_CODER"; do
+    printf '%s\n' "$(accept_app_to_sandbox "$br")"
+    printf '%s\n' "$(accept_sandbox_to_app "$br")"
+  done
+  printf '%s\n' "$(accept_sandbox_dns udp)"
+  printf '%s\n' "$(accept_sandbox_dns tcp)"
+  printf '%s\n' "$(drop_stack "$BR_CODER")"
+  for cidr in "${CIDRS[@]}"; do
+    printf '%s\n' "$(drop_dest "$cidr")"
+  done
+  printf '%s\n' "$INBOUND"
 } > "$S6/rules"
+check "the misordered fixture holds the full owned set" "$TOTAL" "$(grep -c . "$S6/rules")"
 rc=0; run_firewall "$S6" "$WORK/misordered.log" || rc=$?
 check "a misordered chain makes the run exit non-zero" "1" "$rc"
 have "the self-check says so plainly" "$(cat "$WORK/misordered.log")" "ordering self-check FAILED"
@@ -824,15 +950,33 @@ if grep -qE 'sudo.*sandbox-firewall' "$REPO/install.sh"; then
 else
   ok "install.sh never calls the firewall through sudo"
 fi
-if grep -qE 'iptables[^|]*-F|iptables[^|]*-X' "$FIREWALL"; then
-  bad "the script flushes or deletes a chain"
+if grep -qE 'iptables[^|]*-F|iptables[^|]*-X|--flush|--delete-chain' "$FIREWALL"; then
+  bad "the script flushes or removes a chain"
 else
-  ok "the script never flushes or deletes a chain"
+  ok "the script never flushes or removes a chain"
 fi
-if grep -qE '(^|[^!] )(iptables -D|iptables -F|iptables -X)' "$FIREWALL"; then
-  bad "the script deletes a rule or a chain"
+# The repair path does delete rules, so "never deletes" is the wrong claim to
+# assert. What must hold is that every deletion is confined to the owned-repair
+# block (between the partial-state guard and the re-apply comment), so no delete
+# can ever touch a rule the current RULES set does not generate.
+GUARD_LINE="$(grep -nE '^if \(\( owned_missing && owned_present > 0 \)\)' "$FIREWALL" | cut -d: -f1)"
+REAPPLY_LINE="$(grep -n '^# Insert bottom-up' "$FIREWALL" | cut -d: -f1)"
+if [[ -z "$GUARD_LINE" || -z "$REAPPLY_LINE" ]]; then
+  bad "could not locate the repair block in the script"
 else
-  ok "the script never deletes a rule or a chain"
+  DEL_LINES="$(grep -nE '"[$]\{IPT\[@\]\}" -D' "$FIREWALL" | cut -d: -f1)"
+  DEL_COUNT="$(grep -cE '"[$]\{IPT\[@\]\}" -D' "$FIREWALL" || true)"
+  stray=0
+  for n in $DEL_LINES; do
+    if (( n <= GUARD_LINE || n >= REAPPLY_LINE )); then
+      stray=1
+    fi
+  done
+  if (( DEL_COUNT == 1 && stray == 0 )); then
+    ok "the only rule deletion sits inside the owned-repair block"
+  else
+    bad "a rule deletion sits outside the owned-repair block (deletes=$DEL_COUNT stray=$stray)"
+  fi
 fi
 check "every iptables call goes through the lock wait" "0" \
   "$(grep -cE 'iptables -[SICADF]' "$FIREWALL" || true)"

@@ -980,8 +980,25 @@ inserts, appends, deletes or flushes a rule.
 sudo ./scripts/sandbox-firewall.sh apply
 ```
 
-The script is idempotent — it adds only what is missing and leaves every other rule
-untouched. It never deletes, flushes or removes a chain.
+The script is idempotent — a rule that is already there is left alone. When the chain holds
+none of the owned rules it adds them all; when it holds all of them in the right order it
+changes nothing; and when it holds only some of them it repairs the chain rather than
+patching it.
+
+**A partially applied chain is repaired.** A chain can end up holding some, but not all, of
+the owned rules: an interrupted apply, a hand-edit, or a release whose rule set changed. Only
+adding the missing rules would put each at the head of the chain, so a missing DROP could end
+up above the DNS ACCEPTs and the ordering self-check would then fail on every deploy. In that
+state the script prints
+
+```
+sandbox-firewall: DOCKER-USER holds 5 of 14 owned rules; re-applying the full set to restore the written order.
+```
+
+and deletes every owned rule before applying the full set again, which is what restores the
+written order. The deletion is confined to the owned rules: the only rule the script ever
+deletes is one the current `RULES` set itself generates. It never flushes the chain and never
+removes a chain, so rules owned by Docker or by an operator survive untouched.
 
 **The note about a tagged rule.** `apply` may print a line like
 
@@ -990,8 +1007,9 @@ sandbox-firewall: note: a rule tagged hybrid-ai-sandbox-egress in DOCKER-USER is
 ```
 
 That note is informational: the tagged rule is outside today's policy, from an older release
-or differing only in how `iptables -S` prints it. The script never deletes it, so do not
-delete it by hand; inspect the chain with `iptables -S DOCKER-USER` and raise it as an item.
+or differing only in how `iptables -S` prints it. The script never deletes it, not even on the
+repair path, so do not delete it by hand; inspect the chain with `iptables -S DOCKER-USER` and
+raise it as an item.
 
 Re-running `./install.sh` also applies it, and so does a deploy.
 

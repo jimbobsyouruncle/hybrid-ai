@@ -365,9 +365,9 @@
 ## scripts/sandbox-firewall.sh
 - usage()
 - resolve_bridge()
-- apply_rule()
 - normalise_rule()
 - is_owned()
+- apply_rule()
 
 ## scripts/setup-agent-workspace.sh
 - log()
@@ -662,6 +662,8 @@
 - drop_stack()
 - drop_dest()
 - accept_sandbox_dns()
+- written_rules()
+- seed_partial()
 - norm_accept_app_to_sandbox()
 - norm_accept_sandbox_to_app()
 - norm_accept_sandbox_dns()
