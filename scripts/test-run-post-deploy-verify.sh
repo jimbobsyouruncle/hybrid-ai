@@ -235,10 +235,8 @@ fi
 # which is exactly the contract.
 BLOG="$WORKDIR/backup.log"
 write_gate_layout() { # <app-dir> <log-path>
-  printf 'HYBRID_AI_APP_DIR=%s\n' "$1" > "$LAYOUT"
-  printf 'BACKUP_LOG=%s\n' "$2" >> "$LAYOUT"
-  printf 'BACKUP_GROUP_GID=982\n' >> "$LAYOUT"
-  printf 'LOCAL_DOMAIN=example.test\n' >> "$LAYOUT"
+  printf 'HYBRID_AI_APP_DIR=%s\nBACKUP_LOG=%s\nBACKUP_GROUP_GID=982\nLOCAL_DOMAIN=example.test\n' \
+    "$1" "$2" > "$LAYOUT"
 }
 
 printf 'EVENT ts=2026-01-01T00:00:00Z event=backup_success detail=stub\n' > "$BLOG"
