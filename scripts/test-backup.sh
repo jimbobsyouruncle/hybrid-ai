@@ -167,6 +167,9 @@ chmod 600 "$CONF/repo-password"
 
 LOG="$TMPROOT/backup.log"
 CAPTURE="$TMPROOT/capture"
+# The fixtures own their paths. A caller's layout variables must not leak in and
+# move database discovery or the log path somewhere else.
+unset HYBRID_AI_DATA_DIR HYBRID_AI_LOG_DIR HYBRID_AI_BACKUP_MODE BACKUP_GROUP_GID
 export BACKUP_CONF_DIR="$CONF" BACKUP_LOG="$LOG" HOME="$REPO/home" SQLITE_LOG DOCKER_LOG
 export CAPTURE_DIR="$CAPTURE"
 export PATH="$STUB:$PATH"
@@ -736,6 +739,25 @@ assert "case t5: systemd-path message has no chmod advice" \
   bash -c "! grep -q 'chmod' '$TMPROOT/out'"
 assert "case t5: systemd-path message names the real rule" \
   bash -c "grep -q 'must be 0400 or 0440' '$TMPROOT/out'"
+
+# Cases u1/u2: the backup log's mode follows the backup mode. The status
+# container reads this file as a NON-owner, so system mode must be group
+# readable (0640) and user mode must stay exactly 0600 -- never 0644 either way.
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup "case-u1"
+check "case u1: user-mode run succeeds" 0 "$RUN_RC"
+assert "case u1: user-mode log is 0600" \
+  bash -c "[[ \"\$(stat -c '%a' '$LOG')\" == 600 ]]"
+SYSU="$TMPROOT/cred-u"; mkdir -p "$SYSU"
+cp "$CONF/r2.env" "$SYSU/r2.env"; chmod 600 "$SYSU/r2.env"
+cp "$CONF/repo-password" "$SYSU/repo-password"; chmod 600 "$SYSU/repo-password"
+run_backup_env HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$SYSU" BACKUP_NO_PAUSE=1 -- --non-interactive
+check "case u2: system-mode run succeeds" 0 "$RUN_RC"
+assert "case u2: system-mode log is 0640" \
+  bash -c "[[ \"\$(stat -c '%a' '$LOG')\" == 640 ]]"
+assert "case u2: system-mode log is NOT world-readable" \
+  bash -c "[[ \"\$(stat -c '%a' '$LOG')\" != 644 ]]"
 
 # ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then

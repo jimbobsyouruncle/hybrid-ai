@@ -146,9 +146,30 @@ docker compose --env-file .env -f docker-compose.yml config | grep -A2 'backup.l
 
 If the first command prints the units' log but the second shows an old
 `$HYBRID_AI_LOG_DIR/backup.log`, the stack env file predates the fix: re-run
-`./install.sh`. The status tile also reports `no backup log found` (rather than
-"no successful backup recorded") when the mounted file is absent, empty, or
-unreadable by the container.
+`./install.sh`. The status tile names which of the three faults it hit: `no
+backup log found` (the mounted path does not exist), `backup log is empty` (the
+file exists with no lines), or `backup log not readable — permission denied for
+uid <n>, owner <uid>:<gid>` (the file exists but this container cannot open it).
+The third one used to be reported as "no log", which hid a working backup behind
+a broken read.
+
+**`backup log not readable — permission denied for uid 1000, owner 997:982`.**
+The reader (status container) is not in the writer's group. On a system-mode
+host the log is mode `0640` owned by `hybrid-ai-backup`, and the status
+container gets that group through exactly one supplementary gid. Check the
+resolved values and converge the host:
+
+```bash
+stat -c '%a %u %g' "$(sed -n 's/^BACKUP_LOG=//p' /etc/hybrid-ai/stack.env)"
+grep '^BACKUP_GROUP_GID=' /etc/hybrid-ai/stack.env
+getent group hybrid-ai-backup     # its gid must equal BACKUP_GROUP_GID
+sudo ./install.sh --no-start      # STEP 7 chowns 640; STEP 8 rewrites the gid
+```
+
+If `BACKUP_GROUP_GID` is empty or wrong, the installer resolved the wrong group:
+it looks `hybrid-ai-backup` up **by name** and refuses to run when that group
+does not exist. A `chmod 644` is never the fix — it makes the log world-readable
+and the deploy gate will still fail the release.
 
 ---
 

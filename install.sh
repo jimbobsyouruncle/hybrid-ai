@@ -424,6 +424,24 @@ if [[ -n "${HYBRID_AI_UID:-}" ]]; then
   ok "stack runs as HYBRID_AI_UID=${STATUS_UID} gid=${STACK_GID}"
 fi
 
+# The backup log's group gid. In system mode the log is 0640 owned by
+# hybrid-ai-backup, and the status container reads it through exactly one
+# supplementary group, so the gid must be the hybrid-ai-backup group's. It is
+# resolved BY NAME (numeric ids differ per host and appear nowhere in the repo)
+# and this installer fails closed if the group cannot be found: a status
+# container with the wrong gid leaves the Backups tile blind while the backup
+# log reports success.
+# In user mode the log stays 0600 owned by the invoking account, so the only
+# value that grants nothing new is the primary gid the container already has.
+if [[ "$HYBRID_AI_BACKUP_MODE" == "system" ]]; then
+  BACKUP_GROUP_GID_DEFAULT="$(getent group hybrid-ai-backup 2>/dev/null | cut -d: -f3 || true)"
+  [[ "$BACKUP_GROUP_GID_DEFAULT" =~ ^[0-9]+$ ]] \
+    || die "the hybrid-ai-backup group does not exist, so the status container cannot be granted read access to BACKUP_LOG. Create it (useradd --system hybrid-ai-backup) and re-run ./install.sh."
+else
+  BACKUP_GROUP_GID_DEFAULT="${DOCKER_GID:-999}"
+fi
+ok "backup log group gid for the status container: ${BACKUP_GROUP_GID_DEFAULT}"
+
 # ---------------------------------------------------------------------------
 # STEP 4. Session encryption key
 # ---------------------------------------------------------------------------
@@ -629,9 +647,13 @@ for f in "$HYBRID_AI_INSTALL_LOG" "$BACKUP_LOG"; do
     # leaves the path to LogsDirectory=, which systemd creates and owns on the
     # first unit start. User mode is unchanged (the log is created 0600 by the
     # invoking account, below).
+    # The repair makes the file readable by the account that writes it AND by
+    # the status container's supplementary group (0640, group hybrid-ai-backup).
+    # It never widens the log to the world, and it converges an existing host on
+    # the next deploy with no by-hand chmod or chown step.
     if [[ -e "$f" && "$(id -u)" == "0" ]]; then
       chown hybrid-ai-backup:hybrid-ai-backup "$f" 2>/dev/null || true
-      chmod 600 "$f" 2>/dev/null || true
+      chmod 640 "$f" 2>/dev/null || true
     fi
     continue
   fi
@@ -754,6 +776,15 @@ HYBRID_AI_POST_DEPLOY_VERIFY_LOG=${HYBRID_AI_POST_DEPLOY_VERIFY_LOG:-/var/log/hy
 # (user: $HYBRID_AI_LOG_DIR/backup.log, system: the units' LogsDirectory=), so
 # the reader cannot drift from the writer.
 BACKUP_LOG=${BACKUP_LOG}
+
+# The ONE supplementary group the status container is given, so it can read the
+# backup log without the file becoming world-readable and without the service
+# running as root. Scripts/lib/hybrid-ai-env.sh does not resolve this setting;
+# install.sh does, by NAME: the hybrid-ai-backup group's gid in system mode (the
+# log's group owner), and the container's own primary gid in user mode (which
+# grants no new access). Written as ${VAR:-default} so an owner override
+# survives every reinstall. docker-compose.yml fails closed if it is unset.
+BACKUP_GROUP_GID=${BACKUP_GROUP_GID:-${BACKUP_GROUP_GID_DEFAULT}}
 
 # --- OpenHands maintenance agent -------------------------------------------
 OPENHANDS_PORT=${OPENHANDS_PORT:-3001}

@@ -652,6 +652,10 @@ resolves to the units' `LogsDirectory=` path,
 `/var/log/hybrid-ai-backup/backup.log`, the same file `doctor.sh` reads and the
 same file the status page mounts (`docker-compose.yml` binds `${BACKUP_LOG:?...}`
 read-only, and `install.sh` writes the resolved value into the stack env file).
+The status container reads that file through exactly one supplementary group,
+`BACKUP_GROUP_GID`; in system mode the log is mode `0640` owned by
+`hybrid-ai-backup`, and `install.sh` resolves that group's gid by name. See
+[`backup/README.md`](backup/README.md#the-backup-logs-mode-and-group-contract).
 
 A split layout for a dedicated system account looks like this (commented example
 in `.env.example`):

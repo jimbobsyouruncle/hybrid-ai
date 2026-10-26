@@ -1004,6 +1004,22 @@ done
 # shellcheck disable=SC2016  # $@ must expand inside the generated stub, not here
 printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "1000\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$INST_BIN/id"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$INST_BIN/chown"
+# getent must resolve the backup account's group BY NAME: install.sh resolves
+# BACKUP_GROUP_GID for the status container and refuses to run without it.
+cat > "$INST_BIN/getent" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  group)
+    case "${2:-}" in
+      hybrid-ai-backup) printf 'hybrid-ai-backup:x:982:\n' ;;
+      docker)           printf 'docker:x:999:\n' ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  hosts) printf '[IP_ADDRESS] %s\n' "${2:-}" ;;
+esac
+exit 0
+EOF
 printf '#!/usr/bin/env bash\nexit 0\n' > "$INST_BIN/setfacl"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$INST_BIN/apt-get"
 chmod +x "$INST_BIN"/*
@@ -1018,6 +1034,7 @@ run_real_install() { # app layout log
       -u OPENHANDS_WORKSPACE -u AGENT_REPOS_DIR -u OPENHANDS_STATE_DIR \
       -u BACKUP_CONF_DIR -u RESTIC_CACHE_DIR -u HYBRID_AI_HERMES_HOME_DIR \
       -u HYBRID_AI_BACKUP_MODE -u BACKUP_CONTAINER_CONTROL \
+      -u BACKUP_GROUP_GID -u BACKUP_GROUP_GID_DEFAULT \
       -u HYBRID_AI_UID -u HYBRID_AI_GID -u HYBRID_AI_LAYOUT_UID -u HYBRID_AI_LAYOUT_GID \
       PATH="$INST_BIN:$PATH" \
       HYBRID_AI_ENV_FILE="$layout" \

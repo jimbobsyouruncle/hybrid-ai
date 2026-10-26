@@ -247,12 +247,39 @@ relocation restores into the split layout.
 | `BACKUP_LOG` | the backup log file; in system mode it defaults to the units' `LogsDirectory=` (`/var/log/hybrid-ai-backup/backup.log`), in user mode to `$HYBRID_AI_LOG_DIR/backup.log` | mode-dependent |
 | `HYBRID_AI_WORK_DIR` | `.backup-staging`, `.restore-work`, `.restore-test-*` | the repo directory |
 | `HYBRID_AI_ENV_FILE` | the env file, staged as `env/.env` | `$HYBRID_AI_APP_DIR/.env`; if absent, `HYBRID_AI_ENV_FILE_FALLBACK` (default `/etc/hybrid-ai/hybrid-ai.env`) when it exists |
+| `BACKUP_GROUP_GID` | the ONE supplementary group the status container is given so it can read `BACKUP_LOG`; `install.sh` resolves the `hybrid-ai-backup` group's gid by name in system mode, and uses the container's own primary gid in user mode | mode-dependent |
 | `BACKUP_CONF_DIR` | the user-mode credential directory | `~/.config/hybrid-ai-backup` |
 | `HYBRID_AI_BACKUP_CRED_DIR` | the directory the scripts read credentials from (default follows the mode: `BACKUP_CONF_DIR` in user mode, `/etc/credstore/hybrid-ai-backup` in system mode) | mode-dependent |
 | `RESTIC_CACHE_DIR` | the restic cache | `~/.cache/restic` |
 
 Pre-restore safety copies (`webui_data.pre-restore-*`,
 `hermes_data.pre-restore-*`) still stay beside the data, on the same filesystem.
+
+### The backup log's mode and group contract
+
+`backup.log` is written by this directory's scripts and read by the status
+container, which is a DIFFERENT identity. Its mode therefore follows the mode:
+
+| Backup mode | Log mode | Owner | Who can read it |
+|---|---|---|---|
+| `user` (default) | `0600` | the invoking account | that account only — unchanged |
+| `system` | `0640` | `hybrid-ai-backup:hybrid-ai-backup` | the backup account and its group |
+
+The log is **never** mode `0644`. In system mode the status container reads it
+with exactly one supplementary group, the `hybrid-ai-backup` gid
+(`BACKUP_GROUP_GID` in `docker-compose.yml`); it keeps uid 1000 and its primary
+gid for the Docker socket, and stays read-only with every capability dropped.
+
+`install.sh` STEP 7 repairs an EXISTING log as root: `chown
+hybrid-ai-backup:hybrid-ai-backup` and `chmod 640`, so a host deployed before
+this contract converges on the next deploy with no by-hand step. STEP 8 writes
+`BACKUP_GROUP_GID` as `${BACKUP_GROUP_GID:-<resolved>}`, so an owner override
+survives reinstalls, and it fails closed when the `hybrid-ai-backup` group
+cannot be resolved by name.
+
+Why this exists: with mode 0600 the status container could not open the file, so
+the Backups tile reported a quiet "no log" while the writer's log held a
+success. The reader was blind, not the backup.
 
 ---
 

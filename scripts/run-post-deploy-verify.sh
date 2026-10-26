@@ -113,6 +113,135 @@ resolve_app_dir() {
 APP_DIR="$(resolve_app_dir)" || exit 1
 API_URL="https://api.github.com/repos/${REPO_SLUG}/actions/runs?head_sha=${SHA}"
 
+# --- Backups tile gate ------------------------------------------------------
+# A release can leave the Backups tile blind while the writer's log records a
+# success: the reader is then wrong, not the backups. This gate catches exactly
+# that. It reads settings from the layout file as DATA (never sourced, values
+# never printed) and needs three things:
+#   (a) BACKUP_LOG is a regular, non-empty file;
+#   (b) the STATUS CONTAINER'S identity (uid 1000, primary gid 999, plus the one
+#       supplementary BACKUP_GROUP_GID) can read it -- probed by DROPPING
+#       privileges from root with setpriv, because a root read proves nothing;
+#   (c) the live status API's Backups tile is not `warn` while the log holds a
+#       backup_success line.
+# Anything this cannot test leaves the verdict to the checks it CAN run, and
+# says so on stderr: a skipped probe is never reported as a pass.
+GATE_REASON=""
+# Identity the status service actually runs as (docker-compose.yml `user:`).
+STATUS_RUN_UID="${VERIFY_STATUS_UID:-1000}"
+STATUS_RUN_GID="${VERIFY_STATUS_GID:-999}"
+
+gate_skip() { printf 'run-post-deploy-verify: skip: %s\n' "$1" >&2; }
+
+# Read ONE key from the layout file, line by line, never sourcing it.
+layout_value() { # <KEY>
+  local key="$1" line value=""
+  [[ -r "$HYBRID_AI_ENV_FILE_FALLBACK" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" == "$key="* ]] || continue
+    value="${line#*=}"
+    value="${value%\"}"; value="${value#\"}"
+    value="${value%\'}"; value="${value#\'}"
+  done < "$HYBRID_AI_ENV_FILE_FALLBACK"
+  printf '%s' "$value"
+}
+
+# True when the log holds at least one success line, read as the caller (root in
+# the transient unit). Used only to decide whether a `warn` tile contradicts the
+# writer; a read failure here is "unknown", never "no success".
+log_has_success() { # <path>
+  grep -q 'event=backup_success' "$1" 2>/dev/null
+}
+
+# Probe readability as the status container's identity. Sets B_READ_STATE to
+# readable | unreadable | skipped. A root read is NEVER reported as readable.
+B_READ_STATE=""
+probe_read_as_status() { # <path> <supplementary-gid>
+  local path="$1" gid="$2"
+  B_READ_STATE="skipped"
+  if [[ "$(id -u)" != "0" ]]; then
+    gate_skip "not root: cannot drop privileges to the status container's identity; readability not proven by this run"
+    return 0
+  fi
+  if ! command -v setpriv >/dev/null 2>&1; then
+    gate_skip "setpriv is unavailable: readability as the status identity not proven"
+    return 0
+  fi
+  if [[ ! "$gid" =~ ^[0-9]+$ ]]; then
+    gate_skip "BACKUP_GROUP_GID is not a numeric gid: readability as the status identity not proven"
+    return 0
+  fi
+  if setpriv --reuid="$STATUS_RUN_UID" --regid="$STATUS_RUN_GID" \
+       --groups="$gid" --inh-caps=-all --bounding-set=-all -- \
+       test -r "$path" 2>/dev/null; then
+    B_READ_STATE="readable"
+  else
+    B_READ_STATE="unreadable"
+  fi
+  return 0
+}
+
+# Query the live status API through the route the Caddyfile names:
+# http://status.$LOCAL_DOMAIN/status/api, resolved to loopback. Sets B_TILE to
+# the Backups state, or empty when no verdict could be read.
+B_TILE=""
+probe_tile() { # <local-domain>
+  local domain="$1" body code
+  B_TILE=""
+  if [[ -z "$domain" ]]; then
+    gate_skip "LOCAL_DOMAIN is not set in the layout file: the status API was not queried"
+    return 0
+  fi
+  body="$(mktemp)"
+  code="$(curl -sS --max-time 10 -A "$USER_AGENT" \
+      --resolve "status.${domain}:80:127.0.0.1" \
+      -o "$body" -w '%{http_code}' \
+      "http://status.${domain}/status/api" 2>/dev/null || true)"
+  if [[ "$code" != 2* ]]; then
+    rm -f -- "$body"
+    gate_skip "the status API was unreachable: the Backups tile was not checked"
+    return 0
+  fi
+  B_TILE="$(jq -r '.checks[]? | select(.name == "Backups") | .state' "$body" 2>/dev/null || true)"
+  rm -f -- "$body"
+  if [[ -z "$B_TILE" ]]; then
+    gate_skip "the status API returned no Backups tile: the tile was not checked"
+    return 0
+  fi
+  return 0
+}
+
+# Returns 1 and fills GATE_REASON when the release leaves the tile blind while
+# the writer's log reports success.
+check_backup_tile() {
+  local log gid domain
+  log="${BACKUP_LOG:-$(layout_value BACKUP_LOG)}"
+  gid="${BACKUP_GROUP_GID:-$(layout_value BACKUP_GROUP_GID)}"
+  domain="${LOCAL_DOMAIN:-$(layout_value LOCAL_DOMAIN)}"
+
+  GATE_REASON=""
+  if [[ -z "$log" ]]; then
+    gate_skip "BACKUP_LOG is not set: the backup log was not checked"
+    return 0
+  fi
+  if [[ ! -f "$log" || ! -s "$log" ]]; then
+    GATE_REASON="the backup log is not a regular, non-empty file"
+    return 1
+  fi
+  probe_read_as_status "$log" "$gid"
+  if [[ "$B_READ_STATE" == "unreadable" ]]; then
+    GATE_REASON="the status container's identity cannot read the backup log"
+    return 1
+  fi
+  probe_tile "$domain"
+  if [[ "$B_TILE" == "warn" ]] && log_has_success "$log"; then
+    GATE_REASON="the backup log records event=backup_success but the Backups tile reports warn"
+    return 1
+  fi
+  return 0
+}
+
 BODY_FILE="$(mktemp)"
 ERR_FILE="$(mktemp)"
 trap 'rm -f -- "$BODY_FILE" "$ERR_FILE"' EXIT
@@ -231,6 +360,13 @@ while :; do
       fi
       if [[ "${deployed_head,,}" != "${SHA,,}" ]]; then
         finish FAIL 1 "deployed tree is on ${deployed_head}, expected ${SHA}"
+      fi
+
+      # The tree is right. Last gate: the Backups tile must not be blind while
+      # the writer's log holds a success. A probe that could not run leaves the
+      # verdict to the probes that did (a skip note on stderr, never a pass).
+      if ! check_backup_tile; then
+        finish FAIL 1 "${GATE_REASON}"
       fi
 
       finish PASS 0

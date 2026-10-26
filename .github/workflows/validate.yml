@@ -329,17 +329,25 @@ jobs:
         # path the old compose expression rendered), system mode yields the
         # units' LogsDirectory= path, and an owner override survives reruns
         # byte-for-byte. Without the template line the mount would point at a
-        # file nothing writes on system-mode hosts. Docker and friends are
-        # stubbed on PATH; the run uses --no-start. The harness fails against an
-        # install.sh without the template line.
+        # file nothing writes on system-mode hosts.
+        # It also proves the second half of that contract: BACKUP_GROUP_GID is
+        # the hybrid-ai-backup group's gid in system mode (resolved BY NAME),
+        # the container's own primary gid in user mode, an owner override
+        # survives reruns, a missing group is fatal, and STEP 7 repairs an
+        # existing log to 0640 owned by hybrid-ai-backup.
+        # Docker and friends are stubbed on PATH; the run uses --no-start.
         run: bash scripts/test-status-backup-log-env.sh
 
       - name: Status backup-log probe tests
-        # Offline. Pins the reader half of the single-path contract in
-        # status/app.py: an absent, zero-byte or unreadable backup log degrades
-        # to a warn instead of raising, a log with no success line says so, and
-        # a recent success shows as ok in both the Backups and Jobs tiles. No
-        # Docker, no network, no root: fixture log files only.
+        # Offline. Pins the reader half of the contract in status/app.py:
+        # absent, unreadable and empty are three DISTINCT warn messages (the
+        # unreadable one names permission denied, the reader's uid and the
+        # file's owner uid:gid), a log with no success line says so, a 0640
+        # group-readable log parses, and a recent success shows as ok in both
+        # the Backups and Jobs tiles. No Docker, no network: fixture log files
+        # only. The unreadable case is a REAL permission failure; a root run
+        # drops privileges in a forked child and prints SKIP if it cannot, so
+        # SKIP is visible here as a failure, never a silent pass.
         run: bash scripts/test-status-backup-probe.sh
 
       - name: Agent-server image repository tests
@@ -378,7 +386,8 @@ jobs:
           OPENHANDS_STATE_DIR=/tmp/openhands-state \
           HYBRID_AI_DATA_DIR=/tmp/agent-data \
           HYBRID_AI_LOG_DIR=/tmp/agent-log \
-          BACKUP_LOG=/tmp/agent-log/backup.log
+          BACKUP_LOG=/tmp/agent-log/backup.log \
+          BACKUP_GROUP_GID=999
           set +a
           docker compose -f docker-compose.yml config --quiet
           # The overlays are deployed on every install but were never validated
@@ -398,6 +407,7 @@ jobs:
           # asserted unset on its own below.
           set +e
           FAILCLOSED_OUT="$(env -u HYBRID_AI_DATA_DIR -u HYBRID_AI_LOG_DIR -u BACKUP_LOG \
+            -u BACKUP_GROUP_GID \
             docker compose -f docker-compose.yml \
                            -f openhands/docker-compose.openhands.yml \
                            -f hermes/docker-compose.hermes.yml config 2>&1 >/dev/null)"
@@ -422,7 +432,22 @@ jobs:
             || { echo "::error::unset BACKUP_LOG did not fail closed"; exit 1; }
           printf '%s\n' "$BACKUP_FAILCLOSED_OUT" | grep -q './install.sh' \
             || { echo "::error::BACKUP_LOG fail-closed compose error did not name ./install.sh"; exit 1; }
-          echo "Compose refuses to parse with the data/log dirs or BACKUP_LOG unset."
+
+          # BACKUP_GROUP_GID unset, everything else set: without it the status
+          # container loses its only supplementary group and the Backups tile
+          # goes blind, so the parse must be refused here too.
+          set +e
+          GROUP_FAILCLOSED_OUT="$(env -u BACKUP_GROUP_GID \
+            docker compose -f docker-compose.yml \
+                           -f openhands/docker-compose.openhands.yml \
+                           -f hermes/docker-compose.hermes.yml config 2>&1 >/dev/null)"
+          GROUP_FAILCLOSED_RC=$?
+          set -e
+          [ "$GROUP_FAILCLOSED_RC" -ne 0 ] \
+            || { echo "::error::unset BACKUP_GROUP_GID did not fail closed"; exit 1; }
+          printf '%s\n' "$GROUP_FAILCLOSED_OUT" | grep -q './install.sh' \
+            || { echo "::error::BACKUP_GROUP_GID fail-closed compose error did not name ./install.sh"; exit 1; }
+          echo "Compose refuses to parse with the data/log dirs, BACKUP_LOG or BACKUP_GROUP_GID unset."
 
           # --- Set to a temp tree: bind sources move under it -----------------
           TMPTREE="$(mktemp -d)"
@@ -437,6 +462,12 @@ jobs:
             || { echo "::error::HYBRID_AI_DATA_DIR was not honoured"; exit 1; }
           printf '%s\n' "$RENDER_SET" | grep -q "source: $BACKUP_LOG" \
             || { echo "::error::BACKUP_LOG was not honoured for the status mount"; exit 1; }
+          # The status service carries exactly one supplementary group built
+          # from BACKUP_GROUP_GID=999.
+          [ "$(printf '%s\n' "$RENDER_SET" | grep -c 'group_add')" -eq 1 ] \
+            || { echo "::error::the status service must declare exactly one group_add"; exit 1; }
+          printf '%s\n' "$RENDER_SET" | grep -A3 'group_add' | grep -q '999' \
+            || { echo "::error::the rendered supplementary group is not BACKUP_GROUP_GID=999"; exit 1; }
           rm -rf "$TMPTREE"
           echo "Compose renders under a split layout."
 
