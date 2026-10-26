@@ -130,6 +130,23 @@ assertions in the `Dockerfile` stay green. The stamp's `distribution` is set to 
 same step that sets `updateMechanism=external`, which is the value `hermes_cli/steward.py`
 expects for a sealed `/opt` tree (`sealed_steward()` otherwise returns `unknown`).
 
+The PM also needs a **packaged runtime marker**. `pm/runtime.py` resolves its own dependency
+runtime before anything else: because `/opt/manifest.json` exists, the payload root is `/opt` and
+the runtime dir is `/opt/pm-runtime`, and it reads `/opt/pm-runtime/pm-runtime.json` expecting the
+two keys `python` and `sitePackages`. The image never wrote that marker, so every PM entry point
+raised `InstallError("pm-runtime", "packaged PM runtime is missing or invalid")` and `hermes pm
+doctor` refused. The build now generates it from the install state — `pm-runtime/selected.json`
+names the live generation, so no generation id is hardcoded — and points `python` at that
+generation's interpreter (an absolute path under `/opt`) and `sitePackages` at
+`/opt/pm-runtime/site-packages`, a build-time **copy** of the generation's `site-packages`. It must
+be a copy and not a symlink: the resolver calls `.resolve()` before it checks containment, so a
+symlink into `/opt/hermes-agent` would resolve outside `/opt/pm-runtime` and be rejected. The marker
+tree is `chmod a+rX`ed (`pm-runtime.json` `0644`, directories `0755`) and never `chown`ed, so `/opt`
+stays root-owned with no group/other write bit and the immutability assertions above stay green;
+nothing is written under `/opt` at runtime, so `docker diff` stays clean. A build step then runs
+that same resolver as the runtime uid, so an invalid or unreadable marker fails the image build
+rather than the deployed agent.
+
 ### Upgrading Hermes or the WebUI
 
 An upgrade is a pull request that changes the pins and re-checks the patch:
