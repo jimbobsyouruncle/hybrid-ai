@@ -194,7 +194,7 @@ In the pod template's **Environment Variables** section:
 | `./install.sh --wake-runpod` | Yes, for that run only, if the peer is offline |
 | `RUNPOD_AUTO_WAKE=1` (or `true`) in `.env` | Yes, on every install run where the peer is offline |
 
-Only the exact values `1` and `true` enable auto-wake; any other value means off. When the installer does wake the pod, it needs `RUNPOD_API_KEY` and `RUNPOD_POD_ID` in `.env`, sends a resume request, and waits up to three minutes for the peer to join the tailnet. With auto-wake off, `install.sh` uses the peer IP it discovers, else the cached `TAILSCALE_IP` from `.env`.
+Only the exact values `1` and `true` enable auto-wake; any other value means off. When the installer does wake the pod, it needs `RUNPOD_API_KEY` and `RUNPOD_POD_ID` in `.env`, sends a resume request, and waits up to three minutes for the peer to join the tailnet. With auto-wake off, `install.sh` uses the peer it discovers and records its MagicDNS name as `RUNPOD_HOST`; nothing stores the peer's address any more, because a recreated pod gets a new one. Consumers resolve `RUNPOD_HOST` at use time.
 
 ---
 

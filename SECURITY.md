@@ -682,7 +682,7 @@ Security properties of the new tool:
 - **Reports credential names, never values.** `.env` keys are checked for presence only.
 - **No credentials in the process list.** The R2 reachability probe receives a *file path* as an argument and parses it inside the subshell; secrets never reach `argv`.
 - **Safe parsing.** Config is read line by line, never `source`d.
-- **Validates the mesh guard.** Independently confirms `TAILSCALE_IP` falls inside `100.64.0.0/10`, so a misconfiguration is caught proactively rather than at send time.
+- **Validates the mesh guard.** Independently resolves `RUNPOD_HOST` (the pod's MagicDNS name) and confirms the RESOLVED address falls inside the tailnet mesh range, so a misconfiguration is caught proactively rather than at send time. No component stores or reads a pod address.
 
 It also surfaces three silent-failure modes that previously had no detection at all: backup timer disabled, **linger disabled** (user timers do not run when logged out, so backups silently never happen), and last-successful-backup age.
 
@@ -692,7 +692,7 @@ The status page at `/status` exposes service state, log excerpts, and a diagnost
 
 | Control | Mechanism |
 |---|---|
-| Holds no credentials | The container is never given `.env` or any API key. Only `TAILSCALE_IP` and `VLLM_PORT` — and the address is masked in all output |
+| Holds no credentials | The container is never given `.env` or any API key. Only `RUNPOD_HOST` and `PI_HOST` (MagicDNS names, masked in all output) plus `VLLM_PORT`; no stored mesh address |
 | Reads no user content | Databases and uploads are measured (sizes, row counts) only; SQLite opened with a read-only URI |
 | Read-only towards Docker | Socket mounted `:ro`; the app issues **only** HTTP GET. No code path starts, stops, or modifies a container |
 | No file serving | No static handler exists and no user input is ever turned into a filesystem path, so path traversal is not reachable |

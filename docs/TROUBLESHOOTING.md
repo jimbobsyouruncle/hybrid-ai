@@ -663,7 +663,9 @@ curl -fsS http://127.0.0.1:11434/api/tags | jq '.models[].name'
 tailscale status | grep -E 'runpod-|^100\.'
 
 # 5. Is the GPU pod awake and serving?
-source .env && curl -fsS --max-time 5 "http://${TAILSCALE_IP}:8000/v1/models" | jq .
+source .env
+POD_ADDR="$(tailscale ip -4 "$RUNPOD_HOST" | head -1)"
+curl -fsS --max-time 5 "http://${POD_ADDR}:8000/v1/models" | jq .
 ```
 
 | Fails at | Go to |
@@ -1539,7 +1541,7 @@ Expected when the pod is stopped — but the entry should persist even then. If 
 
 ```bash
 source .env
-tailscale ping "$TAILSCALE_IP"
+tailscale ping "$RUNPOD_HOST"
 tailscale netcheck                   # diagnoses NAT / relay problems
 ```
 
@@ -1561,18 +1563,22 @@ Work through it in this order:
 # 1. Is the pod even known to the tailnet?
 tailscale status | grep runpod-vllm
 
-# 2. Does .env hold a plausible address?
-grep TAILSCALE_IP .env          # must start with 100.
+# 2. Does the stored MagicDNS name resolve to a mesh address?
+source .env
+POD_ADDR="$(tailscale ip -4 "$RUNPOD_HOST" | head -1)"
+echo "$POD_ADDR"                # the RESOLVED address must start with 100.
 
 # 3. Is the pod running? Check the RunPod console.
 
 # 4. Can we reach the model API?
-source .env && curl -v --max-time 10 "http://${TAILSCALE_IP}:8000/v1/models"
+source .env
+POD_ADDR="$(tailscale ip -4 "$RUNPOD_HOST" | head -1)"
+curl -v --max-time 10 "http://${POD_ADDR}:8000/v1/models"
 ```
 
 **"Refusing to transmit: ... outside the Tailscale mesh range"**
 
-Working as designed. `TAILSCALE_IP` is not a `100.64–127.x.x` address, which means prompts would leave the encrypted tunnel. Fix the address:
+Working as designed. `.env` stores the pod's MagicDNS name (`RUNPOD_HOST`), and the component resolved it to an address outside `100.64–127.x.x`. The name itself is not the problem: the resolved address is, because prompts sent there would leave the encrypted tunnel. Confirm what the name resolves to and rediscover the peer:
 
 ```bash
 ./install.sh

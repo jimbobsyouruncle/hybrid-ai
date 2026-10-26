@@ -299,6 +299,37 @@ elif [[ -n "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" || -n "${OPENHANDS_AGENT_IMAG
   log "Leaving the OpenHands agent-server image pin alone (not a known stale default pair)."
 fi
 
+# The last migration retires the STORED pod mesh address. Older installs wrote
+# the GPU pod's Tailscale address into .env as TAILSCALE_IP, and every consumer
+# read that stored copy. A RunPod worker's address changes whenever the pod is
+# recreated, so the copy went stale and the pipe dialled a peer that was no
+# longer there. No component reads TAILSCALE_IP any more: the single stored
+# value is the pod's MagicDNS NAME (RUNPOD_HOST), resolved at use time.
+#
+# The old address is dropped ONLY when it still matches what RUNPOD_HOST
+# resolves to today, i.e. when it is provably the same peer and carries no
+# information the name does not. Any other value (a hand-entered address, a
+# peer that has since moved, or a name that does not resolve here) might be the
+# owner's only record of it, so it is preserved verbatim -- first in the run's
+# memory, then re-appended to the written .env as a comment-documented legacy
+# line. Idempotent: after one run the value is gone, so a second run sees
+# nothing to migrate.
+_TAILSCALE_IP_PRESERVED=""
+if [[ -n "${TAILSCALE_IP:-}" ]]; then
+  # shellcheck source=scripts/lib/tailscale-resolve.sh
+  source "${SCRIPT_DIR}/scripts/lib/tailscale-resolve.sh"
+  _ts_resolved="$(resolve_mesh_address "${RUNPOD_HOST:-}")" || _ts_resolved=""
+  if [[ -n "$_ts_resolved" && "${TAILSCALE_IP}" == "$_ts_resolved" ]]; then
+    log "Migrating TAILSCALE_IP to the MagicDNS name RUNPOD_HOST=${RUNPOD_HOST}: a stored mesh address is no longer needed."
+    unset TAILSCALE_IP
+  else
+    log "Leaving the stored TAILSCALE_IP alone (does not match the address RUNPOD_HOST resolves to); it is no longer read by any component."
+    _TAILSCALE_IP_PRESERVED="$TAILSCALE_IP"
+    unset TAILSCALE_IP
+  fi
+  unset _ts_resolved
+fi
+
 # The shared helper above already resolved every LAYOUT-managed setting from
 # HYBRID_AI_ENV_FILE (the layout file): the host paths, the agent workspace, the
 # Hermes home, the mode selectors and the identity that decides which uid the
@@ -490,6 +521,9 @@ log "Querying Tailscale mesh for peer '${PEER_HOSTNAME}'..."
 
 TS_JSON=""
 DISCOVERED_IP=""
+# The matched peer's MagicDNS name. This is what .env records: a name is stable
+# across pod recreation, an address is not.
+DISCOVERED_DNS=""
 PEER_ONLINE="false"
 MATCHED_PEER=""
 
@@ -523,6 +557,20 @@ query_tailnet() {
 
             DISCOVERED_IP="$_ip"
             MATCHED_PEER="$_peer"
+            # The peer's MagicDNS name, lowercased with its trailing dot
+            # stripped: that is the form `tailscale ip -4 <name>` and the
+            # container resolver both accept.
+            DISCOVERED_DNS="$(
+                printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
+                    (.Peer // {}) | to_entries | map(.value)
+                    | map(select(
+                        ((.HostName // "") | ascii_downcase | contains($peer | ascii_downcase))
+                        or ((.DNSName // "") | ascii_downcase | startswith(($peer | ascii_downcase) + "."))
+                      ))
+                    | sort_by((.Online // false) | not)
+                    | .[0].DNSName // empty
+                  ' 2>/dev/null | head -n1 | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' || true
+            )"
             PEER_ONLINE="$(
                 printf '%s' "$TS_JSON" | jq -r --arg peer "$_peer" '
                     (.Peer // {}) | to_entries | map(.value)
@@ -592,27 +640,28 @@ if [[ "$PEER_ONLINE" != "true" && "$WAKE_ENABLED" == "1" ]]; then
 fi
 
 if [[ -n "${DISCOVERED_IP:-}" ]]; then
-    TAILSCALE_IP="$DISCOVERED_IP"
     if [[ "$PEER_ONLINE" == "true" ]]; then
-        ok "Peer '${MATCHED_PEER}' online at ${TAILSCALE_IP}"
+        ok "Peer '${MATCHED_PEER}' online at ${DISCOVERED_IP}"
     elif [[ "$WAKE_ENABLED" == "1" ]]; then
-        ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline — worker did not respond to wake)"
+        ok "Peer '${MATCHED_PEER}' known at ${DISCOVERED_IP} (offline — worker did not respond to wake)"
     else
-        ok "Peer '${MATCHED_PEER}' known at ${TAILSCALE_IP} (offline — auto-wake disabled)"
-    fi
-elif [[ -n "${TAILSCALE_IP:-}" ]]; then
-    warn "No peer (${PEER_HOSTNAMES}) in tailnet right now; keeping cached ${TAILSCALE_IP}"
-else
-    warn "No peer found (tried: ${PEER_HOSTNAMES}) and no cached address."
-    if (( NON_INTERACTIVE )); then
-        TAILSCALE_IP=""
-    else
-        read -r -p "    Enter the pod's Tailscale IP (or leave blank to fill in later): " TAILSCALE_IP < /dev/tty
+        ok "Peer '${MATCHED_PEER}' known at ${DISCOVERED_IP} (offline — auto-wake disabled)"
     fi
 fi
 
-if [[ -n "${TAILSCALE_IP:-}" && ! "$TAILSCALE_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]]; then
-    warn "'${TAILSCALE_IP}' does not look like a 100.x.x.x mesh address."
+# .env records the peer's MagicDNS NAME, never its address: the address changes
+# whenever the pod is recreated, so a stored copy goes stale. An owner-set
+# RUNPOD_HOST always wins; discovery only fills it in when it is empty.
+if [[ -z "${RUNPOD_HOST:-}" && -n "${DISCOVERED_DNS:-}" ]]; then
+    RUNPOD_HOST="$DISCOVERED_DNS"
+    log "Recorded the pod's MagicDNS name as RUNPOD_HOST=${RUNPOD_HOST}"
+elif [[ -z "${RUNPOD_HOST:-}" ]]; then
+    warn "No MagicDNS name recorded: no peer (tried: ${PEER_HOSTNAMES}) was in the tailnet and RUNPOD_HOST is empty."
+    warn "Set RUNPOD_HOST in .env to the pod's MagicDNS name, e.g. runpod-worker.tailXXXX.ts.net"
+fi
+
+if [[ -n "${DISCOVERED_IP:-}" && ! "$DISCOVERED_IP" =~ ^100\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]]; then
+    warn "'${DISCOVERED_IP}' does not look like a 100.x.x.x mesh address."
 fi
 
 # --- OpenHands: workspace path and browser-reachable sandbox host ----------
@@ -730,9 +779,11 @@ OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 OPENROUTER_MODEL=${OPENROUTER_MODEL:-qwen/qwen-2.5-coder-32b-instruct}
 
 # --- Cloud inference plane -------------------------------------------------
-RUNPOD_HOST=${RUNPOD_HOST}
+# The pod is named, not addressed: RUNPOD_HOST is its MagicDNS name and every
+# consumer resolves it at use time. An owner-set value survives a re-run; the
+# ${VAR:-default} form falls back to what STEP 6 discovered.
+RUNPOD_HOST=${RUNPOD_HOST:-${DISCOVERED_DNS}}
 PI_HOST=${PI_HOST}
-TAILSCALE_IP=${TAILSCALE_IP:-}
 PEER_HOSTNAME=${PEER_HOSTNAME}
 PEER_HOSTNAMES=${PEER_HOSTNAMES}
 RUNPOD_API_KEY=${RUNPOD_API_KEY}
@@ -818,6 +869,18 @@ EOF
 mv -f "$TMP_ENV" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 ok ".env written (0600)."
+
+# Keep an owner's legacy TAILSCALE_IP value byte-for-byte. STEP 2b refused to
+# migrate it because it did not match the address RUNPOD_HOST resolves to, so
+# it may be the owner's only record of that peer. It is re-appended verbatim,
+# under a comment that says nothing reads it.
+if [[ -n "${_TAILSCALE_IP_PRESERVED:-}" ]]; then
+  {
+    printf '\n# Legacy value kept verbatim from the previous .env. No component reads it\n'
+    printf '# any more: the MagicDNS name RUNPOD_HOST is resolved at use time.\n'
+    printf 'TAILSCALE_IP=%s\n' "$_TAILSCALE_IP_PRESERVED"
+  } >> "$ENV_FILE"
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -1913,7 +1976,7 @@ setup_backups || true
 
 event "install_success" \
   "ollama_limit=${OLLAMA_MEM_LIMIT}" \
-  "peer_resolved=${TAILSCALE_IP:+yes}" \
+  "peer_named=${RUNPOD_HOST:+yes}" \
   "backups=$([[ -f "$R2_ENV_FILE" && -f "$RESTIC_PW_FILE" ]] && echo configured || echo none)"
 
 hr
@@ -1927,7 +1990,7 @@ printf '    OpenHands    : SSH tunnel to http://127.0.0.1:%s\n' "${OPENHANDS_POR
 printf '    Hermes Agent : http://hermes.%s\n' "${LOCAL_DOMAIN}"
 printf '    Status Page  : http://status.%s\n' "${LOCAL_DOMAIN}"
 printf '    Ollama API   : http://%s/ollama/\n' "${LOCAL_DOMAIN}"
-printf '    vLLM peer    : http://%s:%s/v1  (on demand)\n\n' "${TAILSCALE_IP:-<unresolved>}" "${VLLM_PORT:-8000}"
+printf '    vLLM peer    : http://%s:%s/v1  (on demand)\n\n' "${RUNPOD_HOST:-<unresolved>}" "${VLLM_PORT:-8000}"
 
 if ((${#MISSING_DNS[@]} > 0)); then
   hr

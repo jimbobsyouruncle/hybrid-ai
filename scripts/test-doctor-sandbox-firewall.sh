@@ -193,8 +193,22 @@ EOF
 
 cat > "$BIN/getent" <<'EOF'
 #!/usr/bin/env bash
-# Nothing resolves: OPENHANDS_SANDBOX_HOST is a lab name only the operator's PC
-# knows, so doctor warns (never fails) -- and does so the same way every run.
+# The pod's MagicDNS name resolves: this is the fallback path of the shared
+# resolver. Everything else does not, because OPENHANDS_SANDBOX_HOST is a lab
+# name only the operator's PC knows, so doctor warns (never fails) about it the
+# same way every run.
+case "${1:-}" in
+  ahostsv4)
+    case "${2:-}" in
+      runpod-worker.example.test)
+        if [[ "${TS_RESOLVE_MODE:-}" == "out" ]]; then
+          echo '203.0.113.10  STREAM'
+        else
+          echo '100.64.0.9  STREAM'
+        fi
+        exit 0 ;;
+    esac ;;
+esac
 exit 2
 EOF
 
@@ -228,13 +242,22 @@ EOF
 done
 
 # tailscale: connected, with no GPU pod in the tailnet. That is a pass plus a
-# warning -- stable, and never a fail.
+# warning -- stable, and never a fail. `ip -4 <name>` answers for the pod
+# MagicDNS name, so the doctor resolve-and-validate check passes.
+# TS_RESOLVE_MODE=out answers with an address OUTSIDE the mesh range instead,
+# which the doctor must fail on (exit 2).
 cat > "$BIN/tailscale" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
     status) echo '{"BackendState":"Running","Peer":{}}'; exit 0 ;;
-    ip)     echo '100.64.0.10'; exit 0 ;;
+    ip)
+      if [[ "${TS_RESOLVE_MODE:-}" == "out" ]]; then
+        echo '203.0.113.10'
+      else
+        echo '100.64.0.9'
+      fi
+      exit 0 ;;
   esac
 done
 exit 0
@@ -374,6 +397,8 @@ printf '{"items":[{"id":"t-ok","status":"COMPLETED","updated_at":"%s","error":nu
 
 # --- scratch app ------------------------------------------------------------
 cp "$REPO_ROOT/scripts/lib/hybrid-ai-env.sh" "$APPD/scripts/lib/"
+# doctor.sh resolves the pod MagicDNS name through this shared lib.
+cp "$REPO_ROOT/scripts/lib/tailscale-resolve.sh" "$APPD/scripts/lib/"
 cp "$DOCTOR" "$APPD/doctor.sh"
 chmod +x "$APPD/doctor.sh"
 
@@ -401,7 +426,7 @@ cat > "$APPD/.env" <<EOF
 WEBUI_SECRET_KEY=fixture
 RUNPOD_API_KEY=fixture
 RUNPOD_POD_ID=fixture
-TAILSCALE_IP=100.64.0.1
+RUNPOD_HOST=runpod-worker.example.test
 PEER_HOSTNAME=fixture
 OPENROUTER_API_KEY=fixture
 OPENHANDS_WORKSPACE=$WORK/ws
@@ -507,6 +532,28 @@ if [[ "$(count_of "$WORK/out.present" passed)" == "$(( $(count_of "$WORK/out.bas
   pass "rules present: exactly one extra pass, and no extra warning or failure"
 else
   fail "rules present: the summary counts do not match the baseline plus one pass"
+fi
+
+# --- (a2) the pod name resolves OUTSIDE the mesh: a hard fail --------------
+# The address is validated, not the name, so a name that resolves off-mesh must
+# fail the run (exit 2). The sandbox-firewall check itself is unaffected, so
+# this proves the grid check is independent of it.
+run_doctor outofmesh "$APPD/doctor.sh" "$STATE_PRESENT" TS_RESOLVE_MODE=out
+RC_OUTOFMESH=$RC
+if grep -q 'RUNPOD_HOST resolves to an address outside the Tailscale range' "$WORK/out.outofmesh"; then
+  pass "out-of-mesh resolution: the doctor fails the run"
+else
+  fail "out-of-mesh resolution: no failure for an address outside the mesh range"
+fi
+if [[ "$RC_OUTOFMESH" == "2" ]]; then
+  pass "out-of-mesh resolution: exit code is 2"
+else
+  fail "out-of-mesh resolution: exit code is ${RC_OUTOFMESH}, expected 2"
+fi
+if ! grep -q 'RUNPOD_HOST resolves inside the Tailscale mesh' "$WORK/out.outofmesh"; then
+  pass "out-of-mesh resolution: no pass line for the pod check"
+else
+  fail "out-of-mesh resolution: the pod check reported a pass anyway"
 fi
 
 # --- (b) rules missing ------------------------------------------------------

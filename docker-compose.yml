@@ -281,7 +281,6 @@ services:
       # verification tile. Same single-file pattern as the two logs above.
       - ${HYBRID_AI_POST_DEPLOY_VERIFY_LOG:-/var/log/hybrid-ai-post-deploy-verify.log}:/data/post-deploy-verify.log:ro
     environment:
-      TAILSCALE_IP: ${TAILSCALE_IP:-}
       STATUS_PORT: "8088"
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       OLLAMA_URL: http://ollama:11434
@@ -292,7 +291,9 @@ services:
       BACKUP_LOG_PATH: /data/backup.log
       INSTALL_LOG_PATH: /data/install.log
       POST_DEPLOY_VERIFY_LOG_PATH: /data/post-deploy-verify.log
-      # Not a secret: a private mesh address, and it is masked in all output.
+      # Not a secret: the pod's MagicDNS name, and it is masked in all output.
+      # The status container resolves it through this service's `dns:` entry
+      # (the tailnet resolver), so no stored mesh address is needed.
       RUNPOD_HOST: ${RUNPOD_HOST}
       PI_HOST: ${PI_HOST}
       VLLM_PORT: ${VLLM_PORT:-8000}
