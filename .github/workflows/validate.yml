@@ -142,6 +142,22 @@ jobs:
         # check.
         run: bash scripts/test-doctor-post-deploy-log.sh
 
+      - name: Doctor RunPod key tests
+        # Offline. RUNS doctor.sh (stubbed curl/getent/tailscale/docker and
+        # fixture .env files) to prove two things. A GPU pod that is merely
+        # asleep no longer fails the deploy gate: a well-formed
+        # <pod>.<tailnet>.ts.net name that does not resolve warns (exit 1) and
+        # never exits 2, while a bare suffix, a single label and a foreign
+        # domain still fail naming the expected pod MagicDNS shape. And
+        # RUNPOD_API_KEY is validated with ONE read-only RunPod GraphQL query:
+        # a valid key passes reporting desiredStatus (a STOPPED pod is a pass),
+        # a 401 or a GraphQL auth error fails, and a timeout, a 5xx or a
+        # malformed body prints a skip note and leaves the exit code alone.
+        # Asserts the query is never a mutation and that the key stays out of
+        # curl's argv and out of the report. The harness fails against a
+        # doctor.sh without these checks.
+        run: bash scripts/test-doctor-runpod-key.sh
+
       - name: Status deploy-verification tile tests
         # Offline, no Docker, no network. Proves status/app.py's Deploy
         # verification tile parses the LAST `waiting for <sha> at <ts>` line and

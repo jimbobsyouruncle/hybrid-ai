@@ -12,7 +12,9 @@
 # USAGE:
 #   ./doctor.sh              run every check
 #   ./doctor.sh --quiet      only show problems (good for cron)
-#   ./doctor.sh --no-cloud   skip checks that contact RunPod or R2
+#   ./doctor.sh --no-cloud   skip the checks that contact R2 (the backup
+#                            repository). The single short RunPod API-key probe
+#                            still runs when its preconditions are met.
 #
 # EXIT CODES (so you can use this in scripts or monitoring):
 #   0  everything healthy
@@ -41,7 +43,7 @@ for arg in "$@"; do
   case "$arg" in
     --quiet)    QUIET=1 ;;
     --no-cloud) NO_CLOUD=1 ;;
-    -h|--help)  sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -99,6 +101,91 @@ env_key_state() {
   v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
   if [[ -n "$v" ]]; then printf 'set'; else printf 'absent'; fi
   unset v
+}
+
+# --- RunPod control API: validate RUNPOD_API_KEY with ONE read-only query ---
+# The pipe and install.sh both authenticate to RunPod with this key, so a key
+# that was rotated or revoked surfaces weeks later as "the pod never wakes".
+# Asking the control API once turns that into an immediate, precise answer.
+#
+# This is a QUERY only. doctor.sh is read-only toward RunPod: it never starts,
+# stops or resumes a pod.
+#
+# The key is never printed, never placed in argv and never written inside the
+# repository. It reaches curl through a 0600 --config file in a private temp
+# directory that is removed on every exit path.
+#
+# Fail-safe rule: only an unambiguous auth rejection fails the run. A missing
+# tool, a timeout, a network failure, a 5xx or a body that is not JSON prints a
+# skip note and leaves the counters and the exit code alone -- a probe that
+# cannot answer proves nothing.
+RP_TMPDIR=""
+cleanup_runpod_tmp() { [[ -n "$RP_TMPDIR" ]] && rm -rf "$RP_TMPDIR"; RP_TMPDIR=""; }
+runpod_skip() { (( QUIET )) || printf '  %s-%s RunPod API-key check skipped (%s)\n' "$C_DIM" "$C_RST" "$1"; }
+
+runpod_key_check() {
+  local key="$1" pod="$2"
+  local dir cfg payload body code rc query desired errlow
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/hybrid-ai-doctor-runpod.XXXXXX" 2>/dev/null)"
+  if [[ -z "$dir" ]]; then
+    runpod_skip "no writable temp directory"
+    return 0
+  fi
+  RP_TMPDIR="$dir"
+  trap cleanup_runpod_tmp EXIT
+  cfg="$dir/curl.cfg"; payload="$dir/payload.json"; body="$dir/body.json"
+
+  # An env value that carries a control character could inject a config
+  # directive, so drop them; the same escaping keeps a quote or a backslash
+  # inside the double-quoted header value literal.
+  key="${key//[[:cntrl:]]/}"
+  key="${key//\\/\\\\}"
+  key="${key//\"/\\\"}"
+
+  ( umask 077; : > "$cfg" ) || { runpod_skip "cannot write a private curl config"; return 0; }
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$key"
+    printf 'header = "Content-Type: application/json"\n'
+  } > "$cfg" || { runpod_skip "cannot write a private curl config"; return 0; }
+
+  query="query { pod(input: {podId: \"${pod}\"}) { id desiredStatus } }"
+  jq -n --arg q "$query" '{query: $q}' > "$payload" 2>/dev/null \
+    || { runpod_skip "cannot build the query payload"; return 0; }
+
+  code="$(curl -sS --config "$cfg" --data-binary "@${payload}" \
+            -o "$body" --max-time 15 -w '%{http_code}' \
+            https://api.runpod.io/graphql 2>/dev/null)"
+  rc=$?
+
+  case "$code" in
+    2??)
+      if jq -e 'has("data") and (.data.pod != null)' "$body" >/dev/null 2>&1; then
+        # A STOPPED pod is a PASS: asleep is the normal, money-saving state.
+        desired="$(jq -r '.data.pod.desiredStatus // "UNKNOWN"' "$body" 2>/dev/null)"
+        pass "RunPod API key accepted for pod ${pod} (desiredStatus: ${desired:-UNKNOWN})"
+      else
+        errlow="$(jq -r '.errors[0].message // empty' "$body" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+        if [[ "$errlow" == *auth* || "$errlow" == *forbidden* \
+              || "$errlow" == *"invalid api key"* || "$errlow" == *unauthori* ]]; then
+          fail "RUNPOD_API_KEY was rejected by the RunPod API" \
+               "Rotate the key in the RunPod console (Settings -> API Keys), update RUNPOD_API_KEY in ${ENV_FILE}, then re-run ./doctor.sh."
+        else
+          runpod_skip "the API answered HTTP ${code} without pod data"
+        fi
+      fi ;;
+    401|403)
+      fail "RUNPOD_API_KEY was rejected by the RunPod API" \
+           "Rotate the key in the RunPod console (Settings -> API Keys), update RUNPOD_API_KEY in ${ENV_FILE}, then re-run ./doctor.sh." ;;
+    *)
+      # 000 is curl's "no answer"; anything else is a server or routing problem.
+      # Neither says anything about the key.
+      if (( rc != 0 )); then
+        runpod_skip "the RunPod API was unreachable (curl exit ${rc})"
+      else
+        runpod_skip "the RunPod API answered HTTP ${code:-000}"
+      fi ;;
+  esac
+  cleanup_runpod_tmp
 }
 
 # ---------------------------------------------------------------------------
@@ -373,6 +460,13 @@ if [[ -f "$ENV_FILE" ]]; then
   # 100.64.x.x - 100.127.x.x; anything else means the pipe will refuse to send,
   # which is the safety net working correctly. Nothing here prints the name or
   # the address; at most a masked 100.x.x.x.
+  #
+  # POLICY: the deploy gate fails on CONFIGURATION ERRORS, never on a peer being
+  # asleep. An on-demand GPU pod leaves the tailnet when it stops, so its
+  # MagicDNS name stops resolving: that is the normal money-saving state, not a
+  # misconfiguration, so it is a WARNING. A name that is not shaped like a pod
+  # MagicDNS record (`<pod>.<tailnet>.ts.net`) is a configuration error and does
+  # fail, because nothing could ever resolve it.
   POD_NAME="$(env_get RUNPOD_HOST)"
   if [[ -z "$POD_NAME" ]]; then
     warn "RUNPOD_HOST is empty" \
@@ -388,8 +482,19 @@ if [[ -f "$ENV_FILE" ]]; then
         (( QUIET )) || printf '  %s-%s GPU pod MagicDNS name resolution skipped (no tailscale CLI and no getent on this host)\n' "$C_DIM" "$C_RST"
         (( QUIET )) || printf '  %s  Nothing is wrong with .env; run this check on the Pi.%s\n' "$C_DIM" "$C_RST" ;;
       1)
-        fail "RUNPOD_HOST does not resolve to an address" \
-             "The pipe will refuse to send prompts. Check tailscale status and MagicDNS, then re-run ./install.sh." ;;
+        # Unresolved. Whether that is a fault depends on the NAME's shape.
+        # The MagicDNS pod record is `<pod>.<tailnet>.ts.net`: two non-empty
+        # labels, then the .ts.net suffix, so no leading, trailing or doubled
+        # dots. A stopped pod loses that record, so this is the normal
+        # on-demand state. Any other shape cannot be a pod record at all, so it
+        # is a configuration error.
+        if [[ "$POD_NAME" =~ ^[^.]+\.[^.]+\.ts\.net$ ]]; then
+          warn "RUNPOD_HOST does not resolve right now: the GPU pod may be asleep or not yet registered on this tailnet (normal for an on-demand pod - it wakes when the pipe sends work)" \
+               "To verify end-to-end that a pod can start and join the tailnet: sudo ./install.sh --wake-runpod"
+        else
+          fail "RUNPOD_HOST does not resolve to an address and is not shaped like a pod MagicDNS name (expected <pod>.<tailnet>.ts.net, e.g. runpod-worker.example-tailnet.ts.net)" \
+               "Re-run ./install.sh to record the pod's MagicDNS name."
+        fi ;;
       0)
         if mesh_range_ok "$POD_ADDR"; then
           pass "RUNPOD_HOST resolves inside the Tailscale mesh"
@@ -401,6 +506,25 @@ if [[ -f "$ENV_FILE" ]]; then
     unset POD_ADDR
   fi
   unset POD_NAME
+
+  # --- RunPod API key is accepted by the control API -----------------------
+  # Deliberately NOT gated behind NO_CLOUD: the deploy gate runs
+  # `./doctor.sh --no-cloud` and a revoked key is exactly what that gate must
+  # catch. This is one short query against the RunPod control API -- nothing to
+  # do with R2, which is what --no-cloud skips. Presence of the two settings is
+  # already reported above, so a missing one only prints a skip note here.
+  RUNPOD_KEY="$(env_get RUNPOD_API_KEY)"
+  RUNPOD_POD="$(env_get RUNPOD_POD_ID)"
+  if [[ -z "$RUNPOD_KEY" || -z "$RUNPOD_POD" ]]; then
+    runpod_skip "RUNPOD_API_KEY or RUNPOD_POD_ID is not set"
+  elif ! command -v curl >/dev/null 2>&1; then
+    runpod_skip "curl is not installed"
+  elif ! command -v jq >/dev/null 2>&1; then
+    runpod_skip "jq is not installed"
+  else
+    runpod_key_check "$RUNPOD_KEY" "$RUNPOD_POD"
+  fi
+  unset RUNPOD_KEY RUNPOD_POD
 
   # --- OpenHands credential store -----------------------------------------
   # Holds the LLM provider key you enter in the OpenHands UI. Outside the repo
@@ -1291,8 +1415,11 @@ if command -v tailscale >/dev/null 2>&1; then
         pass "GPU pod '${PEER_NAME}' known but stopped (normal - it wakes on demand)"
       fi
     else
-      warn "GPU pod has never joined this tailnet" \
-           "Start the pod once manually, then re-run ./install.sh to discover it."
+      # A stopped pod leaves the tailnet, so no peer matches right now. That is
+      # the normal on-demand state, not a fault -- but it is worth saying,
+      # because a pod that was recreated under a new name looks the same.
+      warn "No tailnet peer matching runpod-worker/runpod-vllm right now (the pod may be stopped or may have been recreated)" \
+           "Start it: sudo ./install.sh --wake-runpod (resumes the pod and waits up to 3 minutes for it to join the tailnet), then re-run ./doctor.sh"
     fi
   else
     fail "Tailscale backend state: ${TS_STATE}" "Run: sudo tailscale up"
