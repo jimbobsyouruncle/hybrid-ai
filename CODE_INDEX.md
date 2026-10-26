@@ -350,10 +350,12 @@
 - is_uint()
 - canon()
 - path_within()
+- lease_less_allowed()
 - backup_assert_ok()
 - lease_verdict()
 - container_uses_dir()
 - container_verdict()
+- retention_sweep()
 
 ## scripts/prune-docker-cache.sh
 - log()
@@ -560,6 +562,12 @@
 - pass()
 - fail()
 
+## scripts/test-doctor-lease-less.sh
+- pass()
+- fail()
+- summary_count()
+- run_doctor()
+
 ## scripts/test-doctor-post-deploy-log.sh
 - pass()
 - fail()
@@ -647,6 +655,7 @@
 - run_prune()
 - counter()
 - refusals_of()
+- render_step8()
 
 ## scripts/test-prune-docker-cache.sh
 - ok()

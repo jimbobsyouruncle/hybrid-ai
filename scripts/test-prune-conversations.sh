@@ -39,6 +39,24 @@
 #         ${OPENHANDS_WORKSPACE}/conversations that is itself a symlink pointing
 #         outside the workspace makes the script refuse to sweep (exit 0,
 #         nothing moved outside).
+#     (j) HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1 -> a lease-less directory past the
+#         age limit moves (moved-lease-less=1, reason lease-less-moved) with its
+#         files intact, and a lease-less directory inside the age limit is
+#         refused with reason lease-less-recent.
+#     (j2) every non-truthy spelling of the knob ("", 0, false, no) keeps the
+#         fail-safe: moved=0, refused=1, reason lease-missing.
+#     (k) quarantine retention is ON by default at 90 days: a <YYYYMMDD> run
+#         directory older than the window is deleted and logged with its path
+#         and age, one inside the window is kept with its files.
+#     (k2) an explicitly EMPTY or 0 retention knob opts out: nothing is deleted
+#         and the run logs that retention is disabled. 0 must not be read as a
+#         zero-day window.
+#     (k3) retention is confined to dated run directories directly inside the
+#         quarantine root: a dated symlink is not followed, a non-date directory
+#         is kept, and the live conversations tree is untouched.
+#     (l) install.sh STEP 8 writes both new knobs with the documented defaults
+#         (ALLOW_LEASE_LESS empty = OFF, RETENTION_DAYS 90 = ON) and preserves
+#         an owner value, including an empty RETENTION_DAYS opt-out.
 #
 #   Fully offline: no Docker, no network, no root, no systemd. docker is stubbed
 #   on PATH so the container guard reports "none" deterministically. python3 is
@@ -95,6 +113,10 @@ AGE=100
 GRACE=10
 MAX_MOVES=20
 QBASE=""
+# Empty means "leave the knob unset in the child", so the script's own default
+# (OFF for lease-less, 90 days for retention) is what the case exercises.
+ALLOW_LEASE_LESS=""
+RETENTION_DAYS=""
 
 # --- Fixture helpers -------------------------------------------------------
 # Build a fresh tree with four distinct directories inside it and an (absent)
@@ -121,6 +143,15 @@ age_dir() { touch -d "@$(( NOW - $2 ))" -- "$1"; }
 RUN_OUT=""; RUN_RC=0; RUN_SUMMARY=""
 run_prune() {
   local tree="$1"
+  local -a unset_args=()
+  # A completely unset retention knob must behave like the documented default
+  # (90 days ON), so every case that does not set it unsets it explicitly.
+  if [[ -z "$RETENTION_DAYS" ]]; then
+    unset_args+=("-u" "HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS")
+  fi
+  if [[ -z "$ALLOW_LEASE_LESS" ]]; then
+    unset_args+=("-u" "HYBRID_AI_PRUNE_ALLOW_LEASE_LESS")
+  fi
   local -a e=(
     "PATH=${STUB_BIN}:${PATH}"
     "HYBRID_AI_ENV_FILE=${tree}/hybrid-ai.env"
@@ -135,8 +166,14 @@ run_prune() {
   if [[ -n "$QBASE" ]]; then
     e+=("HYBRID_AI_PRUNE_QUARANTINE_BASE=${QBASE}")
   fi
+  if [[ -n "$ALLOW_LEASE_LESS" ]]; then
+    e+=("HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=${ALLOW_LEASE_LESS}")
+  fi
+  if [[ -n "$RETENTION_DAYS" ]]; then
+    e+=("HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=${RETENTION_DAYS}")
+  fi
   local rc=0
-  RUN_OUT="$(env "${e[@]}" bash "$PRUNE" 2>&1)" || rc=$?
+  RUN_OUT="$(env "${unset_args[@]}" "${e[@]}" bash "$PRUNE" 2>&1)" || rc=$?
   RUN_RC="$rc"
   RUN_SUMMARY="$(printf '%s\n' "$RUN_OUT" | grep -o 'summary: .*' | tail -n1 || true)"
 }
@@ -308,6 +345,169 @@ check "(i) symlinked conversations moved nothing" "$(counter moved)" "0"
 check "(i) nothing moved outside the workspace" "$([[ -d "${TREE}/outside/conversations/old" ]] && echo yes || echo no)" "yes"
 check "(i) no quarantine was created" "$([[ -e "$QROOT" ]] && echo present || echo absent)" "absent"
 case_end "(i) the quarantine never escapes the workspace/fixture tree"
+
+# --- (j) lease-less opt-in: old directory moves, recent one is refused ------
+case_begin
+new_tree
+mkdir -p "${CONV}/orphan-old/nested" "${CONV}/orphan-new"
+printf 'keep-me' > "${CONV}/orphan-old/inner.txt"
+printf 'deep' > "${CONV}/orphan-old/nested/deep.txt"
+printf 'x' > "${CONV}/orphan-new/f.txt"
+age_dir "${CONV}/orphan-old" "$(( AGE + 100 ))"
+ALLOW_LEASE_LESS=1
+run_prune "$TREE"
+ALLOW_LEASE_LESS=""
+check "(j) exit code is 0" "$RUN_RC" "0"
+check "(j) moved counter" "$(counter moved)" "1"
+check "(j) moved-lease-less counter" "$(counter moved-lease-less)" "1"
+check "(j) refused counter" "$(counter refused)" "1"
+if [[ "$(refusals_of)" == *"lease-less-recent"* ]]; then ok "(j) the recent lease-less directory is refused as lease-less-recent"; else bad "(j) the recent lease-less directory is refused as lease-less-recent (got '$(refusals_of)')"; fi
+if [[ "$(refusals_of)" == *"lease-missing"* ]]; then bad "(j) the knob-on run still reports lease-missing"; else ok "(j) the knob-on run does not report lease-missing"; fi
+check "(j) the old lease-less directory is gone" "$([[ -e "${CONV}/orphan-old" ]] && echo present || echo gone)" "gone"
+check "(j) the recent lease-less directory is still present" "$([[ -d "${CONV}/orphan-new" ]] && echo yes || echo no)" "yes"
+check "(j) inner file preserved" "$(cat "${QROOT}/${QDATE}/orphan-old/inner.txt" 2>/dev/null || echo missing)" "keep-me"
+check "(j) nested file preserved" "$(cat "${QROOT}/${QDATE}/orphan-old/nested/deep.txt" 2>/dev/null || echo missing)" "deep"
+case_end "(j) HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1 moves an old lease-less directory only"
+
+# --- (j2) knob OFF is byte-identical: no new fields except the summary ------
+case_begin
+new_tree
+mkdir -p "${CONV}/orphan-off"
+printf 'x' > "${CONV}/orphan-off/f.txt"
+age_dir "${CONV}/orphan-off" "$(( AGE + 100 ))"
+for v in "" 0 false no; do
+  ALLOW_LEASE_LESS="$v"
+  run_prune "$TREE"
+  check "(j2) knob='${v}' exit code is 0" "$RUN_RC" "0"
+  check "(j2) knob='${v}' moved counter" "$(counter moved)" "0"
+  check "(j2) knob='${v}' moved-lease-less counter" "$(counter moved-lease-less)" "0"
+  check "(j2) knob='${v}' refused counter" "$(counter refused)" "1"
+  if [[ "$(refusals_of)" == *"lease-missing"* ]]; then ok "(j2) knob='${v}' refusal reason is lease-missing"; else bad "(j2) knob='${v}' refusal reason is lease-missing (got '$(refusals_of)')"; fi
+done
+ALLOW_LEASE_LESS=""
+check "(j2) the directory survived every OFF spelling" "$([[ -d "${CONV}/orphan-off" ]] && echo yes || echo no)" "yes"
+case_end "(j2) every non-truthy spelling of the knob keeps the fail-safe"
+
+# --- (k) quarantine retention: ON by default, window honoured --------------
+case_begin
+new_tree
+mkdir -p "${CONV}/live"
+write_lease "${CONV}/live" "$(( NOW + 3600 ))"
+# Two pre-existing run directories: one far outside a 90-day window, one inside.
+OLD_RUN="${QROOT}/20200101"
+NEW_RUN="${QROOT}/$(date -u -d "@$(( NOW - 86400 ))" +%Y%m%d)"
+mkdir -p "${OLD_RUN}/conv-old" "${NEW_RUN}/conv-new"
+printf 'stale' > "${OLD_RUN}/conv-old/f.txt"
+printf 'fresh' > "${NEW_RUN}/conv-new/f.txt"
+age_dir "$OLD_RUN" "$(( 100 * 86400 ))"
+age_dir "$NEW_RUN" "86400"
+run_prune "$TREE"
+check "(k) exit code is 0" "$RUN_RC" "0"
+check "(k) retention-deleted counter" "$(counter retention-deleted)" "1"
+check "(k) the directory past the 90-day default was deleted" "$([[ -e "$OLD_RUN" ]] && echo present || echo gone)" "gone"
+check "(k) the directory inside the window was kept" "$([[ -d "$NEW_RUN" ]] && echo yes || echo no)" "yes"
+check "(k) the kept directory still holds its files" "$(cat "${NEW_RUN}/conv-new/f.txt" 2>/dev/null || echo missing)" "fresh"
+if [[ "$RUN_OUT" == *"retention-deleted: ${OLD_RUN}"* ]]; then ok "(k) the deletion is logged with its path"; else bad "(k) the deletion is logged with its path"; fi
+if [[ "$RUN_OUT" == *"age="*"window=90d"* ]]; then ok "(k) the deletion log records the age and the window"; else bad "(k) the deletion log records the age and the window"; fi
+check "(k) the live conversations tree is untouched" "$([[ -d "${CONV}/live" ]] && echo yes || echo no)" "yes"
+case_end "(k) the quarantine root is bounded by a 90-day default retention"
+
+# --- (k2) retention opt-out: an EMPTY or 0 knob never deletes --------------
+# 0 must be an opt-out, not a zero-day window: a zero-day window would delete
+# every run directory, including the one this run just wrote.
+for optout in "" 0; do
+  case_begin
+  new_tree
+  mkdir -p "${CONV}/live"
+  write_lease "${CONV}/live" "$(( NOW + 3600 ))"
+  OLD_RUN="${QROOT}/20200101"
+  mkdir -p "${OLD_RUN}/conv-old"
+  printf 'stale' > "${OLD_RUN}/conv-old/f.txt"
+  age_dir "$OLD_RUN" "$(( 400 * 86400 ))"
+  RETENTION_DAYS="$optout"
+  rc=0
+  RUN_OUT="$(env -u HYBRID_AI_PRUNE_ALLOW_LEASE_LESS \
+    "PATH=${STUB_BIN}:${PATH}" \
+    "HYBRID_AI_ENV_FILE=${TREE}/hybrid-ai.env" \
+    "HYBRID_AI_APP_DIR=${TREE}/app" "HYBRID_AI_DATA_DIR=${TREE}/data" \
+    "HYBRID_AI_WORK_DIR=${TREE}/work" "OPENHANDS_WORKSPACE=${TREE}/workspace" \
+    "HYBRID_AI_PRUNE_AGE_SECONDS=${AGE}" "HYBRID_AI_PRUNE_GRACE_SECONDS=${GRACE}" \
+    "HYBRID_AI_PRUNE_MAX_MOVES=${MAX_MOVES}" \
+    "HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=${optout}" \
+    bash "$PRUNE" 2>&1)" || rc=$?
+  RETENTION_DAYS=""
+  RUN_RC="$rc"
+  RUN_SUMMARY="$(printf '%s\n' "$RUN_OUT" | grep -o 'summary: .*' | tail -n1 || true)"
+  check "(k2) opt-out='${optout}' exit code is 0" "$RUN_RC" "0"
+  check "(k2) opt-out='${optout}' retention-deleted counter" "$(counter retention-deleted)" "0"
+  check "(k2) opt-out='${optout}' the old run directory survived" "$([[ -d "$OLD_RUN" ]] && echo yes || echo no)" "yes"
+  if [[ "$RUN_OUT" == *"retention: disabled"* ]]; then ok "(k2) opt-out='${optout}' logs that retention is disabled"; else bad "(k2) opt-out='${optout}' logs that retention is disabled"; fi
+  case_end "(k2) retention knob '${optout}' restores the never-delete behaviour"
+done
+
+# --- (k3) retention never leaves the quarantine root ----------------------
+case_begin
+new_tree
+mkdir -p "${CONV}/live"
+write_lease "${CONV}/live" "$(( NOW + 3600 ))"
+mkdir -p "${TREE}/outside/target" "$QROOT"
+printf 'untouched' > "${TREE}/outside/target/secret.txt"
+age_dir "${TREE}/outside/target" "$(( 400 * 86400 ))"
+# A dated symlink INSIDE the quarantine root must not be followed out of it.
+ln -s "${TREE}/outside/target" "${QROOT}/20200101"
+# A dated real directory inside the root is deleted, proving the loop ran.
+REAL_OLD="${QROOT}/20200102"
+mkdir -p "$REAL_OLD"
+age_dir "$REAL_OLD" "$(( 400 * 86400 ))"
+# A non-date directory inside the root is never a run directory.
+mkdir -p "${QROOT}/not-a-run"
+age_dir "${QROOT}/not-a-run" "$(( 400 * 86400 ))"
+run_prune "$TREE"
+check "(k3) exit code is 0" "$RUN_RC" "0"
+check "(k3) the symlink target survives" "$(cat "${TREE}/outside/target/secret.txt" 2>/dev/null || echo missing)" "untouched"
+check "(k3) the symlink itself is not deleted" "$([[ -L "${QROOT}/20200101" ]] && echo symlink || echo changed)" "symlink"
+check "(k3) the dated directory inside the root was deleted" "$([[ -e "$REAL_OLD" ]] && echo present || echo gone)" "gone"
+check "(k3) a non-date directory inside the root was kept" "$([[ -d "${QROOT}/not-a-run" ]] && echo yes || echo no)" "yes"
+check "(k3) the live conversations tree is untouched" "$([[ -d "${CONV}/live" ]] && echo yes || echo no)" "yes"
+case_end "(k3) retention deletion is confined to dated run directories in the quarantine root"
+
+# --- (l) install.sh STEP 8 writes and preserves both new knobs -------------
+case_begin
+STEP8_TMPL="${WORK_ROOT}/step8.tmpl"
+awk '/^cat > "\$TMP_ENV" <<EOF$/{f=1;next} f&&/^EOF$/{exit} f' \
+  "$(cd -- "${SCRIPT_DIR}/.." && pwd)/install.sh" > "$STEP8_TMPL"
+if [[ -s "$STEP8_TMPL" ]]; then ok "(l) extracted the STEP 8 heredoc template"; else bad "(l) extracted the STEP 8 heredoc template"; fi
+
+render_step8() { # optional_extra_shell
+  (
+    unset HYBRID_AI_PRUNE_ALLOW_LEASE_LESS HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS
+    [[ -n "${1:-}" ]] && eval "$1"
+    # Only the prune block is rendered: every other ${...} line is skipped, so
+    # this fixture never needs the rest of install.sh's environment.
+    grep -E '^HYBRID_AI_PRUNE_(ALLOW_LEASE_LESS|QUARANTINE_RETENTION_DAYS)=' "$STEP8_TMPL" \
+      | while IFS= read -r line; do eval "printf '%s\n' \"${line}\""; done
+  )
+}
+
+R_UNSET="$(render_step8 "")"
+check "(l) ALLOW_LEASE_LESS defaults to empty when unset" \
+  "$(printf '%s\n' "$R_UNSET" | grep -E '^HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=' || true)" \
+  "HYBRID_AI_PRUNE_ALLOW_LEASE_LESS="
+check "(l) RETENTION_DAYS defaults to 90 when unset" \
+  "$(printf '%s\n' "$R_UNSET" | grep -E '^HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=' || true)" \
+  "HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=90"
+R_SET="$(render_step8 'export HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1 HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=30')"
+check "(l) an owner-set ALLOW_LEASE_LESS is preserved" \
+  "$(printf '%s\n' "$R_SET" | grep -E '^HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=' || true)" \
+  "HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1"
+check "(l) an owner-set RETENTION_DAYS is preserved" \
+  "$(printf '%s\n' "$R_SET" | grep -E '^HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=' || true)" \
+  "HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=30"
+R_OFF="$(render_step8 'export HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=')"
+check "(l) an explicit empty RETENTION_DAYS (opt-out) survives a reinstall" \
+  "$(printf '%s\n' "$R_OFF" | grep -E '^HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=' || true)" \
+  "HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS="
+case_end "(l) install.sh writes both knobs with the documented defaults and preserves an owner value"
 
 printf '%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 (( fail == 0 ))

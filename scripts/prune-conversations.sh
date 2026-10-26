@@ -4,8 +4,16 @@
 # PURPOSE (plain English):
 #   Move stale OpenHands conversation directories out of
 #   ${OPENHANDS_WORKSPACE}/conversations/ and into a date-stamped quarantine
-#   root. QUARANTINE ONLY. Nothing is ever deleted, so an operator can always
-#   move a directory back and no conversation history is lost.
+#   root.
+#
+# QUARANTINE ONLY, with one bounded exception:
+#   * MOVES are quarantine-only. A swept directory can always be moved back, so
+#     no conversation history is lost by the sweep.
+#   * DELETION is confined to the quarantine root itself, and only for
+#     <YYYYMMDD> run directories older than the retention window. Nothing in
+#     the live conversations tree is ever deleted, and nothing inside the
+#     window is ever deleted. Setting HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS
+#     empty or 0 opts out and restores the never-delete behaviour exactly.
 #
 #   A directory is moved only when ALL of these hold:
 #     1. it is a real directory (not a symlink) whose name is a plain token,
@@ -17,6 +25,12 @@
 #     5. no running container mounts it,
 #     6. the move cap has not been reached, the destination name is free, and
 #        the quarantine lives on the same filesystem.
+#
+#   A MISSING lease keeps the directory, and that fail-safe stays the default.
+#   HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1 opts in to treating an absent lease like
+#   an expired one: the directory still has to pass every other guard, so it
+#   moves only once its own mtime is past the age limit. Inside the age limit it
+#   is refused with reason lease-less-recent.
 #
 #   Every degraded condition (missing root, missing python3, no docker, an
 #   unreadable lease) is logged and the script still reaches the summary line
@@ -35,6 +49,17 @@
 #       Quarantine root override. Default: the sibling directory
 #       <dirname HYBRID_AI_DATA_DIR>/hybrid-ai-conversation-quarantine.
 #       It is still checked against every tree the backup captures.
+#   HYBRID_AI_PRUNE_ALLOW_LEASE_LESS    default empty (OFF)
+#       Set to 1/true/yes to let a directory with NO owner_lease.json be swept
+#       once its own mtime is older than HYBRID_AI_PRUNE_AGE_SECONDS. Every
+#       other guard still applies. Unset or any other value keeps today's
+#       fail-safe: a missing lease is refused with reason lease-missing.
+#   HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS  default 90
+#       Days a <YYYYMMDD> run directory may stay in the quarantine root before
+#       the sweep deletes it. Deletion runs only after the backup assertion
+#       passes, is path-confined to the quarantine root, and is logged per
+#       directory. An explicitly EMPTY or 0 value opts out and never deletes
+#       anything, as before.
 #
 #   All host paths come from scripts/lib/hybrid-ai-env.sh, the one resolver.
 #   No default in that file is changed here.
@@ -92,6 +117,10 @@ PRUNE_AGE_SECONDS="${HYBRID_AI_PRUNE_AGE_SECONDS:-604800}"
 PRUNE_GRACE_SECONDS="${HYBRID_AI_PRUNE_GRACE_SECONDS:-86400}"
 PRUNE_MAX_MOVES="${HYBRID_AI_PRUNE_MAX_MOVES:-20}"
 PRUNE_QUARANTINE_BASE="${HYBRID_AI_PRUNE_QUARANTINE_BASE:-}"
+PRUNE_ALLOW_LEASE_LESS="${HYBRID_AI_PRUNE_ALLOW_LEASE_LESS:-}"
+# -90, not :-90: an explicitly EMPTY value opts out of retention; an unset one
+# keeps the default window ON.
+PRUNE_QUARANTINE_RETENTION_DAYS="${HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS-90}"
 
 EXPIRY_KEYS="expiry expires_at expires expire_at expiresAt expiry_epoch expires_at_epoch"
 
@@ -99,7 +128,9 @@ SCANNED=0
 KEPT_LIVE=0
 KEPT_RECENT=0
 MOVED=0
+MOVED_LEASE_LESS=0
 REFUSED=0
+RETENTION_DELETED=0
 REFUSAL_REASONS=()
 QUARANTINE_RUN_DIR="none"
 SUMMARY_DONE=0
@@ -113,7 +144,7 @@ summary() {
     reasons="$(printf '%s | ' "${REFUSAL_REASONS[@]}")"
     reasons="${reasons% | }"
   fi
-  log "summary: scanned=${SCANNED} kept-live=${KEPT_LIVE} kept-recent=${KEPT_RECENT} moved=${MOVED} refused=${REFUSED} quarantine=${QUARANTINE_RUN_DIR} refusals=${reasons}"
+  log "summary: scanned=${SCANNED} kept-live=${KEPT_LIVE} kept-recent=${KEPT_RECENT} moved=${MOVED} moved-lease-less=${MOVED_LEASE_LESS} retention-deleted=${RETENTION_DELETED} refused=${REFUSED} quarantine=${QUARANTINE_RUN_DIR} refusals=${reasons}"
 }
 
 # Every path ends here: log the summary once and exit 0. The trap is a backstop
@@ -145,6 +176,21 @@ for _knob in PRUNE_AGE_SECONDS PRUNE_GRACE_SECONDS PRUNE_MAX_MOVES; do
   fi
 done
 unset _knob
+# Empty means opt-out, so only a non-empty value has to be a whole number.
+if [[ -n "$PRUNE_QUARANTINE_RETENTION_DAYS" ]] && ! is_uint "$PRUNE_QUARANTINE_RETENTION_DAYS"; then
+  warn "config: PRUNE_QUARANTINE_RETENTION_DAYS is not a whole number of days (value not printed); refusing to move anything."
+  QUARANTINE_RUN_DIR="none"
+  finish
+fi
+
+# The opt-in that lets a lease-less directory past the age limit. Off unless the
+# owner said so: 1, true or yes.
+lease_less_allowed() {
+  case "${PRUNE_ALLOW_LEASE_LESS,,}" in
+    1|true|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # --- The conversations root ------------------------------------------------
 if [[ -z "${OPENHANDS_WORKSPACE:-}" ]]; then
@@ -453,6 +499,7 @@ while IFS= read -r -d '' entry; do
   verdict_line="$(lease_verdict "$entry_real")" || verdict_line=""
   verdict="${verdict_line%%|*}"
   detail="${verdict_line#*|}"
+  lease_less=0
   case "$verdict" in
     live)
       KEPT_LIVE=$(( KEPT_LIVE + 1 ))
@@ -462,8 +509,15 @@ while IFS= read -r -d '' entry; do
     expired)
       ;;
     *)
-      deny "${name}: ${detail:-lease-unparsable}"
-      continue
+      # An absent lease is the one verdict the owner may opt in to overriding.
+      # Every other keep verdict stays a refusal, and the fail-safe default
+      # (knob unset or empty) is unchanged: refuse, reason lease-missing.
+      if [[ "$detail" == "lease-missing" ]] && lease_less_allowed; then
+        lease_less=1
+      else
+        deny "${name}: ${detail:-lease-unparsable}"
+        continue
+      fi
       ;;
   esac
 
@@ -474,6 +528,10 @@ while IFS= read -r -d '' entry; do
     continue
   fi
   if (( NOW_EPOCH - mtime < PRUNE_AGE_SECONDS )); then
+    if (( lease_less )); then
+      deny "${name}: lease-less-recent"
+      continue
+    fi
     KEPT_RECENT=$(( KEPT_RECENT + 1 ))
     log "kept-recent: ${name} (mtime_age=$(( NOW_EPOCH - mtime ))s)"
     continue
@@ -531,10 +589,90 @@ while IFS= read -r -d '' entry; do
 
   if mv -n -- "$entry_real" "$dest" 2>/dev/null && [[ -d "$dest" && ! -e "$entry_real" ]]; then
     MOVED=$(( MOVED + 1 ))
-    log "moved: ${name} -> ${QUARANTINE_RUN_DIR}"
+    if (( lease_less )); then
+      MOVED_LEASE_LESS=$(( MOVED_LEASE_LESS + 1 ))
+      log "moved: ${name} -> ${QUARANTINE_RUN_DIR} (reason=lease-less-moved)"
+    else
+      log "moved: ${name} -> ${QUARANTINE_RUN_DIR}"
+    fi
   else
     deny "${name}: move-failed"
   fi
 done < <(find "$CONV_ROOT_REAL" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+
+# --- Quarantine retention -------------------------------------------------
+# The only deletion in this script, and it can only touch a <YYYYMMDD> run
+# directory DIRECTLY inside the quarantine root, only once that directory's own
+# mtime is past the window. Every other path -- the live conversations tree,
+# anything the backup captures, anything outside the canonical quarantine root,
+# a symlink, the run directory this run just wrote -- is out of reach.
+#
+# Reached only after backup_assert_ok succeeded, because the whole function is
+# called below that check.
+retention_sweep() {
+  # 0 and empty are both the documented opt-out. 0 must not be read as a
+  # zero-day window, which would delete every run directory including this run's.
+  if [[ -z "$PRUNE_QUARANTINE_RETENTION_DAYS" || "$PRUNE_QUARANTINE_RETENTION_DAYS" -eq 0 ]]; then
+    log "retention: disabled (retention knob is empty or 0); nothing is deleted, as before."
+    return 0
+  fi
+
+  local window_seconds=$(( PRUNE_QUARANTINE_RETENTION_DAYS * 86400 ))
+  local base_real run_real now_epoch kept_in_window=0 name run_mtime age
+  base_real="$(canon "$QUARANTINE_BASE")" || base_real=""
+  if [[ -z "$base_real" || "$base_real" == "/" ]]; then
+    log "retention: cannot canonicalise the quarantine root; nothing is deleted."
+    return 0
+  fi
+  if path_within "$base_real" "${CONV_ROOT_REAL%/}" || path_within "$CONV_ROOT_REAL" "$base_real"; then
+    log "retention: the quarantine root and the conversations tree overlap; nothing is deleted."
+    return 0
+  fi
+  now_epoch="$(date -u +%s)"
+
+  while IFS= read -r -d '' run_entry; do
+    name="${run_entry##*/}"
+    if [[ "$name" != "$(date -u -d "@$now_epoch" +%Y%m%d)" && ! "$name" =~ ^[0-9]{8}$ ]]; then
+      continue
+    fi
+    if [[ -L "$run_entry" || ! -d "$run_entry" ]]; then
+      continue
+    fi
+    run_real="$(canon "$run_entry")" || run_real=""
+    # Confinement: exactly one level under the quarantine root, never the root,
+    # never the live tree, never the run directory this run is using.
+    if [[ -z "$run_real" || "$run_real" == "$base_real" ]]; then
+      continue
+    fi
+    if [[ "${run_real%/*}" != "$base_real" ]]; then
+      continue
+    fi
+    if [[ "$run_real" == "$QUARANTINE_RUN_DIR" ]]; then
+      continue
+    fi
+    if path_within "$run_real" "${CONV_ROOT_REAL%/}"; then
+      continue
+    fi
+    run_mtime="$(stat -c %Y -- "$run_real" 2>/dev/null)" || run_mtime=""
+    if [[ -z "$run_mtime" ]] || ! is_uint "$run_mtime"; then
+      continue
+    fi
+    age=$(( now_epoch - run_mtime ))
+    if (( age < window_seconds )); then
+      kept_in_window=$(( kept_in_window + 1 ))
+      continue
+    fi
+    if rm -rf --one-file-system -- "$run_real" 2>/dev/null && [[ ! -e "$run_real" ]]; then
+      RETENTION_DELETED=$(( RETENTION_DELETED + 1 ))
+      log "retention-deleted: ${run_real} (age=${age}s window=${PRUNE_QUARANTINE_RETENTION_DAYS}d)"
+    else
+      warn "retention: could not delete ${run_real}; leaving it in place."
+    fi
+  done < <(find "$base_real" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+
+  log "retention: kept=${kept_in_window} inside the ${PRUNE_QUARANTINE_RETENTION_DAYS}-day window."
+}
+
+retention_sweep
 
 finish

@@ -1659,9 +1659,11 @@ neither the UI nor an API call will free the space, and `doctor.sh` only warns w
 the tree passes about 1 GiB or 10 directories.
 
 The fix is the quarantine sweep, `scripts/prune-conversations.sh`, run by
-`hybrid-ai-prune.timer` daily at 04:20. It **quarantines, it never deletes**: a
-stale directory is moved into a date-stamped quarantine root and a plain `mv`
-back restores it.
+`hybrid-ai-prune.timer` daily at 04:20. It **moves, it does not shred**: a stale
+directory is moved into a date-stamped quarantine root and a plain `mv` back
+restores it. The one deletion in the script is confined to that quarantine root
+and only past a retention window (90 days by default; see
+[Quarantine retention](#quarantine-retention-and-the-lease-less-state) below).
 
 ### Did the timer run?
 
@@ -1680,7 +1682,7 @@ what it did in its summary line.
 The last log line of every run is:
 
 ```text
-summary: scanned=N kept-live=N kept-recent=N moved=N refused=N quarantine=<dir> refusals=<reasons>
+summary: scanned=N kept-live=N kept-recent=N moved=N moved-lease-less=N retention-deleted=N refused=N quarantine=<dir> refusals=<reasons>
 ```
 
 | Field | Meaning |
@@ -1688,21 +1690,29 @@ summary: scanned=N kept-live=N kept-recent=N moved=N refused=N quarantine=<dir> 
 | `scanned` | Directories seen at the top level of the conversations root |
 | `kept-live` | Kept: lease still valid, inside its grace period, or a running container mounts it |
 | `kept-recent` | Kept: mtime newer than `HYBRID_AI_PRUNE_AGE_SECONDS` |
-| `moved` | Moved into the quarantine |
+| `moved` | Moved into the quarantine. Includes the lease-less moves counted below |
+| `moved-lease-less` | Subset of `moved`: directories that had no lease and moved because `HYBRID_AI_PRUNE_ALLOW_LEASE_LESS` is ON |
+| `retention-deleted` | Quarantine run directories deleted past the retention window. `0` when retention is opted out |
 | `refused` | Refused, with the reasons listed in `refusals` |
 | `quarantine` | The per-run directory, `<root>/<UTC YYYYMMDD>`; `none` when the run refused to sweep |
 
 `refusals` names each reason: `symlink`, `unsafe-name`, `path-escape`,
-`lease-missing`, `lease-unreadable`, `lease-empty`, `lease-unparsable-json`,
-`lease-not-an-object`, `lease-no-expiry-key`, `lease-expiry-unparsable`,
-`mtime-unreadable`, `cap-reached`, `destination-exists`, `cross-device`,
-`move-failed`.
+`lease-missing`, `lease-less-recent`, `lease-unreadable`, `lease-empty`,
+`lease-unparsable-json`, `lease-not-an-object`, `lease-no-expiry-key`,
+`lease-expiry-unparsable`, `mtime-unreadable`, `cap-reached`,
+`destination-exists`, `cross-device`, `move-failed`.
+
+`moved-lease-less` and `retention-deleted` are always printed, so a run that
+moved nothing no longer reads as unqualified success: `moved=0` with
+`refused=3 lease-missing` names the state instead of hiding it.
 
 Read the common ones this way:
 
 | What you see | What it means | What to do |
 |---|---|---|
 | `moved=0` and every entry `kept-live` | The leases are still valid, so the sweep is working as designed | Wait. Check again once the app has been idle for `HYBRID_AI_PRUNE_GRACE_SECONDS` |
+| `refused=3 lease-missing`, `moved=0` | The directories carry no `owner_lease.json`, so the fail-safe refuses them on every run and nothing moves | See [the lease-less state](#quarantine-retention-and-the-lease-less-state) |
+| `refused=... lease-less-recent` | The opt-in is ON, but those lease-less directories are newer than `HYBRID_AI_PRUNE_AGE_SECONDS` | Nothing to do; they become eligible once their mtime ages out |
 | `refused=... cap-reached` | More eligible directories than one run may move | Raise `HYBRID_AI_PRUNE_MAX_MOVES`, or let the next daily run continue |
 | `quarantine=none`, `moved=0` | The run refused to sweep: a path would not canonicalise, the root was missing, or the quarantine root was inside a backup-captured tree | Read the `[ ! ]` warning line above the summary; it names the setting |
 | `cross-device` | The quarantine root is on another filesystem | Point `HYBRID_AI_PRUNE_QUARANTINE_BASE` at the same filesystem as the conversations tree |
@@ -1730,8 +1740,55 @@ sudo mv "$Q/20260101/<conversation-id>" "$OPENHANDS_WORKSPACE/conversations/"
 
 The quarantine root is deliberately outside every tree the backup captures, so
 quarantined directories are **not** in a backup and will not be swept into the next
-snapshot. Keep what you want by hand, and delete from the quarantine yourself once
-you are sure; the script never does.
+snapshot. Move back what you want before the retention window closes.
+
+### Quarantine retention and the lease-less state
+
+Two things bound the quarantine and make a stuck sweep visible.
+
+**Retention.** The quarantine root is not unbounded. Every `<YYYYMMDD>` directory
+directly inside it is deleted once that directory's own mtime is older than
+`HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` days (default `90`). Deletion runs
+only after the backup assertion passes, is confined to the quarantine root, never
+follows a symlink, and is logged per directory:
+
+```text
+retention-deleted: /path/hybrid-ai-conversation-quarantine/20260101 (age=..., window=90d)
+```
+
+An **explicitly empty or `0`** value opts out and restores the older
+never-delete behaviour byte-for-byte; the run then logs `retention: disabled`
+and `retention-deleted=0`. An unset value does not opt out: it means 90 days.
+
+**The lease-less state.** A conversation directory with no `owner_lease.json` is
+refused by the sweep on **every** run. The fail-safe is deliberate: an absent
+lease never authorises a move. The cost is a directory that is invisible to the
+app and never swept, while the run still reports success:
+
+```text
+summary: scanned=3 kept-live=0 kept-recent=0 moved=0 moved-lease-less=0 retention-deleted=0 refused=3 quarantine=... refusals=... lease-missing
+```
+
+`./doctor.sh` now counts those directories and warns:
+
+```text
+! 3 conversation director(ies) have no owner_lease.json (...): the prune sweep refuses them forever, so it moves nothing
+```
+
+The check is warning-only, so it raises the exit code to **1**, never 2.
+
+To sweep them, opt in deliberately:
+
+1. Set `HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1` in `.env` and re-run `./install.sh`.
+2. Run the sweep: `sudo systemctl start hybrid-ai-prune`, or
+   `sudo /opt/hybrid-ai/scripts/prune-conversations.sh`.
+3. Confirm `moved-lease-less=` in the summary. A directory still inside
+   `HYBRID_AI_PRUNE_AGE_SECONDS` is refused with reason `lease-less-recent`.
+
+Only the lease verdict changes: a lease-less directory still has to pass the
+symlink, path-escape, age, container, cap, destination, filesystem and backup
+guards. Leave the knob empty or unset to keep the fail-safe, which is the default
+`install.sh` writes.
 
 ### Tune the knobs
 
@@ -1744,9 +1801,12 @@ Set these in `.env` (or the layout env file on a bootstrapped host) and re-run
 | `HYBRID_AI_PRUNE_GRACE_SECONDS` | `86400` | Seconds. An expired lease is kept this long after expiry |
 | `HYBRID_AI_PRUNE_MAX_MOVES` | `20` | Count. Moves allowed in one run |
 | `HYBRID_AI_PRUNE_QUARANTINE_BASE` | unset | Quarantine root override; still asserted outside every captured tree |
+| `HYBRID_AI_PRUNE_ALLOW_LEASE_LESS` | empty (OFF) | Opt-in. `1`, `true` or `yes` lets a lease-less directory move once past the age limit |
+| `HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` | `90` | Days a quarantine run directory is kept. Empty or `0` opts out and never deletes |
 
-A non-numeric value in any of the three numeric knobs is a refusal: the run logs a
-warning and moves nothing.
+A non-numeric value in any numeric knob is a refusal: the run logs a warning and
+moves nothing. An empty `HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` is the one
+accepted empty value, because it is the documented opt-out.
 
 ---
 

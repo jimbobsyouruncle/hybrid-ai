@@ -279,6 +279,18 @@ jobs:
         # workspace. The harness fails against a tree without the script.
         run: bash scripts/test-prune-conversations.sh
 
+      - name: Doctor lease-less conversation tests
+        # Offline, no root, no Docker, no network. RUNS doctor.sh against
+        # fixture conversation trees to prove the lease-less check in BOTH
+        # directions: a lease-complete root passes, a root with lease-less
+        # directories warns with the count and names
+        # HYBRID_AI_PRUNE_ALLOW_LEASE_LESS plus the prune unit and script,
+        # an absent or unreadable root prints a skip note and leaves the exit
+        # code alone. The check is warning-only, so every case asserts the
+        # exit code is never 2. The harness fails against a doctor.sh without
+        # the check (verified against the base commit's copy).
+        run: bash scripts/test-doctor-lease-less.sh
+
       - name: Docker build-cache prune tests
         # Offline, no root, no Docker, no network. Proves
         # scripts/prune-docker-cache.sh caps the build cache and degrades

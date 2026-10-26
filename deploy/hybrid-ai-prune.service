@@ -3,8 +3,11 @@
 # PURPOSE (plain English):
 #   Runs the conversation prune once, on demand, as root. The script sweeps the
 #   OpenHands conversations tree and moves stale conversations into a quarantine
-#   directory. It QUARANTINES ONLY: it never deletes anything, so an operator can
-#   always inspect and restore what the sweep moved aside.
+#   directory. MOVES ARE QUARANTINE ONLY, so an operator can always inspect and
+#   restore what the sweep moved aside. The one deletion is confined to
+#   <YYYYMMDD> run directories inside the quarantine root, only past
+#   HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS (default 90), and only after the
+#   backup assertion passes.
 #
 #   It runs as root because the conversations tree is owned by root and the
 #   stack's own users; a non-root run could not move those directories.

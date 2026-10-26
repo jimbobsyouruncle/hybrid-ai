@@ -196,18 +196,30 @@ directories once it has forgotten them — a live host has reported 0 conversati
 while 29 directories, about 8.3 GB, sat on disk — so the sweep walks the
 filesystem instead of the API.
 
-`scripts/prune-conversations.sh` **quarantines, and never deletes**. It moves stale
+`scripts/prune-conversations.sh` **moves, and does not shred**. It moves stale
 conversation directories into a date-stamped quarantine root beside the data
 directory (default `<dirname of HYBRID_AI_DATA_DIR>/hybrid-ai-conversation-quarantine/<YYYYMMDD>/`,
 on the same filesystem, mode 0750 and root-owned). The root is asserted to be
 outside every tree the backup captures; if it is not, the sweep moves nothing.
-Moving a directory back into `conversations/` restores it.
+Moving a directory back into `conversations/` restores it. The one deletion is
+confined to `<YYYYMMDD>` directories inside that quarantine root, past
+`HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` (default `90`; an explicitly empty
+or `0` value opts out and never deletes).
+
+A directory with no `owner_lease.json` is refused on every run, so the sweep
+moves nothing for it and the run used to look like an unqualified success.
+`./doctor.sh` now warns with the count, and `HYBRID_AI_PRUNE_ALLOW_LEASE_LESS`
+is the default-OFF opt-in that sweeps such a directory once its mtime is past the
+age limit. The summary line always prints `moved-lease-less=` and
+`retention-deleted=`.
 
 `hybrid-ai-prune.timer` is the primary mechanism and runs it daily at 04:20;
 `install.sh` installs and enables the units unconditionally and also runs the
 service once at deploy time as catch-up only. The sweep is configurable with
 `HYBRID_AI_PRUNE_AGE_SECONDS`, `HYBRID_AI_PRUNE_GRACE_SECONDS`,
-`HYBRID_AI_PRUNE_MAX_MOVES` and `HYBRID_AI_PRUNE_QUARANTINE_BASE`.
+`HYBRID_AI_PRUNE_MAX_MOVES`, `HYBRID_AI_PRUNE_QUARANTINE_BASE`,
+`HYBRID_AI_PRUNE_ALLOW_LEASE_LESS` and
+`HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS`.
 
 `hybrid-ai-docker-prune.timer` is a sibling that caps the Docker build cache
 daily at 04:35 so repeated rebuilds of the multi-GB stack images cannot fill the

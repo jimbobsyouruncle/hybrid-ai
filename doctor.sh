@@ -1523,6 +1523,49 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Lease-less conversation directories (WARNING ONLY)
+#
+# A conversation directory with no owner_lease.json is refused by
+# scripts/prune-conversations.sh forever: the fail-safe keeps an absent lease,
+# so the sweep reports success while moving nothing and the directory is
+# invisible to the app as well. That state is silent on a healthy-looking host,
+# so surface it with a count.
+#
+# Read-only: find with a per-entry test, no writes. Depth 1 only, symlinks are
+# neither counted nor followed. Same skip discipline as the growth check above:
+# a non-Linux host, an unset workspace or an absent/unreadable root prints one
+# dim "skipped" line and leaves the exit code exactly as it was.
+#
+# WARNING-ONLY BY DESIGN: an owner may prefer to keep those directories, so this
+# never calls fail() and adds no path to exit 2.
+# ---------------------------------------------------------------------------
+LL_SKIP="$CONV_SKIP"
+if [[ -z "$LL_SKIP" && ! -d "$CONV_ROOT" ]]; then
+  LL_SKIP="conversations root not present"
+fi
+
+if [[ -n "$LL_SKIP" ]]; then
+  (( QUIET )) || printf '  %s-%s lease-less conversation check skipped (%s)\n' "$C_DIM" "$C_RST" "$LL_SKIP"
+else
+  LEASELESS=0
+  while IFS= read -r -d '' _ll_entry; do
+    [[ -L "$_ll_entry" ]] && continue
+    [[ -d "$_ll_entry" ]] || continue
+    [[ -e "$_ll_entry/owner_lease.json" ]] && continue
+    LEASELESS=$(( LEASELESS + 1 ))
+  done < <(find "$CONV_ROOT" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  unset _ll_entry
+  if (( LEASELESS > 0 )); then
+    warn "${LEASELESS} conversation director(ies) have no owner_lease.json (${CONV_ROOT}): the prune sweep refuses them forever, so it moves nothing" \
+         "These are invisible to the app. Sweep the ones past the age limit with: sudo systemctl start hybrid-ai-prune (or sudo ${HYBRID_AI_APP_DIR:-/opt/hybrid-ai}/scripts/prune-conversations.sh) after setting HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=1 in .env and re-running ./install.sh. Leave it unset to keep the fail-safe."
+  else
+    pass "every conversation directory carries an owner lease"
+  fi
+  unset LEASELESS
+fi
+unset LL_SKIP
+
+# ---------------------------------------------------------------------------
 # Post-deploy verification log (WARNING ONLY)
 # ---------------------------------------------------------------------------
 # scripts/deploy-remote.sh starts scripts/run-post-deploy-verify.sh in a
