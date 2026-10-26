@@ -405,8 +405,9 @@ else
   fail "the Authorization header was not present in curl's --config file"
 fi
 # The header must carry the fixture key's VALUE. This is the regression guard:
-# a doctor.sh that wrote a placeholder (`***`) instead of the value would leave
-# the header present but empty of the key, and the API check could never work.
+# a doctor.sh whose printf wrote a literal placeholder instead of consuming
+# "$key" would leave the header line without the key, and the API check could
+# never validate a real key.
 if [[ -r "$RECORD/config" ]] \
    && grep -qxF "header = \"Authorization: Bearer ${FIXTURE_KEY}\"" "$RECORD/config"; then
   pass "the --config file's Authorization header carried the actual RUNPOD_API_KEY value"
