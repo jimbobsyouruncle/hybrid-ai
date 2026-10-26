@@ -21,7 +21,8 @@ One command. It checks the host, configuration, containers, services, network, b
 ```
 ./doctor.sh              full report
 ./doctor.sh --quiet      problems only (good for cron)
-./doctor.sh --no-cloud   skip checks that contact RunPod or R2
+./doctor.sh --no-cloud   skip the checks that contact R2 (the backup repository).
+                         The single short RunPod API-key probe still runs.
 ```
 
 Exit codes: `0` healthy, `1` warnings only, `2` something is broken. That makes it usable in monitoring:
@@ -195,6 +196,29 @@ How to read it from the Actions page:
 A missing or non-executable `doctor.sh` is also an error, not a skip. The old inline script ran it only if executable and ignored its exit code; that skip is gone, because a health gate that quietly does not run is worse than no gate. If the deploy reports `doctor.sh is missing or not executable`, the file was removed from the checkout — restore it from the repository.
 
 Warnings (`exit 1`) never fail the deploy. If you want to silence one, fix the underlying warning rather than masking the exit code.
+
+**A sleeping GPU pod is a warning, not a failure.** An on-demand pod stops itself
+to save money, and a stopped pod leaves the tailnet, so its MagicDNS name
+(`RUNPOD_HOST`) stops resolving. The gate warns with `RUNPOD_HOST does not
+resolve right now: the GPU pod may be asleep or not yet registered on this
+tailnet` and stays green. To prove end-to-end that a pod can start and join the
+tailnet, run `sudo ./install.sh --wake-runpod` (resumes the pod and waits up to
+three minutes for it to join), then re-run `./doctor.sh`.
+
+A `RUNPOD_HOST` that is **not shaped like a pod MagicDNS name** does fail: the
+expected shape is `<pod>.<tailnet>.ts.net`, e.g.
+`runpod-worker.example-tailnet.ts.net`. A bare `tailnet.ts.net`, a single label
+like `pod`, or a foreign domain like `pod.example.com` can never resolve to the
+pod, so they are configuration errors. Fix `RUNPOD_HOST` in `.env` (re-run
+`./install.sh` to rediscover it).
+
+**`RUNPOD_API_KEY was rejected by the RunPod API`.** The gate sends one
+read-only RunPod GraphQL query and the API answered HTTP 401/403 (or a GraphQL
+auth error). The key was rotated, revoked or mistyped. Rotate it in the RunPod
+console (Settings → API Keys), update `RUNPOD_API_KEY` in the Pi `.env`, then
+re-run `./doctor.sh`. A timeout, a network failure, an HTTP `5xx` or a body that
+is not JSON is only a skip note and never fails the deploy — the probe does not
+claim a key is bad when it could not answer.
 
 ---
 
@@ -1531,11 +1555,22 @@ Update the `PI_TAILSCALE_FULL_DOMAIN` GitHub secret if you use CI.
 
 **`runpod-vllm` peer does not appear**
 
-Expected when the pod is stopped — but the entry should persist even then. If it has vanished entirely, the ephemeral node was cleaned up. Start the pod once manually, then:
+Expected when the pod is stopped — an ephemeral node is cleaned up when it leaves
+the tailnet, so a stopped pod usually has no peer entry at all. That is why
+`./doctor.sh` reports `No tailnet peer matching runpod-worker/runpod-vllm right
+now` as a warning and never fails the deploy. Start the pod and wait for it to
+join:
 
 ```bash
-./install.sh
+sudo ./install.sh --wake-runpod
+./doctor.sh
 ```
+
+`--wake-runpod` resumes the pod through the API and waits up to three minutes
+for it to join the tailnet. Re-run `./install.sh` only if the peer comes up under
+a different name; it records the discovered MagicDNS name as `RUNPOD_HOST`.
+Notice `./doctor.sh` reports the pod's `desiredStatus` from the RunPod API, so a
+`STOPPED` pod is visible even when no peer exists.
 
 **The peer appears but is unreachable**
 
@@ -1561,20 +1596,28 @@ Work through it in this order:
 
 ```bash
 # 1. Is the pod even known to the tailnet?
-tailscale status | grep runpod-vllm
+tailscale status | grep -E 'runpod-worker|runpod-vllm'
 
 # 2. Does the stored MagicDNS name resolve to a mesh address?
 source .env
 POD_ADDR="$(tailscale ip -4 "$RUNPOD_HOST" | head -1)"
 echo "$POD_ADDR"                # the RESOLVED address must start with 100.
 
-# 3. Is the pod running? Check the RunPod console.
+# 3. Is the pod running? Check the RunPod console, or ask the API through
+#    ./doctor.sh, which reports the pod's desiredStatus.
 
 # 4. Can we reach the model API?
 source .env
 POD_ADDR="$(tailscale ip -4 "$RUNPOD_HOST" | head -1)"
 curl -v --max-time 10 "http://${POD_ADDR}:8000/v1/models"
 ```
+
+**A stopped pod leaves the tailnet, so step 1 and step 2 legitimately find
+nothing.** `./doctor.sh` warns about that (`RUNPOD_HOST does not resolve right
+now: the GPU pod may be asleep or not yet registered`) and does not fail the
+deploy. To start the pod and confirm it can join, run
+`sudo ./install.sh --wake-runpod`. Only a `RUNPOD_HOST` that is not shaped like
+`<pod>.<tailnet>.ts.net` is a failure, because nothing could ever resolve it.
 
 **"Refusing to transmit: ... outside the Tailscale mesh range"**
 

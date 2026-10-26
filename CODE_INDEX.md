@@ -114,6 +114,9 @@
 - fail()
 - env_get()
 - env_key_state()
+- cleanup_runpod_tmp()
+- runpod_skip()
+- runpod_key_check()
 - container_env()
 - install_hint()
 - sandbox_image_probe()
@@ -572,6 +575,12 @@
 - pass()
 - fail()
 - summary_count()
+- run_doctor()
+
+## scripts/test-doctor-runpod-key.sh
+- pass()
+- fail()
+- write_env()
 - run_doctor()
 
 ## scripts/test-doctor-sandbox-firewall.sh

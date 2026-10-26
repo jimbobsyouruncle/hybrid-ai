@@ -196,6 +196,33 @@ In the pod template's **Environment Variables** section:
 
 Only the exact values `1` and `true` enable auto-wake; any other value means off. When the installer does wake the pod, it needs `RUNPOD_API_KEY` and `RUNPOD_POD_ID` in `.env`, sends a resume request, and waits up to three minutes for the peer to join the tailnet. With auto-wake off, `install.sh` uses the peer it discovers and records its MagicDNS name as `RUNPOD_HOST`; nothing stores the peer's address any more, because a recreated pod gets a new one. Consumers resolve `RUNPOD_HOST` at use time.
 
+### Manual end-to-end verification
+
+A stopped pod is the normal money-saving state, so it must not look like a fault.
+`./doctor.sh` therefore treats a `RUNPOD_HOST` that does not resolve as a warning
+when the name is shaped like a pod MagicDNS record (`<pod>.<tailnet>.ts.net`),
+and fails only when the name could never resolve. It also validates
+`RUNPOD_API_KEY` with one read-only RunPod GraphQL query, so a rotated key is
+caught immediately.
+
+To prove end-to-end that a pod can start and join the tailnet, run on the Pi:
+
+```bash
+sudo ./install.sh --wake-runpod
+```
+
+That resumes the pod through the RunPod API and waits up to three minutes for it
+to appear on the tailnet. Then confirm the report:
+
+```bash
+./doctor.sh
+```
+
+You want the API-key line to say `RunPod API key accepted for pod <id>
+(desiredStatus: RUNNING)` and the tailnet section to name the pod peer. A
+`desiredStatus: STOPPED` key line is a pass: the key works, the pod is simply
+asleep.
+
 ---
 
 ## First boot and verification
