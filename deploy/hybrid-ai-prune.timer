@@ -9,8 +9,9 @@
 #   host is back up. install.sh also runs hybrid-ai-prune.service once at deploy
 #   time, but that call is catch-up only, not the schedule.
 #
-#   The prune QUARANTINES and never deletes; only the script decides what to
-#   move aside.
+#   The prune only MOVES conversation directories aside; the script alone
+#   decides what to move. Its one deletion is confined to quarantine run
+#   directories past the retention window.
 # ---------------------------------------------------------------------------
 [Unit]
 Description=Run the hybrid-ai conversation prune daily

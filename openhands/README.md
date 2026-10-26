@@ -117,7 +117,7 @@ forgets a conversation long before its directory leaves the workspace, so an
 API-driven cleanup cannot see them. `scripts/prune-conversations.sh` therefore
 walks the directory tree.
 
-The sweep QUARANTINES, it never deletes. A stale directory is moved to:
+The sweep MOVES; it does not shred. A stale directory is moved to:
 
 ```text
 <dirname of HYBRID_AI_DATA_DIR>/hybrid-ai-conversation-quarantine/<YYYYMMDD>/<conversation-id>/
@@ -130,12 +130,24 @@ That root is on the same filesystem as the conversations tree, is created mode
 If it does not, the sweep refuses to move anything. `HYBRID_AI_PRUNE_QUARANTINE_BASE`
 overrides the root and is still subject to the same assertion.
 
-Moving a directory back into `conversations/` restores it, because nothing was
-deleted. Permission to move it is checked before the move: a symlinked or
-non-plain-token directory name is refused and never followed, a directory whose
-lease is missing, unreadable or unrecognised is refused and never moved — reported
-as a refusal, not as kept-live, so an unreadable lease fails closed — and a
-directory reached by a running container is skipped. The schedule, the knobs and
+The quarantine root is bounded: `<YYYYMMDD>` run directories older than
+`HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` (default `90`) are deleted, only after
+the backup assertion passes and only inside that root. An explicitly empty or
+`0` value opts out and never deletes.
+
+A directory with no `owner_lease.json` is refused on every run: the fail-safe
+keeps an absent lease. `HYBRID_AI_PRUNE_ALLOW_LEASE_LESS` is the default-OFF
+opt-in that lets one move once its own mtime is past `HYBRID_AI_PRUNE_AGE_SECONDS`,
+and `./doctor.sh` warns with the count when any exist.
+
+Moving a directory back into `conversations/` restores it, because the sweep
+moves rather than shreds. Permission to move it is checked before the move: a
+symlinked or non-plain-token directory name is refused and never followed, a
+directory whose lease is unreadable or unrecognised is refused and never moved —
+reported as a refusal, not as kept-live, so an unreadable lease fails closed — a
+directory whose lease is missing is refused unless
+`HYBRID_AI_PRUNE_ALLOW_LEASE_LESS` is set, and a directory reached by a running
+container is skipped. The schedule, the knobs and
 the inspection steps are in
 [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
 

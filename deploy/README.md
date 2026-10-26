@@ -319,8 +319,20 @@ filesystem sandboxing directives (`ProtectSystem=`, `PrivateTmp=`,
 `ReadOnlyPaths=`, `InaccessiblePaths=`): the service has to move directories
 under the workspace, and those flags would break the move.
 
-The prune QUARANTINES and never deletes. The knobs and the inspection and restore
-steps are in the root `README.md` and
+The prune MOVES, it does not shred: every swept directory lands in the
+date-stamped quarantine root and a plain `mv` back restores it. The only deletion
+is confined to `<YYYYMMDD>` run directories directly inside that quarantine root
+and only once they are older than
+`HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` (default `90`; an explicitly empty
+or `0` value opts out and restores the never-delete behaviour). Deletion happens only
+after the sweep's backup assertion passes, so a quarantine root inside a captured
+tree is never touched.
+
+A directory with no `owner_lease.json` is refused on every run by the fail-safe,
+so the sweep moves nothing for it. `HYBRID_AI_PRUNE_ALLOW_LEASE_LESS` is the
+default-OFF opt-in that lets such a directory move once its own mtime is past
+`HYBRID_AI_PRUNE_AGE_SECONDS`; `doctor.sh` warns with the count when any exist.
+The knobs and the inspection and restore steps are in the root `README.md` and
 [`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md#the-disk-keeps-filling-with-conversation-directories).
 
 ## Docker build-cache prune units

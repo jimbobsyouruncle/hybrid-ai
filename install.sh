@@ -860,6 +860,20 @@ OPENHANDS_CPUS=${OPENHANDS_CPUS:-2.5}
 # local docker supports (--max-used-space, else --keep-storage).
 HYBRID_AI_BUILD_CACHE_CAP=${HYBRID_AI_BUILD_CACHE_CAP:-15GB}
 
+# --- Conversation prune (quarantine sweep) ---------------------------------
+# Read by scripts/prune-conversations.sh (hybrid-ai-prune.timer, daily 04:20).
+# ALLOW_LEASE_LESS is written empty: a directory with no owner_lease.json is
+# refused, never moved, unless the owner sets 1. QUARANTINE_RETENTION_DAYS is
+# written as 90, so the quarantine root is bounded by default.
+#
+# RETENTION_DAYS uses ${VAR-default}, NOT ${VAR:-default}: an explicitly EMPTY
+# value is the documented opt-out that restores the never-delete behaviour, so
+# a reinstall must preserve it rather than silently re-enable deletion. Unset
+# still yields 90. The script resolves the same way at run time, and it also
+# reads 0 as an opt-out.
+HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=${HYBRID_AI_PRUNE_ALLOW_LEASE_LESS:-}
+HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=${HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS-90}
+
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true
 DO_NOT_TRACK=true

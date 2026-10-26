@@ -74,7 +74,9 @@ meant to take off the disk. The script asserts this and refuses to move anything
 if the quarantine root is inside `HYBRID_AI_DATA_DIR`, `HYBRID_AI_APP_DIR`,
 `HYBRID_AI_WORK_DIR`, `HYBRID_AI_HERMES_DATA_DIR`, `HYBRID_AI_WEBUI_DATA_DIR` or
 `OPENHANDS_WORKSPACE`. Quarantined conversations are therefore **not** in a backup
-and are kept by hand, which is safe because the sweep never deletes anything.
+and are kept by hand. The sweep itself never deletes a conversation directory; its
+one deletion is confined to quarantine run directories past
+`HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS` (default `90`, empty or `0` opts out).
 
 ## The thing that makes this actually work
 
