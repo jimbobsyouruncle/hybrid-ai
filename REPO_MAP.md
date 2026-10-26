@@ -140,6 +140,7 @@
 - scripts/test-hermes-nonroot-preflight.sh - FILE: scripts/test-hermes-nonroot-preflight.sh
 - scripts/test-hybrid-ai-env.sh - FILE: scripts/test-hybrid-ai-env.sh
 - scripts/test-install-health.sh - FILE: scripts/test-install-health.sh
+- scripts/test-install-tailscale-migration.sh - FILE: scripts/test-install-tailscale-migration.sh
 - scripts/test-post-deploy-verify-log-env.sh - FILE: scripts/test-post-deploy-verify-log-env.sh
 - scripts/test-prune-conversations.sh - FILE: scripts/test-prune-conversations.sh
 - scripts/test-prune-docker-cache.sh - FILE: scripts/test-prune-docker-cache.sh
@@ -156,6 +157,7 @@
 - scripts/lib/build-gate.sh - FILE: scripts/lib/build-gate.sh
 - scripts/lib/hybrid-ai-env.sh - FILE: scripts/lib/hybrid-ai-env.sh
 - scripts/lib/read-probe.sh - FILE: scripts/lib/read-probe.sh
+- scripts/lib/tailscale-resolve.sh - FILE: scripts/lib/tailscale-resolve.sh
 ## status
 
 - status/Caddyfile

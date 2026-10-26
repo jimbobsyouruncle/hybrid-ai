@@ -28,6 +28,10 @@ cd "$SCRIPT_DIR" || exit 1
 # resolved paths are exactly today's.
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
+# Resolving the pod's MagicDNS name to an address happens in ONE place, shared
+# with collect-diagnostics.sh and install.sh.
+# shellcheck source=scripts/lib/tailscale-resolve.sh
+source "${SCRIPT_DIR}/scripts/lib/tailscale-resolve.sh"
 APP_DIR="$HYBRID_AI_APP_DIR"
 ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 
@@ -319,7 +323,7 @@ if [[ -f "$ENV_FILE" ]]; then
     fail "env file permissions are ${PERMS}, expected 600" "Fix: chmod 600 ${ENV_FILE}"
   fi
 
-  for key in WEBUI_SECRET_KEY RUNPOD_API_KEY RUNPOD_POD_ID TAILSCALE_IP PEER_HOSTNAME; do
+  for key in WEBUI_SECRET_KEY RUNPOD_API_KEY RUNPOD_POD_ID RUNPOD_HOST PEER_HOSTNAME; do
     if [[ -n "$(env_get "$key")" ]]; then
       pass "${key} is set"
     else
@@ -361,17 +365,42 @@ if [[ -f "$ENV_FILE" ]]; then
     done
   fi
 
-  TS_IP="$(env_get TAILSCALE_IP)"
-  if [[ -n "$TS_IP" ]]; then
-    # Mesh addresses are 100.64.x.x - 100.127.x.x. Anything else means the
-    # pipe will refuse to send, which is the safety net working correctly.
-    if [[ "$TS_IP" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]]; then
-      pass "TAILSCALE_IP is a valid mesh address"
-    else
-      fail "TAILSCALE_IP (${TS_IP}) is outside the Tailscale range" \
-           "The pipe will refuse to send prompts. Re-run ./install.sh to rediscover the pod."
-    fi
+  # --- GPU pod MagicDNS name resolves inside the mesh ----------------------
+  # The deployment stores the pod's MagicDNS NAME (RUNPOD_HOST), never an
+  # address: a pod address changes whenever the pod is recreated, so a stored
+  # copy goes stale. The name is resolved here and the RESOLVED ADDRESS is what
+  # gets validated against [IP_ADDRESS]/10 -- never the name. Mesh addresses are
+  # 100.64.x.x - 100.127.x.x; anything else means the pipe will refuse to send,
+  # which is the safety net working correctly. Nothing here prints the name or
+  # the address; at most a masked 100.x.x.x.
+  POD_NAME="$(env_get RUNPOD_HOST)"
+  if [[ -z "$POD_NAME" ]]; then
+    warn "RUNPOD_HOST is empty" \
+         "Re-run ./install.sh to record the pod's MagicDNS name."
+  else
+    POD_ADDR="$(resolve_mesh_address "$POD_NAME")"
+    POD_RC=$?
+    case "$POD_RC" in
+      2)
+        # No resolver on this host (no tailscale CLI, no getent), so the name
+        # cannot be checked here. That is a gap in this host's tooling, not a
+        # misconfiguration, so it must not touch the counters or the exit code.
+        (( QUIET )) || printf '  %s-%s GPU pod MagicDNS name resolution skipped (no tailscale CLI and no getent on this host)\n' "$C_DIM" "$C_RST"
+        (( QUIET )) || printf '  %s  Nothing is wrong with .env; run this check on the Pi.%s\n' "$C_DIM" "$C_RST" ;;
+      1)
+        fail "RUNPOD_HOST does not resolve to an address" \
+             "The pipe will refuse to send prompts. Check tailscale status and MagicDNS, then re-run ./install.sh." ;;
+      0)
+        if mesh_range_ok "$POD_ADDR"; then
+          pass "RUNPOD_HOST resolves inside the Tailscale mesh"
+        else
+          fail "RUNPOD_HOST resolves to an address outside the Tailscale range" \
+               "The pipe will refuse to send prompts. Re-run ./install.sh to rediscover the pod."
+        fi ;;
+    esac
+    unset POD_ADDR
   fi
+  unset POD_NAME
 
   # --- OpenHands credential store -----------------------------------------
   # Holds the LLM provider key you enter in the OpenHands UI. Outside the repo

@@ -359,6 +359,16 @@ jobs:
         # friends are stubbed on PATH; the run uses --no-start.
         run: bash scripts/test-agent-image-repo-migration.sh
 
+      - name: Tailscale address retirement tests
+        # Offline. Proves install.sh's STEP 2b retirement of the stored
+        # TAILSCALE_IP: a legacy value that matches the address RUNPOD_HOST
+        # resolves to today is dropped and the MagicDNS name takes over; any
+        # other value is preserved byte-for-byte under a comment saying nothing
+        # reads it; a fresh .env writes RUNPOD_HOST; a second run changes
+        # nothing. tailscale and getent are stubbed on PATH; the run uses
+        # --no-start.
+        run: bash scripts/test-install-tailscale-migration.sh
+
       - name: Agent-server hybrid cutover tests
         # Offline. Proves install.sh's STEP 2b pair-exact migration cuts a
         # previously deployed host over from the OLD default pair
@@ -378,7 +388,7 @@ jobs:
         # and a parse with them unset is asserted to fail closed.
         run: |
           set -a
-          TAILSCALE_IP=[IP_ADDRESS] RUNPOD_API_KEY=x \
+          RUNPOD_HOST=runpod-worker.example.test RUNPOD_API_KEY=x \
           RUNPOD_POD_ID=x WEBUI_SECRET_KEY=x STATUS_UID=1000 DOCKER_GID=999 \
           OLLAMA_MEM_LIMIT=8g WEBUI_MEM_LIMIT=3g OLLAMA_CPUS=3.5 WEBUI_CPUS=2.0 \
           LOCAL_DOMAIN=example.test OPENHANDS_SANDBOX_HOST=example.test \

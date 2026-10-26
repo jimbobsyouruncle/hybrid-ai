@@ -336,6 +336,10 @@
 - probe_can_read()
 - find_unreadable()
 
+## scripts/lib/tailscale-resolve.sh
+- mesh_range_ok()
+- resolve_mesh_address()
+
 ## scripts/prune-conversations.sh
 - log()
 - warn()
@@ -615,6 +619,14 @@
 - run_install()
 - firewall_sudo()
 
+## scripts/test-install-tailscale-migration.sh
+- ok()
+- bad()
+- check()
+- run_install()
+- env_value()
+- normalise()
+
 ## scripts/test-post-deploy-verify-log-env.sh
 - ok()
 - bad()
@@ -773,6 +785,7 @@
 - def container_logs(name, tail)
 - def probe_http(name, url, hint)
 - def probe_containers()
+- def resolve_pod_address()
 - def probe_pod()
 - def probe_resources()
 - def probe_models()

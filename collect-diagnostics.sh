@@ -49,6 +49,10 @@ cd "$SCRIPT_DIR" || exit 1
 # resolved paths are exactly today's.
 # shellcheck source=scripts/lib/hybrid-ai-env.sh
 source "${SCRIPT_DIR}/scripts/lib/hybrid-ai-env.sh"
+# Resolving the pod's MagicDNS name to an address happens in ONE place, shared
+# with doctor.sh and install.sh.
+# shellcheck source=scripts/lib/tailscale-resolve.sh
+source "${SCRIPT_DIR}/scripts/lib/tailscale-resolve.sh"
 APP_DIR="$HYBRID_AI_APP_DIR"
 ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 
@@ -307,14 +311,11 @@ if [[ -f "$ENV_FILE" ]]; then
         printf '  %-32s <EMPTY>\n' "$k"
       elif [[ "$k" =~ ^(${SAFE_KEYS})$ ]]; then
         printf '  %-32s %s\n' "$k" "$v"
-      elif [[ "$k" == "TAILSCALE_IP" ]]; then
-        # The SHAPE matters for diagnosis (is it inside the mesh range?);
-        # the exact host does not.
-        if [[ "$v" =~ ^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\. ]]; then
-          printf '  %-32s 100.x.x.x  (VALID mesh range)\n' "$k"
-        else
-          printf '  %-32s <set>  <-- OUTSIDE 100.64.0.0/10, pipe will refuse to send\n' "$k"
-        fi
+      elif [[ "$k" == "RUNPOD_HOST" ]]; then
+        # The pod's MagicDNS NAME. Presence is what matters here; the name is
+        # never printed, and the address it resolves to is checked (and masked
+        # as 100.x.x.x) in the GPU pod reachability section below.
+        printf '  %-32s <set>  (MagicDNS name; masked)\n' "$k"
       elif [[ "$k" =~ ^(OPENHANDS_WORKSPACE|OPENHANDS_STATE_DIR)$ ]]; then
         # Path shape matters a great deal here: if the workspace IS the
         # deployment directory, the agent sandbox can read .env.
@@ -457,22 +458,43 @@ sub "Tailscale detail"
 
 sub "GPU pod reachability"
 {
+  # The pod is named by its MagicDNS name (RUNPOD_HOST); the address is
+  # resolved here and only a masked 100.x.x.x is ever written out.
+  POD_NAME=""
+  VP="8000"
   if [[ -f "$ENV_FILE" ]]; then
-    TS_IP="$(grep -E '^TAILSCALE_IP=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+    POD_NAME="$(grep -E '^RUNPOD_HOST=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)"
+    POD_NAME="${POD_NAME%\"}"; POD_NAME="${POD_NAME#\"}"; POD_NAME="${POD_NAME%\'}"; POD_NAME="${POD_NAME#\'}"
     VP="$(grep -E '^VLLM_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"; VP="${VP:-8000}"
-    if [[ -n "$TS_IP" ]]; then
-      printf 'probing http://<pod>:%s/v1/models ...\n' "$VP"
-      if curl -fsS --max-time 8 "http://${TS_IP}:${VP}/v1/models" 2>&1 | jq -c '.data[].id' 2>/dev/null; then
-        printf 'RESULT: pod is AWAKE and serving\n'
-      else
-        printf 'RESULT: no response.\n'
-        printf 'NOTE: this is NORMAL and expected when the pod is stopped.\n'
-        printf '      The pod is stopped by design to avoid billing.\n'
-      fi
-    else
-      printf 'TAILSCALE_IP not set in the env file\n'
-    fi
   fi
+  if [[ -z "$POD_NAME" ]]; then
+    printf 'RUNPOD_HOST (the pod MagicDNS name) is not set in the env file\n'
+  else
+    POD_ADDR="$(resolve_mesh_address "$POD_NAME")"
+    POD_RC=$?
+    case "$POD_RC" in
+      2)
+        printf 'RESULT: resolution unavailable on this host (no tailscale/getent) — skipped\n' ;;
+      1)
+        printf 'RESULT: name did not resolve\n' ;;
+      0)
+        if mesh_range_ok "$POD_ADDR"; then
+          printf 'RESULT: name resolves inside the mesh (100.x.x.x)\n'
+          printf 'probing http://<pod>:%s/v1/models ...\n' "$VP"
+          if curl -fsS --max-time 8 "http://${POD_ADDR}:${VP}/v1/models" 2>&1 | jq -c '.data[].id' 2>/dev/null; then
+            printf 'RESULT: pod is AWAKE and serving\n'
+          else
+            printf 'RESULT: no response.\n'
+            printf 'NOTE: this is NORMAL and expected when the pod is stopped.\n'
+            printf '      The pod is stopped by design to avoid billing.\n'
+          fi
+        else
+          printf 'RESULT: resolves OUTSIDE the mesh range (100.64.0.0/10) — the pipe will refuse to send\n'
+        fi ;;
+    esac
+    unset POD_ADDR
+  fi
+  unset POD_NAME
 } 2>&1 | redact >> "$OUTFILE"
 
 # shellcheck disable=SC2016

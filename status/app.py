@@ -82,7 +82,7 @@ WEBUI_URL = os.getenv("WEBUI_URL", "http://open-webui:8080")
 HERMES_URL = os.getenv("HERMES_URL", "http://hermes-agent:8501")
 OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://openhands:3001")
 
-TAILSCALE_IP = os.getenv("TAILSCALE_IP", "")
+RUNPOD_HOST = os.getenv("RUNPOD_HOST", "")
 VLLM_PORT = os.getenv("VLLM_PORT", "8000")
 WEBUI_DATA = os.getenv("WEBUI_DATA_PATH", "/data/webui_data")
 BACKUP_LOG = os.getenv("BACKUP_LOG_PATH", "/data/backup.log")
@@ -254,18 +254,49 @@ def probe_containers() -> List[Dict[str, Any]]:
     return results
 
 
+def resolve_pod_address() -> str:
+    """Resolve RUNPOD_HOST to one IPv4 address, or "" when it cannot.
+
+    The MagicDNS name is resolved HERE, at probe time, because a RunPod worker's
+    mesh address changes whenever the pod is recreated and a stored copy would
+    go stale. This container has no `tailscale` binary, so the host-side
+    equivalent (`tailscale ip -4`) is unavailable. Its resolver is MagicDNS via
+    the `dns:` entry on the status service in docker-compose.yml, which is the
+    container-side equivalent of `getent ahostsv4`: getaddrinfo asks that
+    resolver. Only AF_INET is requested; the first IPv4 answer wins.
+    """
+    if not RUNPOD_HOST:
+        return ""
+    try:
+        infos = socket.getaddrinfo(RUNPOD_HOST, VLLM_PORT, socket.AF_INET)
+    except OSError:
+        return ""
+    for info in infos:
+        addr = info[4][0]
+        if isinstance(addr, str) and re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", addr):
+            return addr
+    return ""
+
+
 def probe_pod() -> Dict[str, Any]:
-    if not TAILSCALE_IP:
+    # Neither the name nor the address ever reaches detail/hint: the page is
+    # served to a browser, and this tile is about health, not identity.
+    if not RUNPOD_HOST:
         return {"name": "GPU pod", "state": "warn",
-                "detail": "TAILSCALE_IP not configured",
+                "detail": "GPU pod MagicDNS name not configured",
                 "hint": "Start the pod once, then re-run ./install.sh."}
-    mesh = re.match(r"^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.", TAILSCALE_IP)
+    pod_addr = resolve_pod_address()
+    if not pod_addr:
+        return {"name": "GPU pod", "state": "fail",
+                "detail": "MagicDNS name did not resolve to an address",
+                "hint": "Check tailscale status and MagicDNS, then re-run ./install.sh."}
+    mesh = re.match(r"^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.", pod_addr)
     if not mesh:
         return {"name": "GPU pod", "state": "fail",
                 "detail": "address is outside the Tailscale mesh range",
                 "hint": "The pipe will refuse to send prompts. Re-run ./install.sh."}
     try:
-        url = f"http://{TAILSCALE_IP}:{VLLM_PORT}/v1/models"
+        url = f"http://{pod_addr}:{VLLM_PORT}/v1/models"
         with _http_get(url, timeout=6) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = [m.get("id", "?") for m in body.get("data", [])]
