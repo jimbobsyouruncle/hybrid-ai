@@ -265,8 +265,16 @@ case "$url" in
       prev="$a"
     done
     printf '%s\n' "$*" > "$RECORD/argv"
-    if [[ -n "$cfg" && -r "$cfg" ]] && grep -q 'Authorization: Bearer ' "$cfg"; then
-      printf 'present\n' > "$RECORD/header"
+    # The header must carry the ACTUAL fixture key, not a redaction or a
+    # placeholder: a stub that accepted any "Authorization: Bearer" line would
+    # hide a doctor.sh that wrote a literal instead of the value.
+    if [[ -n "$cfg" && -r "$cfg" ]]; then
+      cp "$cfg" "$RECORD/config" 2>/dev/null
+      if grep -qF "Authorization: Bearer ${FIXTURE_KEY}" "$cfg"; then
+        printf 'present\n' > "$RECORD/header"
+      else
+        printf 'placeholder\n' > "$RECORD/header"
+      fi
     else
       printf 'absent\n' > "$RECORD/header"
     fi
@@ -352,7 +360,7 @@ run_doctor() { # fixture runpod_host rp_mode [path] ; sets RC, writes $WORK/out.
   write_env "$host"
   (
     cd "$APPD" || exit 1
-    RP_MODE="$mode" RECORD="$RECORD" \
+    RP_MODE="$mode" RECORD="$RECORD" FIXTURE_KEY="$FIXTURE_KEY" \
     PATH="${RUN_PATH:-$BIN:$PATH}" HOME="$WORK/home" SHELL=/bin/bash \
     HYBRID_AI_DATA_DIR="$APPD" HYBRID_AI_LOG_DIR="$APPD" HYBRID_AI_WORK_DIR="$APPD" \
     timeout 120 bash "$doc" --no-cloud
@@ -395,6 +403,15 @@ if [[ "$(cat "$RECORD/header" 2>/dev/null)" == "present" ]]; then
   pass "the Authorization header reached curl through the --config file"
 else
   fail "the Authorization header was not present in curl's --config file"
+fi
+# The header must carry the fixture key's VALUE. This is the regression guard:
+# a doctor.sh that wrote a placeholder (`***`) instead of the value would leave
+# the header present but empty of the key, and the API check could never work.
+if [[ -r "$RECORD/config" ]] \
+   && grep -qxF "header = \"Authorization: Bearer ${FIXTURE_KEY}\"" "$RECORD/config"; then
+  pass "the --config file's Authorization header carried the actual RUNPOD_API_KEY value"
+else
+  fail "the --config file's Authorization header did not carry the actual key value (placeholder or absent)"
 fi
 if ! grep -qF "$FIXTURE_KEY" "$RECORD/argv" 2>/dev/null \
    && ! grep -qF "$FIXTURE_KEY" "$OUT_OK"; then
