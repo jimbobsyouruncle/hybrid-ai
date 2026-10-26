@@ -256,6 +256,65 @@ RUN set -eu; \
         "${HERMES_INSTALL_DIR}/installs" \
         \( -type d -o \( -type f ! -name '.lock' \) \) -perm /022 -print -quit)"
 
+# --- Packaged PM runtime marker: /opt/pm-runtime/pm-runtime.json --------------
+# pm/runtime.py resolves the dependency runtime before it can run anything. When
+# <project.parent>/manifest.json exists (this image writes /opt/manifest.json),
+# the payload root is /opt and the runtime dir is /opt/pm-runtime, and it reads
+# /opt/pm-runtime/pm-runtime.json for two keys, "python" and "sitePackages". The
+# image shipped no such marker, so PM died with
+#   InstallError("pm-runtime", "packaged PM runtime is missing or invalid")
+# and `hermes pm doctor` refused to run.
+#
+# The marker is generated here from the install state, never hardcoded: the
+# generation comes from installs/<key>/pm-runtime/selected.json, so a rebuild
+# with a different install key or Python patch keeps working.
+#   python       absolute real path of the generation's interpreter, a FILE
+#                under /opt (the resolver requires it inside the payload)
+#   sitePackages "site-packages", a real DIRECTORY under /opt/pm-runtime. It is
+#                a build-time COPY, not a symlink: the resolver calls .resolve()
+#                before checking containment, so a symlink into the install tree
+#                would resolve outside /opt/pm-runtime and fail that check.
+#
+# Permissions are chmod only (marker 0644, dirs 0755), never chown: /opt stays
+# ROOT-OWNED with no group/other write bit, so the runtime uid can read the
+# runtime it runs but cannot edit it, and the immutability assertions above stay
+# green. Nothing is written under /opt at runtime, so `docker diff` stays clean.
+# The build fails closed when the install state is ambiguous, the generation is
+# missing, the interpreter falls outside /opt, or the copy lacks a package the
+# PM runtime imports.
+ARG PM_RUNTIME_DIR=/opt/pm-runtime
+RUN set -eu; \
+    pm_runtimes="$(find "${HERMES_INSTALL_DIR}/installs" -type d -name pm-runtime -print)"; \
+    set -- ${pm_runtimes}; \
+    test "$#" -eq 1 || { echo "expected exactly one pm-runtime install state, found $#" >&2; exit 1; }; \
+    pm_state="$1"; \
+    test -f "$pm_state/selected.json" || { echo "missing $pm_state/selected.json" >&2; exit 1; }; \
+    generation="$(python3 -c 'import json,os,sys; s=json.load(open(sys.argv[1])); print(os.path.normpath(os.path.join(sys.argv[2], s["generation"])))' "$pm_state/selected.json" "$pm_state")"; \
+    test -d "$generation" || { echo "PM runtime generation is missing: $generation" >&2; exit 1; }; \
+    site="$(find "$generation" -maxdepth 4 -type d -path '*/lib/python*/site-packages' -print)"; \
+    test -n "$site" || { echo "no site-packages under $generation" >&2; exit 1; }; \
+    test "$(printf '%s\n' "$site" | wc -l)" -eq 1 || { echo "several site-packages under $generation" >&2; exit 1; }; \
+    pm_python="$(readlink -f "$generation/bin/python")"; \
+    test -f "$pm_python" || { echo "PM runtime interpreter is not a file: $pm_python" >&2; exit 1; }; \
+    case "$pm_python" in \
+        "${HERMES_INSTALL_DIR}"/*) : ;; \
+        *) echo "PM runtime interpreter escapes the payload: $pm_python" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p "${PM_RUNTIME_DIR}"; \
+    cp -a "$site" "${PM_RUNTIME_DIR}/site-packages"; \
+    python3 -c 'import json,sys; f=open(sys.argv[2],"w"); json.dump({"python": sys.argv[1], "sitePackages": "site-packages"}, f, indent=2); f.write("\n"); f.close()' "$pm_python" "${PM_RUNTIME_DIR}/pm-runtime.json"; \
+    chmod -R a+rX "${PM_RUNTIME_DIR}"; \
+    test -f "${PM_RUNTIME_DIR}/pm-runtime.json"; \
+    test -d "${PM_RUNTIME_DIR}/site-packages"; \
+    test "$(stat -c '%a' "${PM_RUNTIME_DIR}/pm-runtime.json")" = "644"; \
+    test "$(stat -c '%a' "${PM_RUNTIME_DIR}")" = "755"; \
+    test "$(stat -c '%u' "${PM_RUNTIME_DIR}/pm-runtime.json")" = "0"; \
+    test "$(stat -c '%u' "${PM_RUNTIME_DIR}")" = "0"; \
+    test -z "$(find "${PM_RUNTIME_DIR}" \( -type d -o -type f \) -perm /022 -print -quit)"; \
+    for dep in packaging tomli_w truststore ruamel; do \
+        test -e "${PM_RUNTIME_DIR}/site-packages/$dep" || { echo "PM runtime site-packages lacks $dep" >&2; exit 1; }; \
+    done
+
 # HOME stays /root. Saved state under hermes_data/ holds absolute /root/...
 # paths and the compose volume paths are unchanged, so this must not move.
 ENV HOME=/root
@@ -306,6 +365,18 @@ ENV HERMES_WEBUI_DISABLE_LOCAL_VENV=1
 EXPOSE 8501 8642
 
 USER ${HYBRID_AI_UID}:${HYBRID_AI_GID}
+
+# --- Fail the build if the packaged PM runtime does not resolve ---------------
+# Runs the same resolver pm/runtime.py uses at runtime, as the RUNTIME uid, so a
+# marker the container could not use (wrong key names, a path escaping the
+# payload, an unreadable file) breaks the build instead of the deployed agent.
+# `hermes pm doctor` is deliberately not used here: it re-hashes the whole store
+# and is far too slow for a build step. The `cd` is what puts the install's own
+# pm/ on sys.path, which is why this must not pass -I.
+RUN set -eu; \
+    cd "${HERMES_INSTALL_DIR}"; \
+    resolved="$("${HERMES_INSTALL_DIR}/.hermes/venv/bin/python" -B -c 'import json; from pm.runtime import _resident_runtime; p, s = _resident_runtime(); print(json.dumps({"python": str(p), "sitePackages": str(s)}))')"; \
+    echo "packaged PM runtime resolves: ${resolved}"
 
 # The single start command. No compose `command:` overrides it. The gateway runs
 # in the background as the default profile -- a sticky named active profile
