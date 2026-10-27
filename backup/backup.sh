@@ -656,40 +656,73 @@ if [[ "$RUN_PHASE" == "upload" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# D7: self-healing restic cache.
-# systemd's CacheDirectory= chowns only the TOP directory. A per-repo cache
-# subdirectory left behind by an earlier manual `sudo` run stays root-owned, so
-# restic reports "unable to open cache: ... permission denied". That is
-# non-fatal, but it silently disables the cache and needs a manual chown. Probe
-# writability (top dir AND every existing subdir, with open(2) so it is correct
-# even under a capability) and, when the configured cache is unusable, fall back
+# D7: restic cache ownership.
+# systemd's CacheDirectory= chowns only the TOP directory. A nested cache
+# directory left behind by an earlier root run (install.sh's --init, or a manual
+# `sudo`) stays root-owned, and restic then reports "unable to open cache: ...
+# permission denied" three levels down: <cache>/<repo>/snapshots/<prefix>/.
+# Probing only the top directory and its immediate children passed such a cache,
+# so the failure stayed invisible until restic burned its retries.
+#
+# The probe therefore descends to the depth restic actually writes (bounded:
+# depth 3, directories only, symlinks never followed) and uses open(2) so it is
+# correct under a capability. When the configured cache is unusable it falls back
 # to a directory this uid CAN write: the unit's RuntimeDirectory, then the work
-# directory, then restic's own default (unset RESTIC_CACHE_DIR). Never fatal.
-_hybrid_ai_cache_writable() { # <dir>
-  local dir="$1" probe sub
-  [[ -d "$dir" ]] || return 1
-  probe="${dir}/.hybrid-ai-write-probe.$$"
+# directory, then restic's own default (unset RESTIC_CACHE_DIR).
+#
+# A fallback is a workaround, not a fix. In SYSTEM mode an unusable cache with no
+# writable fallback is FATAL: the run aborts in seconds and names the offending
+# path, its owner and its mode. USER mode keeps the earlier non-fatal behaviour:
+# it unsets RESTIC_CACHE_DIR and continues.
+CACHE_PROBE_MAXDEPTH=3
+
+_hybrid_ai_cache_dir_writable() { # <dir>
+  local probe="${1}/.hybrid-ai-write-probe.$$"
   ( : > "$probe" ) 2>/dev/null || return 1
   rm -f "$probe" 2>/dev/null || true
-  for sub in "$dir"/*/; do
-    [[ -d "$sub" ]] || continue
-    probe="${sub%/}/.hybrid-ai-write-probe.$$"
-    ( : > "$probe" ) 2>/dev/null || return 1
-    rm -f "$probe" 2>/dev/null || true
-  done
-  return 0
 }
+
+# Print the first directory under <dir> (inclusive) this uid cannot write and
+# return 0; return 1 when every one of them is writable.
+_hybrid_ai_cache_offender() { # <dir>
+  local dir="$1" sub
+  [[ -d "$dir" ]] || return 1
+  while IFS= read -r -d '' sub; do
+    if ! _hybrid_ai_cache_dir_writable "$sub"; then
+      printf '%s\n' "$sub"
+      return 0
+    fi
+  # -P never follows a symlink inside the cache.
+  done < <(find -P "$dir" -mindepth 0 -maxdepth "$CACHE_PROBE_MAXDEPTH" -type d -print0 2>/dev/null)
+  return 1
+}
+
+_hybrid_ai_cache_writable() { # <dir>
+  # offender prints and succeeds only when something is NOT writable.
+  ! _hybrid_ai_cache_offender "$1" >/dev/null
+}
+
+# A symlink anywhere in the cache is reported, never traversed.
+_hybrid_ai_cache_warn_symlinks() { # <dir>
+  local link
+  while IFS= read -r -d '' link; do
+    warn "restic cache contains a symlink (not followed): ${link}"
+    event "restic_cache_symlink_ignored" "severity=low" "path=${link}"
+  done < <(find -P "$1" -mindepth 1 -maxdepth "$CACHE_PROBE_MAXDEPTH" -type l -print0 2>/dev/null)
+}
+
 prepare_restic_cache() {
-  local dir="${RESTIC_CACHE_DIR:-}" fallback
+  local dir="${RESTIC_CACHE_DIR:-}" fallback offender=""
   [[ -n "$dir" ]] || return 0
   # A cache directory that does not exist yet is left alone: restic creates it
   # on first use, which is the normal fresh-install path and must stay
-  # byte-identical in user mode. Only a PRE-EXISTING directory this uid cannot
-  # write (the root-owned subdir left by an earlier manual sudo run) is healed.
+  # byte-identical in both modes. Only a PRE-EXISTING tree this uid cannot write
+  # (the root-owned nested subdir left by an earlier root run) is healed.
   [[ -e "$dir" ]] || return 0
-  _hybrid_ai_cache_writable "$dir" && return 0
-  warn "restic cache ${dir} is not writable by uid $(id -u); selecting a writable cache."
-  event "restic_cache_unwritable" "severity=low" "configured=${dir}"
+  _hybrid_ai_cache_warn_symlinks "$dir"
+  offender="$(_hybrid_ai_cache_offender "$dir")" || return 0
+  warn "restic cache ${offender} is not writable by uid $(id -u); selecting a writable cache."
+  event "restic_cache_unwritable" "severity=low" "configured=${dir}" "path=${offender}"
   for fallback in \
       "${RUNTIME_DIRECTORY%%:*}/restic-cache" \
       "${HYBRID_AI_WORK_DIR:-}/.restic-cache" \
@@ -699,10 +732,22 @@ prepare_restic_cache() {
       RESTIC_CACHE_DIR="$fallback"
       export RESTIC_CACHE_DIR
       warn "Using fallback restic cache ${fallback}."
-      event "restic_cache_fallback" "severity=low" "path=${fallback}"
+      event "restic_cache_fallback" "severity=low" "path=${fallback}" "configured=${dir}"
       return 0
     fi
   done
+  # No writable fallback left. System mode stops here, in seconds, naming what
+  # to fix: a restic retry storm costs ~15 minutes a night and reports only
+  # "restic backup failed".
+  if [[ "$HYBRID_AI_BACKUP_MODE" == "system" ]]; then
+    local owner mode fix
+    owner="$(stat -c '%u:%g' "$offender" 2>/dev/null || echo unknown)"
+    mode="$(stat -c '%a' "$offender" 2>/dev/null || echo unknown)"
+    fix="chown -R hybrid-ai-backup:hybrid-ai-backup ${offender}"
+    event "restic_cache_unusable" "severity=high" "path=${offender}" \
+          "owner=${owner}" "mode=${mode}" "fix=${fix}"
+    die "restic cache ${offender} is not writable by uid $(id -u) and no fallback cache is writable (owner=${owner} mode=${mode}). Fix: sudo ${fix}"
+  fi
   unset RESTIC_CACHE_DIR
   warn "Using restic's default cache location for uid $(id -u)."
   event "restic_cache_default" "severity=low"

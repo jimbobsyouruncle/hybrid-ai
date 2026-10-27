@@ -720,6 +720,16 @@ mkdir -p "$OPENHANDS_STATE_DIR"
 chmod 700 "$OPENHANDS_STATE_DIR"
 
 mkdir -p "$RESTIC_CACHE_DIR"
+# A root-invoked backup.sh -- the --init below and the first-backup prompt -- must
+# not write into the cache the units use. Entries it creates are root:root and
+# the hybrid-ai-backup account can never write them: that is the shape of the
+# 42-hour outage (a root-owned nested directory under the unit cache silently
+# disabling every scheduled upload). run_backup() points a root run here instead.
+BACKUP_ROOT_CACHE_DIR="${RESTIC_CACHE_DIR}-root"
+if [[ "$HYBRID_AI_BACKUP_MODE" == "system" && "$(id -u)" == "0" ]]; then
+  mkdir -p "$BACKUP_ROOT_CACHE_DIR"
+  chmod 700 "$BACKUP_ROOT_CACHE_DIR"
+fi
 
 for d in "$HYBRID_AI_OLLAMA_DATA_DIR" "$HYBRID_AI_WEBUI_DATA_DIR" "$HYBRID_AI_HERMES_DATA_DIR"; do
   if [[ -d "$d" ]]; then
@@ -1765,10 +1775,67 @@ SYSTEM_UNITS=(
 # root; card E's deploy unit runs install.sh as root after migration, so this is
 # the normal path there. It never calls sudo: when it is not root it verifies
 # and warns only. In system mode it NEVER installs the user units.
+# ---------------------------------------------------------------------------
+# Backup cache ownership reconcile (install-time convergence).
+# Runs on EVERY installation in system mode as root, because it rides the
+# scheduler-repair path. Its job is to converge an existing host with no by-hand
+# chown: a nested directory under the cache that an earlier root run left
+# root-owned (or any other foreign owner) is handed to the backup account.
+# Never fatal: every failure warns, logs, and returns 0, so install.sh's exit
+# status cannot depend on it. It changes ownership only (never a mode) and only
+# inside the resolved cache path -- never /var/lib/hybrid-ai-backup (staging) and
+# never /etc/credstore/hybrid-ai-backup.
+reconcile_backup_cache_ownership() {
+  local cache="${RESTIC_CACHE_DIR:-}" foreign link
+
+  [[ "$BACKUP_MODE" == "system" ]] || return 0
+  [[ "$(id -u)" == "0" ]] || return 0
+  # A "/" or a relative value here would make the chown -R below catastrophic.
+  [[ "$cache" == /* && "$cache" != "/" ]] || return 0
+
+  if ! getent passwd hybrid-ai-backup >/dev/null 2>&1; then
+    warn "The hybrid-ai-backup account does not exist; leaving ${cache} alone."
+    event "backup_cache_reconcile_skipped" "reason=no_account" "path=${cache}"
+    return 0
+  fi
+
+  if ! install -d -o hybrid-ai-backup -g hybrid-ai-backup "$cache"; then
+    warn "Could not create or own ${cache}; its ownership was not reconciled."
+    event "backup_cache_reconcile_skipped" "reason=install_dir_failed" "path=${cache}"
+    return 0
+  fi
+
+  # A symlink inside the cache is reported, never followed.
+  while IFS= read -r -d '' link; do
+    warn "Backup cache contains a symlink (not followed): ${link}"
+    event "backup_cache_symlink_ignored" "path=${link}"
+  done < <(find -P "$cache" -mindepth 1 -type l -print0 2>/dev/null)
+
+  # Cheap walk: stop at the FIRST foreign-owned entry, so a correct cache costs
+  # one stat per entry and no chown at all (idempotent: no repair event).
+  foreign="$(find -P "$cache" -xdev ! -user hybrid-ai-backup -print -quit 2>/dev/null)"
+  if [[ -z "$foreign" ]]; then
+    ok "Backup cache ownership is correct (${cache})."
+    return 0
+  fi
+
+  if ! chown -R hybrid-ai-backup:hybrid-ai-backup "$cache"; then
+    warn "Could not repair backup cache ownership under ${cache} (first foreign entry: ${foreign})."
+    event "backup_cache_reconcile_skipped" "reason=chown_failed" "path=${cache}" "offending=${foreign}"
+    return 0
+  fi
+  ok "Backup cache ownership repaired (${cache})."
+  event "backup_cache_ownership_repaired" "path=${cache}"
+  return 0
+}
+
 install_backup_scheduler_system() {
   local unit source_file target_file
   local install_failed=0
-  local unit_dir="/etc/systemd/system"
+  # HYBRID_AI_SYSTEMD_UNIT_DIR is the same HARNESS-ONLY override every other
+  # unit-installing step already honours. The offline tests point it at a scratch
+  # directory; on a host it is unset and this is /etc/systemd/system.
+  local unit_dir="${HYBRID_AI_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 
   if [[ "$(id -u)" != "0" ]]; then
     warn "System-mode backup units need root to install into ${unit_dir}."
@@ -1830,6 +1897,10 @@ install_backup_scheduler_system() {
   if (( install_failed )); then
     return 1
   fi
+
+  # Rides the every-installation scheduler repair: converge the cache's
+  # ownership now that the units (and their CacheDirectory=) are in place.
+  reconcile_backup_cache_ownership || true
 
   if systemctl enable --now hybrid-ai-backup-capture.timer >/dev/null 2>&1; then
     ok "Backup capture timer enabled and active."
@@ -1992,7 +2063,11 @@ setup_backups() {
   # units' LoadCredential= does.
   run_backup() {
     if [[ "$BACKUP_MODE" == "system" ]]; then
-      CREDENTIALS_DIRECTORY="$BACKUP_CRED_DIR" "${APP_DIR}/backup/backup.sh" "$@"
+      # The root-run cache keeps root:root entries out of the unit cache, so
+      # --init and the first backup cannot create the root-owned tree that
+      # disables the hybrid-ai-backup account's uploads.
+      RESTIC_CACHE_DIR="$BACKUP_ROOT_CACHE_DIR" \
+        CREDENTIALS_DIRECTORY="$BACKUP_CRED_DIR" "${APP_DIR}/backup/backup.sh" "$@"
     else
       "${APP_DIR}/backup/backup.sh" "$@"
     fi
