@@ -134,6 +134,7 @@
 - scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
 - scripts/test-doctor-lease-less.sh - FILE: scripts/test-doctor-lease-less.sh
 - scripts/test-doctor-post-deploy-log.sh - FILE: scripts/test-doctor-post-deploy-log.sh
+- scripts/test-doctor-resolv-conf.sh - FILE: scripts/test-doctor-resolv-conf.sh
 - scripts/test-doctor-runpod-key.sh - FILE: scripts/test-doctor-runpod-key.sh
 - scripts/test-doctor-sandbox-firewall.sh - FILE: scripts/test-doctor-sandbox-firewall.sh
 - scripts/test-doctor-sandbox-image.sh - FILE: scripts/test-doctor-sandbox-image.sh

@@ -171,6 +171,25 @@ jobs:
         # against a status/app.py without the probe.
         run: python3 status/test_deploy_verification.py
 
+      - name: Doctor resolv.conf ownership tests
+        # Offline. RUNS doctor.sh (stubbed tailscale/docker/systemctl and
+        # fixture resolv.conf files, named through the internal
+        # DOCTOR_RESOLV_CONF seam) to prove the new warn-only resolv.conf
+        # ownership note. On the Pi tailscaled writes /etc/resolv.conf itself
+        # (direct-file mode), because neither systemd-resolved nor resolvconf
+        # runs there; its "System DNS config not ideal. /etc/resolv.conf
+        # overwritten." health line is that mode announcing itself and is
+        # expected-benign. The expected state (health line + tailscaled header)
+        # prints an informational note, moves no summary count and leaves the
+        # exit code at the check-free baseline. A FOREIGN owner (health line
+        # present, header absent) warns naming the changed ownership and exits
+        # 1 -- never 2. An unreachable daemon and an absent tailscale CLI each
+        # print a skip note and leave every count and the exit code as the
+        # baseline had them. Only the header line is matched: the fixture's
+        # nameserver literal never reaches the report. The harness fails
+        # against a doctor.sh without the check.
+        run: bash scripts/test-doctor-resolv-conf.sh
+
       - name: Doctor sandbox-firewall tests
         # Offline. RUNS doctor.sh (stubbed iptables and a recorded DOCKER-USER
         # chain) to prove the new warning-only sandbox-firewall check: a chain

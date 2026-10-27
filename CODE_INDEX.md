@@ -121,6 +121,7 @@
 - install_hint()
 - sandbox_image_probe()
 - grace_epoch()
+- resolv_skip()
 
 ## hermes/Dockerfile
 - FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8
@@ -575,6 +576,12 @@
 - pass()
 - fail()
 - summary_count()
+- run_doctor()
+
+## scripts/test-doctor-resolv-conf.sh
+- pass()
+- fail()
+- count_of()
 - run_doctor()
 
 ## scripts/test-doctor-runpod-key.sh
