@@ -62,7 +62,7 @@ This page reveals service state, log excerpts, and offers a downloadable bundle.
 
 ### It holds no secrets
 
-The status container is **not given `.env`**, any API key, or any credential. It cannot leak what it was never given. Its whole configuration is `STATUS_PORT`, `LOCAL_DOMAIN`, `OLLAMA_URL`, `WEBUI_URL`, `HERMES_URL`, `OPENHANDS_URL`, `WEBUI_DATA_PATH`, `BACKUP_LOG_PATH`, `INSTALL_LOG_PATH`, `POST_DEPLOY_VERIFY_LOG_PATH`, `RUNPOD_HOST`, `PI_HOST`, `VLLM_PORT`, `PYTHONDONTWRITEBYTECODE` and `DO_NOT_TRACK` — service addresses, host names, port numbers, container-side file paths and two static flags. None of it is a secret; the one hostname that could be sensitive, `RUNPOD_HOST`, is masked in all output anyway. `RUNPOD_HOST` is a MagicDNS **name**, never a stored address: the container resolves it through the `dns:` resolver on the status service each time the GPU pod tile is probed, and only the resolved address is validated against `[IP_ADDRESS]/10`.
+The status container is **not given `.env`**, any API key, or any credential. It cannot leak what it was never given. Its whole configuration is `STATUS_PORT`, `LOCAL_DOMAIN`, `OLLAMA_URL`, `WEBUI_URL`, `HERMES_URL`, `OPENHANDS_URL`, `WEBUI_DATA_PATH`, `BACKUP_LOG_PATH`, `INSTALL_LOG_PATH`, `POST_DEPLOY_VERIFY_LOG_PATH`, `RUNPOD_HOST`, `RUNPOD_KEY_PRESENT`, `PI_HOST`, `VLLM_PORT`, `PYTHONDONTWRITEBYTECODE` and `DO_NOT_TRACK` — service addresses, host names, port numbers, container-side file paths and two static flags. None of it is a secret; the one hostname that could be sensitive, `RUNPOD_HOST`, is masked in all output anyway. `RUNPOD_KEY_PRESENT` is a derived presence boolean — `1` when the host has `RUNPOD_API_KEY` set, empty otherwise — not a credential. Retrieving the key value itself from this container is impossible: compose passes only `${RUNPOD_API_KEY:+1}`, so the value never enters it. `RUNPOD_HOST` is a MagicDNS **name**, never a stored address: the container resolves it through the `dns:` resolver on the status service each time the GPU pod tile is probed, and only the resolved address is validated against `[IP_ADDRESS]/10`.
 
 This is why the web diagnostic is deliberately narrower than `./collect-diagnostics.sh`: the CLI tool can report which config keys are set and how long their values are, because it runs as you on the host. The web service cannot, because giving it that access would make it worth attacking.
 
@@ -241,7 +241,7 @@ It also means no build step: `app.py` is mounted read-only into the stock `pytho
 
 ## Design notes
 
-**A stopped GPU pod reports `info`, never `fail`.** The pod is stopped most of the time on purpose, to avoid billing. Colouring that red would train you to ignore red, and the first thing an alert system must do is stay worth believing.
+**A stopped GPU pod reports `info`, never `fail`.** The pod is stopped most of the time on purpose, to avoid billing. Colouring that red would train you to ignore red, and the first thing an alert system must do is stay worth believing. So the tile reports wake readiness, not reachability: an unresolved MagicDNS name is `info` when a RunPod API key is configured (the pod can be woken on demand) and `warn` when none is (it cannot be woken, so the hint points at `sudo ./install.sh` to set `RUNPOD_API_KEY`).
 
 **Hints are commands, not descriptions.** Every non-healthy check carries the actual command to run next, so the page ends the investigation rather than starting one.
 
