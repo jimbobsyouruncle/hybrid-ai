@@ -23,6 +23,13 @@
 #                    declared exactly once, a peer hook survives, and a SECOND
 #                    run changes nothing (same mode, no duplicate, config
 #                    byte-identical)
+#   Transport        with NO host hermes CLI, a stubbed `docker` whose
+#                    `inspect ... hermes-agent` reports true runs the same
+#                    config get/set through `docker exec` with the ABSOLUTE
+#                    in-container CLI path and no host HERMES_HOME; no
+#                    transport at all (docker absent, or the container not
+#                    running) still records reason=hermes_missing and places
+#                    nothing; the docker path is idempotent on a second run
 #   Non-root         warns, records an event, writes nothing, exits 0
 #
 # POST-MERGE MANUAL CHECK (cannot run offline; needs a live host):
@@ -227,6 +234,72 @@ esac
 EOF
 chmod +x "$BIN/hermes"
 
+# Stub docker, used only by the transport cases below. It answers
+# `inspect -f '{{.State.Running}}' hermes-agent` from DOCKER_RUNNING and runs
+# `exec hermes-agent <absolute-cli> ...` against the same fixture configs, so
+# the docker path exercises the real get/set logic with no daemon at all.
+# The absolute CLI path is required: a bare `hermes` would prove nothing.
+cat > "$BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+# argv: inspect -f <tmpl> hermes-agent | exec hermes-agent <cli> -p <p> config ...
+set -uo pipefail
+printf '%s\n' "$*" >> "${DOCKER_ARGV_LOG:-/dev/null}"
+case "${1:-}" in
+  inspect)
+    printf '%s\n' "${DOCKER_RUNNING:-false}"
+    [[ "${DOCKER_RUNNING:-false}" == "true" ]] || exit 1
+    ;;
+  exec)
+    shift
+    [[ "${1:-}" == "hermes-agent" ]] || { echo "stub docker: expected hermes-agent" >&2; exit 64; }
+    shift
+    cli="${1:-}"; shift
+    [[ "$cli" == /* ]] || { echo "stub docker: CLI path is not absolute: ${cli}" >&2; exit 64; }
+    [[ "${1:-}" == "-p" ]] || { echo "stub docker: expected -p" >&2; exit 64; }
+    profile="${2:-}"; shift 2
+    [[ "${1:-}" == "config" ]] || { echo "stub docker: expected config" >&2; exit 64; }
+    verb="${2:-}"; key="${3:-}"
+    cfg="${DOCKER_HERMES_ROOT:-/nonexistent}/profiles/${profile}/config.yaml"
+    [[ -f "$cfg" ]] || { echo "stub docker: no config at ${cfg}" >&2; exit 66; }
+    case "$verb" in
+      get)
+        jq -c --arg k "$key" 'getpath($k | split(".")) // null' "$cfg" 2>/dev/null || echo null
+        ;;
+      set)
+        value="${4:-}"
+        tmp="$(mktemp "${cfg}.XXXXXX")"
+        if jq --arg k "$key" --argjson v "$value" \
+            'setpath($k | split("."); $v)' "$cfg" > "$tmp" 2>/dev/null; then
+          mv -f "$tmp" "$cfg"
+        else
+          rm -f "$tmp"
+          echo "stub docker: cannot coerce value for ${key}" >&2
+          exit 65
+        fi
+        ;;
+      *) echo "stub docker: unknown verb ${verb}" >&2; exit 64 ;;
+    esac
+    ;;
+  *)
+    echo "stub docker: unsupported argv: $*" >&2
+    exit 64
+    ;;
+esac
+EOF
+chmod +x "$BIN/docker"
+
+# Two docker-only PATHs: the same stub with a controlling DOCKER_RUNNING, and
+# the handful of tools install_secret_guard_hook needs. Neither carries a
+# `hermes` binary, so the docker transport is the only one available.
+BIN_DOCKER="$WORK/bin-docker"
+BIN_MIN="$WORK/bin-min"
+mkdir -p "$BIN_DOCKER" "$BIN_MIN"
+cp "$BIN/docker" "$BIN_DOCKER/docker"
+chmod +x "$BIN_DOCKER/docker"
+for t in bash install stat cmp basename jq mktemp mv; do
+  ln -s "$(command -v "$t")" "$BIN_MIN/$t"
+done
+
 # Root variant: only `id` differs, so it wins on PATH ahead of BIN.
 # shellcheck disable=SC2016  # $@ must expand inside the generated stub
 printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "0\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$BIN_ROOT/id"
@@ -276,6 +349,9 @@ run_step() {
   local rc=0
   PATH="${RUN_PATH:-$BIN:$PATH}" INSTALL_LOG="$INSTALL_LOG" \
     HERMES_ARGV_LOG="${HERMES_ARGV_LOG:-/dev/null}" \
+    DOCKER_ARGV_LOG="${DOCKER_ARGV_LOG:-/dev/null}" \
+    DOCKER_RUNNING="${DOCKER_RUNNING:-false}" \
+    DOCKER_HERMES_ROOT="${DOCKER_HERMES_ROOT:-$DATA}" \
     bash -c "source '$SHIM/step.sh'; install_secret_guard_hook" >> "$WORK/step.log" 2>&1 || rc=$?
   return "$rc"
 }
@@ -395,11 +471,14 @@ else
 fi
 
 echo "-- fail-safe: missing hermes CLI --"
-rm -rf "$DATA/profiles/default/agent-hooks"
+rm -rf "$DATA/profiles/default/agent-hooks" "$DATA/profiles/builder/agent-hooks"
 : > "$WORK/step.log"
 : > "$INSTALL_LOG"
 rc=0
-env PATH="/usr/bin:/bin" INSTALL_LOG="$INSTALL_LOG" HERMES_ARGV_LOG=/dev/null \
+# BIN_MIN holds neither hermes nor docker on purpose: the installer now also
+# probes docker, and an ambient PATH on a Docker host would let the docker
+# transport reach the LIVE hermes-agent container. This suite stays offline.
+env PATH="$BIN_MIN" INSTALL_LOG="$INSTALL_LOG" HERMES_ARGV_LOG=/dev/null \
   bash -c "source '$SHIM/step.sh'; install_secret_guard_hook" >> "$WORK/step.log" 2>&1 || rc=$?
 check "(m) a missing hermes CLI exits 0" "0" "$rc"
 if grep -q 'EVENT event=secret_guard_hook_failed .*reason=hermes_missing' "$INSTALL_LOG"; then
@@ -407,6 +486,10 @@ if grep -q 'EVENT event=secret_guard_hook_failed .*reason=hermes_missing' "$INST
 else
   bad "(m) hermes_missing was not recorded"
 fi
+for p in default builder; do
+  check "(m) nothing was placed for '${p}'" "gone" \
+    "$( [[ -e "$DATA/profiles/$p/agent-hooks/secret-guard.py" ]] && echo present || echo gone )"
+done
 
 echo "-- fail-safe: no profiles directory --"
 : > "$INSTALL_LOG"
@@ -436,6 +519,168 @@ if grep -q 'EVENT event=secret_guard_hook_failed .*reason=config_get_failed' "$I
   ok "(o) config_get_failed was recorded"
 else
   bad "(o) config_get_failed was not recorded"
+fi
+
+# ---------------------------------------------------------------------------
+# Transport: no host hermes CLI, a running hermes-agent container. Same code
+# path as install.sh STEP 9a-3, reached through `docker exec`.
+# ---------------------------------------------------------------------------
+echo "-- docker transport (no host hermes, container running) --"
+reset_fixtures() {
+  rm -rf "$DATA/profiles/default/agent-hooks" "$DATA/profiles/builder/agent-hooks"
+  printf '{"hooks":{"pre_tool_call":[{"command":"/opt/peer/audit.py","timeout":5}]}}\n' \
+    > "$DATA/profiles/default/config.yaml"
+  printf '{"profile":"builder"}\n' > "$DATA/profiles/builder/config.yaml"
+}
+
+reset_fixtures
+: > "$WORK/step.log"
+: > "$INSTALL_LOG"
+: > "$WORK/docker-argv.log"
+RUN_PATH="$BIN_DOCKER:$BIN_MIN"
+DOCKER_ARGV_LOG="$WORK/docker-argv.log"
+DOCKER_RUNNING="true"
+rc=0
+run_step || rc=$?
+check "(p) the docker-transport run exits 0" "0" "$rc"
+check "(p) the guard is installed 0755 for 'default' over docker" "755" \
+  "$(stat -c '%a' "$DATA/profiles/default/agent-hooks/secret-guard.py" 2>/dev/null)"
+check "(p) the guard is installed 0755 for 'builder' over docker" "755" \
+  "$(stat -c '%a' "$DATA/profiles/builder/agent-hooks/secret-guard.py" 2>/dev/null)"
+if cmp -s "$GUARD" "$DATA/profiles/default/agent-hooks/secret-guard.py"; then
+  ok "(p) the docker-installed guard is byte-identical to the tracked source"
+else
+  bad "(p) the docker-installed guard differs from the tracked source"
+fi
+check "(p) the guard is declared exactly once in 'default' over docker" "1" \
+  "$(jq '[.hooks.pre_tool_call[] | select(.command | endswith("/agent-hooks/secret-guard.py"))] | length' \
+     "$DATA/profiles/default/config.yaml" 2>/dev/null)"
+check "(p) the declared command is the CONTAINER path" \
+  "/root/.hermes/profiles/default/agent-hooks/secret-guard.py" \
+  "$(jq -r '.hooks.pre_tool_call[] | select(.command | endswith("/agent-hooks/secret-guard.py")) | .command' \
+     "$DATA/profiles/default/config.yaml" 2>/dev/null)"
+check "(p) the entry matcher is .*" ".*" \
+  "$(jq -r '.hooks.pre_tool_call[] | select(.command | endswith("/agent-hooks/secret-guard.py")) | .matcher' \
+     "$DATA/profiles/default/config.yaml" 2>/dev/null)"
+check "(p) the entry has a 10s timeout" "10" \
+  "$(jq -r '.hooks.pre_tool_call[] | select(.command | endswith("/agent-hooks/secret-guard.py")) | .timeout' \
+     "$DATA/profiles/default/config.yaml" 2>/dev/null)"
+check "(p) the entry is fail_closed" "true" \
+  "$(jq -r '.hooks.pre_tool_call[] | select(.command | endswith("/agent-hooks/secret-guard.py")) | .fail_closed' \
+     "$DATA/profiles/default/config.yaml" 2>/dev/null)"
+check "(p) the peer hook survived the docker write" "1" \
+  "$(jq '[.hooks.pre_tool_call[] | select(.command == "/opt/peer/audit.py")] | length' \
+     "$DATA/profiles/default/config.yaml" 2>/dev/null)"
+if grep -q 'EVENT event=secret_guard_hook_installed' "$INSTALL_LOG"; then
+  ok "(p) secret_guard_hook_installed was recorded over docker"
+else
+  bad "(p) secret_guard_hook_installed was not recorded over docker"
+fi
+if grep -qF 'exec hermes-agent /opt/hermes-agent/.hermes/bin/hermes -p default config get hooks.pre_tool_call --json' \
+    "$WORK/docker-argv.log"; then
+  ok "(p) the docker get uses the ABSOLUTE in-container CLI path"
+else
+  bad "(p) the docker get did not use /opt/hermes-agent/.hermes/bin/hermes"
+fi
+if grep -qF 'exec hermes-agent /opt/hermes-agent/.hermes/bin/hermes -p builder config set hooks.pre_tool_call' \
+    "$WORK/docker-argv.log"; then
+  ok "(p) the docker set uses the ABSOLUTE in-container CLI path"
+else
+  bad "(p) the docker set did not use /opt/hermes-agent/.hermes/bin/hermes"
+fi
+if grep -q 'config get' "$WORK/docker-argv.log" \
+   && ! grep -qE '(^| )(hermes)( |$)' "$WORK/docker-argv.log"; then
+  ok "(p) no bare hermes was invoked inside the container"
+else
+  bad "(p) a bare hermes invocation reached the docker stub"
+fi
+if grep -qE 'HERMES_HOME|HYBRID_AI_HERMES_DATA_DIR|docker exec -e| exec .* -e ' "$WORK/docker-argv.log"; then
+  bad "(p) a host HERMES_HOME / HYBRID_AI_HERMES_DATA_DIR was passed into the container"
+else
+  ok "(p) no host HERMES_HOME / HYBRID_AI_HERMES_DATA_DIR crossed into the container"
+fi
+
+echo "-- docker transport second run (idempotency) --"
+cp "$DATA/profiles/default/config.yaml" "$WORK/default.docker.before"
+cp "$DATA/profiles/builder/config.yaml" "$WORK/builder.docker.before"
+before_mode="$(stat -c '%a' "$DATA/profiles/default/agent-hooks/secret-guard.py")"
+before_mtime="$(stat -c '%Y' "$DATA/profiles/default/agent-hooks/secret-guard.py")"
+sleep 1
+: > "$WORK/step.log"
+: > "$INSTALL_LOG"
+: > "$WORK/docker-argv.log"
+rc=0
+run_step || rc=$?
+check "(q) the second docker run exits 0" "0" "$rc"
+check "(q) the guard mode is unchanged over docker" "$before_mode" \
+  "$(stat -c '%a' "$DATA/profiles/default/agent-hooks/secret-guard.py" 2>/dev/null)"
+check "(q) the guard mtime is unchanged over docker (consent stays valid)" "$before_mtime" \
+  "$(stat -c '%Y' "$DATA/profiles/default/agent-hooks/secret-guard.py" 2>/dev/null)"
+if cmp -s "$WORK/default.docker.before" "$DATA/profiles/default/config.yaml"; then
+  ok "(q) the 'default' config is byte-identical after the second docker run"
+else
+  bad "(q) the 'default' config changed on the second docker run"
+fi
+if cmp -s "$WORK/builder.docker.before" "$DATA/profiles/builder/config.yaml"; then
+  ok "(q) the 'builder' config is byte-identical after the second docker run"
+else
+  bad "(q) the 'builder' config changed on the second docker run"
+fi
+if grep -q ' config set ' "$WORK/docker-argv.log"; then
+  bad "(q) the second docker run still called 'config set'"
+else
+  ok "(q) the second docker run called no 'config set'"
+fi
+if grep -q ' config get ' "$WORK/docker-argv.log"; then
+  ok "(q) the second docker run still issued 'config get'"
+else
+  bad "(q) the second docker run issued no 'config get'"
+fi
+
+echo "-- fail-safe: no transport (container not running) --"
+reset_fixtures
+: > "$WORK/step.log"
+: > "$INSTALL_LOG"
+: > "$WORK/docker-argv.log"
+DOCKER_RUNNING="false"
+rc=0
+run_step || rc=$?
+check "(r) a stopped hermes-agent container exits 0" "0" "$rc"
+if grep -q 'EVENT event=secret_guard_hook_failed .*reason=hermes_missing' "$INSTALL_LOG"; then
+  ok "(r) hermes_missing was recorded for a stopped container"
+else
+  bad "(r) hermes_missing was not recorded for a stopped container"
+fi
+if [[ -e "$DATA/profiles/default/agent-hooks/secret-guard.py" \
+   || -e "$DATA/profiles/builder/agent-hooks/secret-guard.py" ]]; then
+  bad "(r) a guard was placed with no transport"
+else
+  ok "(r) nothing was placed with no transport"
+fi
+if grep -q 'exec ' "$WORK/docker-argv.log"; then
+  bad "(r) the stopped container was still exec'd into"
+else
+  ok "(r) the stopped container was never exec'd into"
+fi
+
+echo "-- fail-safe: no transport (no docker on PATH) --"
+reset_fixtures
+: > "$WORK/step.log"
+: > "$INSTALL_LOG"
+RUN_PATH="$BIN_MIN"
+DOCKER_RUNNING="true"
+rc=0
+run_step || rc=$?
+check "(s) a docker-less PATH exits 0" "0" "$rc"
+if grep -q 'EVENT event=secret_guard_hook_failed .*reason=hermes_missing' "$INSTALL_LOG"; then
+  ok "(s) hermes_missing was recorded with no docker on PATH"
+else
+  bad "(s) hermes_missing was not recorded with no docker on PATH"
+fi
+if [[ -e "$DATA/profiles/default/agent-hooks/secret-guard.py" ]]; then
+  bad "(s) a guard was placed with no docker on PATH"
+else
+  ok "(s) nothing was placed with no docker on PATH"
 fi
 
 # ---------------------------------------------------------------------------

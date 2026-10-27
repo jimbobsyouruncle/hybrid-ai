@@ -1376,6 +1376,24 @@ run_prune_catch_up() {
 # /root/.hermes (hermes/docker-compose.hermes.yml), so HERMES_HOME points the
 # CLI at that same tree on the host.
 #
+# TWO TRANSPORTS, resolved once before the loop:
+#   1. a `hermes` CLI on the host PATH -- run it directly with
+#      HERMES_HOME=${HYBRID_AI_HERMES_DATA_DIR} so it sees the bind-mounted tree;
+#   2. otherwise, if `docker` exists and the `hermes-agent` container reports
+#      State.Running=true -- run the SAME calls inside that container through
+#      `docker exec` and the absolute in-container CLI path
+#      (/opt/hermes-agent/.hermes/bin/hermes). No host HERMES_HOME is passed in:
+#      the container's own /root/.hermes profile root already points at the
+#      bind mount.
+# Neither transport available: warn and record reason=hermes_missing, leaving
+# the host exactly as it was.
+#
+# On a fresh boot STEP 9a-3 runs BEFORE `docker compose up`, so the container
+# does not exist yet and only the skip is possible there. The skip sets
+# SECRET_GUARD_HOOK_RETRY_AFTER_START=1, and install.sh calls this function a
+# second time right after the stack starts. The second call is a no-op when the
+# first one had a transport.
+#
 # Idempotent by CONTENT, not just by presence: an installed file whose bytes and
 # mode already match is left untouched, because the consent allowlist records
 # the script's mtime -- rewriting the same bytes every deploy would silently
@@ -1396,6 +1414,10 @@ install_secret_guard_hook() {
   local guard_name="secret-guard.py"
   local profile_dir profile target_dir target config_file existing merged
   local container_command installed=0 declared=0 skipped=0
+  local transport="none" container_cli="/opt/hermes-agent/.hermes/bin/hermes"
+  local get_rc set_rc
+
+  SECRET_GUARD_HOOK_RETRY_AFTER_START=0
 
   if [[ ! -f "$source_file" ]]; then
     warn "Missing tracked secret guard: ${source_file}; nothing to install."
@@ -1409,10 +1431,21 @@ install_secret_guard_hook() {
     return 0
   fi
 
-  if ! command -v hermes >/dev/null 2>&1; then
-    warn "hermes CLI not found; the secret guard cannot be declared in any profile."
-    warn "Install it per profile once the CLI is available: hermes -p <profile> config set hooks.pre_tool_call ..."
+  # Resolve the transport ONCE, before the profile loop. The `command -v` probes
+  # are guarded so `set -e` cannot trip on a missing binary.
+  if command -v hermes >/dev/null 2>&1; then
+    transport="host"
+  elif command -v docker >/dev/null 2>&1 \
+    && [[ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" == "true" ]]; then
+    transport="docker"
+  fi
+
+  if [[ "$transport" == "none" ]]; then
+    warn "No hermes transport: neither a host hermes CLI nor a running hermes-agent container."
+    warn "The secret guard cannot be declared in any profile yet."
+    warn "It is declared on the next deploy once either is available: hermes -p <profile> config set hooks.pre_tool_call ..."
     event "secret_guard_hook_failed" "reason=hermes_missing"
+    SECRET_GUARD_HOOK_RETRY_AFTER_START=1
     return 0
   fi
 
@@ -1452,8 +1485,15 @@ install_secret_guard_hook() {
 
     container_command="/root/.hermes/profiles/${profile}/agent-hooks/${guard_name}"
 
-    if ! existing="$(HERMES_HOME="$HYBRID_AI_HERMES_DATA_DIR" \
-        hermes -p "$profile" config get hooks.pre_tool_call --json 2>/dev/null)"; then
+    get_rc=0
+    if [[ "$transport" == "docker" ]]; then
+      existing="$(docker exec hermes-agent "$container_cli" \
+        -p "$profile" config get hooks.pre_tool_call --json 2>/dev/null)" || get_rc=$?
+    else
+      existing="$(HERMES_HOME="$HYBRID_AI_HERMES_DATA_DIR" \
+        hermes -p "$profile" config get hooks.pre_tool_call --json 2>/dev/null)" || get_rc=$?
+    fi
+    if (( get_rc != 0 )); then
       warn "Could not read hooks.pre_tool_call for profile '${profile}'; not declared."
       event "secret_guard_hook_failed" "reason=config_get_failed" "profile=${profile}"
       skipped=$(( skipped + 1 ))
@@ -1484,8 +1524,15 @@ install_secret_guard_hook() {
       continue
     fi
 
-    if ! HERMES_HOME="$HYBRID_AI_HERMES_DATA_DIR" \
-         hermes -p "$profile" config set hooks.pre_tool_call "$merged" >/dev/null 2>&1; then
+    set_rc=0
+    if [[ "$transport" == "docker" ]]; then
+      docker exec hermes-agent "$container_cli" \
+        -p "$profile" config set hooks.pre_tool_call "$merged" >/dev/null 2>&1 || set_rc=$?
+    else
+      HERMES_HOME="$HYBRID_AI_HERMES_DATA_DIR" \
+        hermes -p "$profile" config set hooks.pre_tool_call "$merged" >/dev/null 2>&1 || set_rc=$?
+    fi
+    if (( set_rc != 0 )); then
       warn "Could not declare the secret guard in profile '${profile}'."
       event "secret_guard_hook_failed" "reason=config_set_failed" "profile=${profile}"
       skipped=$(( skipped + 1 ))
@@ -1511,6 +1558,7 @@ install_deploy_unit || true
 install_deploy_polkit_rule || true
 install_post_deploy_verifier || true
 install_prune_scheduler || true
+SECRET_GUARD_HOOK_RETRY_AFTER_START=0
 install_secret_guard_hook || true
 
 if (( NO_START )); then
@@ -1616,6 +1664,14 @@ if ! "${COMPOSE[@]}" up -d --remove-orphans; then
 fi
 PHASE_UP=$(( SECONDS - _phase_mark )); _phase_mark=$SECONDS
 event "stack_started"
+
+# STEP 9a-3 ran before the stack existed, so on a bare device it could only skip
+# for lack of a transport. Retry now that the hermes-agent container is up. The
+# flag is set only by the hermes_missing path, so this is a no-op whenever the
+# first call had a transport.
+if (( ${SECRET_GUARD_HOOK_RETRY_AFTER_START:-0} )); then
+  install_secret_guard_hook || true
+fi
 
 
 # ---------------------------------------------------------------------------
