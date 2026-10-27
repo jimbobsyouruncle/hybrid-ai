@@ -573,6 +573,12 @@
 - reset_state()
 - reset_sbin()
 
+## scripts/test-doctor-backup-counts.sh
+- pass()
+- fail()
+- summary_count()
+- run_doctor()
+
 ## scripts/test-doctor-backup-probe.sh
 - pass()
 - fail()
@@ -842,6 +848,7 @@
 - def probe_deploy_verification()
 - def probe_data()
 - def _parse_events(path, limit)
+- def _backup_journal_hint()
 - def _age_hours(stamp)
 - def _humanise(hours)
 - def probe_jobs()

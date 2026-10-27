@@ -1558,10 +1558,18 @@ if [[ -f "${BACKUP_CONF}/r2.env" && -f "${BACKUP_CONF}/repo-password" ]]; then
     # Count failures and incomplete runs SINCE THE LAST successful backup.
     # Counting the whole file made these numbers only ever grow, even after a
     # clean run; a success must reset them. Severity stays warn.
+    #
+    # A failed RUN writes TWO backup_failed lines (die() logs the event, the
+    # ERR trap calls die again), so count DISTINCT ts= values -- runs -- not
+    # matching lines. A matching line with no ts= is still one run.
     SINCE_LAST="$(awk '/event=backup_success/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$BACKUP_LOG" 2>/dev/null || true)"
-    RECENT_FAIL="$(printf '%s' "$SINCE_LAST" | grep -c 'event=backup_failed\|event=check_failed' 2>/dev/null || true)"
+    RECENT_FAIL="$(printf '%s' "$SINCE_LAST" \
+      | grep 'event=backup_failed\|event=check_failed' 2>/dev/null \
+      | awk '{ if (match($0, /ts=[^ ]+/)) print substr($0, RSTART, RLENGTH); else print $0 }' \
+      | sort -u | wc -l || true)"
     RECENT_INCOMPLETE="$(printf '%s' "$SINCE_LAST" | grep -c 'event=backup_incomplete' 2>/dev/null || true)"
     RECENT_FAIL="${RECENT_FAIL:-0}"
+    RECENT_FAIL="${RECENT_FAIL//[[:space:]]/}"
     RECENT_INCOMPLETE="${RECENT_INCOMPLETE:-0}"
     if (( RECENT_FAIL > 0 )); then
       warn "${RECENT_FAIL} backup failure(s) since the last successful backup" \

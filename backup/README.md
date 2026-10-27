@@ -108,7 +108,7 @@ Some runs cannot capture everything. A discovered path fails the allow-list, an 
 - it logs `backup_incomplete` (never `backup_success`);
 - it exits with code **3**. No unit retries it: every unit except the capture unit lists 3 in `RestartPreventExitStatus=`, and the capture unit has no `Restart=` policy at all. The system-mode units also list 3 in `SuccessExitStatus=` (so systemd does not report a successful-but-INCOMPLETE run as a failed unit); the upload and check units gained that line so an INCOMPLETE upload or check is no longer shown as a failure. It is the user-mode units that carry `RestartPreventExitStatus=` alone, with no `SuccessExitStatus=`.
 
-`backup_failed` (exit 1) stays reserved for a run that aborted. An incomplete run is a distinct, non-retryable outcome. `doctor.sh` counts both `backup_failed` and `backup_incomplete` **since the last `backup_success`**, so a clean run resets the counters.
+`backup_failed` (exit 1) stays reserved for a run that aborted. An incomplete run is a distinct, non-retryable outcome. `doctor.sh` counts both `backup_failed` and `backup_incomplete` **since the last `backup_success`**, so a clean run resets the counters, and it counts **distinct runs** (distinct `ts=` values), not lines: a failed run writes two `backup_failed` lines, so the count is per run.
 
 The backup unit also **bounds its own retries**. `hybrid-ai-backup.service` sets `StartLimitIntervalSec=1h` and `StartLimitBurst=2`, so even a hard failure (exit 1) can be retried at most twice in an hour before systemd gives up. This is what stops a run that fails the same way every time from trying again every 15 minutes.
 

@@ -111,6 +111,20 @@ different messages. Each one is `warn`; none is ever reported as `ok`.
 | The file exists but holds no lines | `backup log is empty` | Run `./backup/backup.sh` |
 | Lines exist, no `event=backup_success` | `no successful backup recorded` | Run one now: `./backup/backup.sh` |
 
+When the last success is stale enough to warn or fail, the tile's hint names the
+journal command for the mode this host installed, read from the **last**
+`backup_schedule_installed` event in the install log (already mounted read-only
+at `INSTALL_LOG_PATH`): `mode=system` names
+`sudo journalctl -u hybrid-ai-backup-upload.service -n 50`, anything else (user
+mode, no such event, or an unreadable or missing log) keeps the user-mode
+string `journalctl --user -u hybrid-ai-backup.service -n 50`. The Jobs tile's
+Backup-overdue hint uses the same command.
+
+A failed run writes **two** `event=backup_failed` lines (`backup.sh`'s `die()`
+logs one and the `ERR` trap calls `die` again), so the detail counts **distinct
+`ts=` values — failed runs — not lines**. `event=backup_incomplete` is counted
+once per line, as before.
+
 The unreadable case names the reader's uid and the file's **numeric** owner ids
 from `os.stat` — the same kind of detail the tile already shows, and no path or
 file content beyond it. This matters because the two cases used to look

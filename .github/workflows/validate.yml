@@ -190,6 +190,16 @@ jobs:
         # against a doctor.sh without the check.
         run: bash scripts/test-doctor-resolv-conf.sh
 
+      - name: Doctor backup-count tests
+        # Offline. RUNS doctor.sh (stubbed host commands, fixture backup logs)
+        # to prove the failure count is DISTINCT run(s), not lines: one failed
+        # run writes TWO event=backup_failed lines (die() plus the ERR trap),
+        # so three runs (six lines) must warn "3 backup failure(s)", not 6, and
+        # the last event=backup_success still resets the count.
+        # event=check_failed lines count the same way. The harness fails against
+        # a doctor.sh that counts lines.
+        run: bash scripts/test-doctor-backup-counts.sh
+
       - name: Doctor sandbox-firewall tests
         # Offline. RUNS doctor.sh (stubbed iptables and a recorded DOCKER-USER
         # chain) to prove the new warning-only sandbox-firewall check: a chain
