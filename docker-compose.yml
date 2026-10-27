@@ -294,6 +294,10 @@ services:
       # Not a secret: the pod's MagicDNS name, and it is masked in all output.
       # The status container resolves it through this service's `dns:` entry
       # (the tailnet resolver), so no stored mesh address is needed.
+      # DERIVED BOOLEAN presence flag: "1" when RUNPOD_API_KEY is set on the
+      # host, empty otherwise. Only this derived flag enters the container; the
+      # key value itself is never passed to this service.
+      RUNPOD_KEY_PRESENT: ${RUNPOD_API_KEY:+1}
       RUNPOD_HOST: ${RUNPOD_HOST}
       PI_HOST: ${PI_HOST}
       VLLM_PORT: ${VLLM_PORT:-8000}

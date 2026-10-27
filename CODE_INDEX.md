@@ -885,3 +885,13 @@
 - def write(text)
 - def remove()
 - def shape(tile)
+
+## status/test_pod_probe.py
+- def ok(msg)
+- def bad(msg)
+- def check(label, got, want)
+- def load_app()
+- def set_env(host, key_present)
+- def stub_getaddrinfo(behavior)
+- def shape(tile)
+- def no_leak(label, tile)

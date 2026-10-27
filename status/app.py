@@ -84,6 +84,9 @@ OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://openhands:3001")
 
 RUNPOD_HOST = os.getenv("RUNPOD_HOST", "")
 VLLM_PORT = os.getenv("VLLM_PORT", "8000")
+# Presence flag only ("1" when the host set RUNPOD_API_KEY), never the key
+# itself: the compose service passes a derived boolean, not a credential.
+RUNPOD_KEY_PRESENT = os.getenv("RUNPOD_KEY_PRESENT", "")
 WEBUI_DATA = os.getenv("WEBUI_DATA_PATH", "/data/webui_data")
 BACKUP_LOG = os.getenv("BACKUP_LOG_PATH", "/data/backup.log")
 INSTALL_LOG = os.getenv("INSTALL_LOG_PATH", "/data/install.log")
@@ -293,9 +296,17 @@ def probe_pod() -> Dict[str, Any]:
                 "hint": "Start the pod once, then re-run ./install.sh."}
     pod_addr = resolve_pod_address()
     if not pod_addr:
-        return {"name": "GPU pod", "state": "fail",
-                "detail": "MagicDNS name did not resolve to an address",
-                "hint": "Check tailscale status and MagicDNS, then re-run ./install.sh."}
+        # An unresolved name means the pod is stopped, which is normal. Wake
+        # readiness decides the state: info when a key is configured (the pod
+        # can be woken), warn when none is (it cannot). Never fail.
+        if RUNPOD_KEY_PRESENT:
+            return {"name": "GPU pod", "state": "info",
+                    "detail": "stopped (normal — wakes on demand)",
+                    "hint": "sudo ./install.sh --wake-runpod"}
+        return {"name": "GPU pod", "state": "warn",
+                "detail": "stopped and no RunPod API key is configured, so it "
+                          "cannot be woken",
+                "hint": "Run sudo ./install.sh to set RUNPOD_API_KEY."}
     mesh = re.match(r"^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.", pod_addr)
     if not mesh:
         return {"name": "GPU pod", "state": "fail",

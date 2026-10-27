@@ -171,6 +171,17 @@ jobs:
         # against a status/app.py without the probe.
         run: python3 status/test_deploy_verification.py
 
+      - name: GPU pod wake-readiness tile tests
+        # Offline, no Docker, no network. Proves status/app.py's GPU pod tile
+        # reports WAKE READINESS, not pod reachability: an unresolved MagicDNS
+        # name (a stopped pod, normal most of the time) is info when a RunPod
+        # API key is configured and warn when none is, and is never fail. The
+        # out-of-mesh address stays fail. socket.getaddrinfo is stubbed and the
+        # env set per case, with a fresh module import each time so each case
+        # exercises its own env. The harness fails against the unpatched app.py,
+        # which returned fail for a stopped pod.
+        run: python3 status/test_pod_probe.py
+
       - name: Doctor resolv.conf ownership tests
         # Offline. RUNS doctor.sh (stubbed tailscale/docker/systemctl and
         # fixture resolv.conf files, named through the internal
