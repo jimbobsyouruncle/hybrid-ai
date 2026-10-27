@@ -31,8 +31,16 @@ PURPOSE (plain English):
       (5) a 0600 file owned by another uid -> warn "backup log not readable"
           naming permission denied, the reader's uid and the owner uid/gid;
       (6) a 0640 file whose group is ours -> the log parses normally;
-      (7) the four "nothing to report" strings are pairwise distinct, and no
-          OSError message equals anything the healthy path can produce.
+      (7) two event=backup_failed lines sharing one ts= (one failed RUN writes
+          two lines) -> the detail counts ONE failure, not two;
+      (8) two event=backup_failed runs (four lines, two distinct ts=) -> two
+          failures;
+      (9) the four "nothing to report" strings are pairwise distinct, and no
+          OSError message equals anything the healthy path can produce;
+     (10) the journal hint follows the mode the install log's LAST
+          backup_schedule_installed event records: mode=system names the
+          system upload unit, everything else (user, no event, no log) keeps
+          today's user-mode string.
 
 USAGE:
     python3 status/test_backup_probe.py
@@ -260,9 +268,39 @@ try:
     check("0640 -> mode is exactly 0640",
           stat.S_IMODE(os.stat(BACKUP_LOG).st_mode), 0o640)
 
-    # (7) the strings must be pairwise distinct, and no OSError branch may
+    # (7) one failed RUN logs TWO backup_failed lines, so the tile must count
+    # distinct ts= values, not lines. The success-resets behaviour is unchanged.
+    print("\n== (7) one failed run, two lines ==")
+    run_ts = ts_hours_ago(2)
+    write(
+        "EVENT ts=%s event=backup_success detail=stub\n" % ts_hours_ago(40)
+        + "EVENT ts=%s event=backup_failed detail=stub\n" % run_ts
+        + "EVENT ts=%s event=backup_failed detail=stub\n" % run_ts
+    )
+    tile = app.probe_backups()
+    check("two lines sharing one ts= -> one failure",
+          "1 failure(s) logged" in tile["detail"], True)
+
+    # (8) two failed runs, each logging its own pair of lines, are TWO runs --
+    # distinct timestamps -- even though the file holds four matching lines.
+    print("\n== (8) two failed runs, four lines ==")
+    run_a = ts_hours_ago(3)
+    run_b = ts_hours_ago(2)
+    write(
+        "EVENT ts=%s event=backup_success detail=stub\n" % ts_hours_ago(40)
+        + "EVENT ts=%s event=backup_failed detail=stub\n" % run_a
+        + "EVENT ts=%s event=backup_failed detail=stub\n" % run_a
+        + "EVENT ts=%s event=backup_failed detail=stub\n" % run_b
+        + "EVENT ts=%s event=backup_failed detail=stub\n" % run_b
+    )
+    tile = app.probe_backups()
+    check("four lines over two distinct ts= -> two failures",
+          "2 failure(s) logged" in tile["detail"], True)
+
+    # (9) the strings must be pairwise distinct, and no OSError branch may
     # return anything the healthy path can produce ---------------------------
-    print("\n== (7) honest failure taxonomy ==")
+    print("\n== (9) honest failure taxonomy ==")
+
     no_success_detail = "no successful backup recorded"
     four = [absent_detail, empty_detail, unreadable_detail, no_success_detail]
     if unreadable_detail is None:
@@ -279,6 +317,61 @@ try:
     healthy = app.probe_backups()["detail"]
     check("a healthy detail never looks like a failure detail",
           any(healthy.startswith(d.split(" — ", 1)[0]) for d in four), False)
+
+    # (10) the journal hint follows the mode the install log records. The LAST
+    # backup_schedule_installed event decides; its argument string carries
+    # mode=system in system mode and nothing in user mode. No event, no log,
+    # or a mode we do not recognise stays user mode, byte-identical to before.
+    print("\n== (10) mode-aware journal hints ==")
+    # A warn-range Backups tile (36h < age <= 168h) and an overdue Backup job
+    # both have to carry the mode's command.
+    STALE = ts_hours_ago(48)
+    write("EVENT ts=%s event=backup_success detail=stub\n" % STALE)
+
+    def install_log_event(text: str) -> None:
+        with open(INSTALL_LOG, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def hint_pair() -> tuple:
+        return (app.probe_backups()["hint"],
+                next(j["hint"] for j in app.probe_jobs() if j["name"] == "Backup"))
+
+    system_install = ("EVENT ts=%s event=backup_schedule_installed units=4 mode=system\n"
+                      % ts_hours_ago(50))
+    user_install = ("EVENT ts=%s event=backup_schedule_installed units=3\n"
+                    % ts_hours_ago(50))
+    expected_system = "sudo journalctl -u hybrid-ai-backup-upload.service -n 50"
+    expected_user = "journalctl --user -u hybrid-ai-backup.service -n 50"
+
+    install_log_event(system_install)
+    tile_hint, job_hint = hint_pair()
+    check("system mode -> Backups tile names the system upload unit",
+          tile_hint, expected_system)
+    check("system mode -> Jobs tile names the system upload unit",
+          job_hint, expected_system)
+
+    install_log_event(user_install)
+    tile_hint, job_hint = hint_pair()
+    check("user mode -> Backups tile hint is byte-identical to before",
+          tile_hint, expected_user)
+    check("user mode -> Jobs tile hint is byte-identical to before",
+          job_hint, expected_user)
+
+    install_log_event("EVENT ts=%s event=install_success detail=stub\n" % ts_hours_ago(60))
+    tile_hint, job_hint = hint_pair()
+    check("no schedule event -> Backups tile stays user mode", tile_hint, expected_user)
+    check("no schedule event -> Jobs tile stays user mode", job_hint, expected_user)
+
+    if os.path.exists(INSTALL_LOG):
+        os.remove(INSTALL_LOG)
+    tile_hint, job_hint = hint_pair()
+    check("install log absent -> Backups tile stays user mode", tile_hint, expected_user)
+    check("install log absent -> Jobs tile stays user mode", job_hint, expected_user)
+
+    # A last event in user mode wins over an earlier system-mode one.
+    install_log_event(system_install + user_install)
+    tile_hint, _ = hint_pair()
+    check("the LAST schedule event decides the mode", tile_hint, expected_user)
 finally:
     shutil.rmtree(WORK, ignore_errors=True)
 

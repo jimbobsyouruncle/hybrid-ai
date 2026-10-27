@@ -87,6 +87,12 @@ VLLM_PORT = os.getenv("VLLM_PORT", "8000")
 WEBUI_DATA = os.getenv("WEBUI_DATA_PATH", "/data/webui_data")
 BACKUP_LOG = os.getenv("BACKUP_LOG_PATH", "/data/backup.log")
 INSTALL_LOG = os.getenv("INSTALL_LOG_PATH", "/data/install.log")
+
+# The journal command a hint names depends on which units this host installed.
+# Derived from the install log (already mounted read-only) so no new setting is
+# needed. In user mode the strings are exactly what the tile printed before.
+BACKUP_USER_HINT = "journalctl --user -u hybrid-ai-backup.service -n 50"
+BACKUP_SYSTEM_HINT = "sudo journalctl -u hybrid-ai-backup-upload.service -n 50"
 POST_DEPLOY_VERIFY_LOG = os.getenv("POST_DEPLOY_VERIFY_LOG_PATH",
                                    "/data/post-deploy-verify.log")
 
@@ -392,7 +398,7 @@ def probe_backups() -> Dict[str, Any]:
                 "detail": ABSENT_BACKUP_DETAIL,
                 "hint": "Configure backups by re-running ./install.sh."}
     last: Optional[str] = None
-    failures = 0
+    failure_stamps: set = set()
     incomplete = 0
     read_lines = 0
     try:
@@ -406,10 +412,15 @@ def probe_backups() -> Dict[str, Any]:
                     # A success resets the counters: report what has happened
                     # since the last fully successful run, not a total that only
                     # ever grows.
-                    failures = 0
+                    failure_stamps = set()
                     incomplete = 0
                 elif "event=backup_failed" in line:
-                    failures += 1
+                    # One failed run logs TWO backup_failed lines (die() logs
+                    # one, the ERR trap calls die again), so count DISTINCT ts=
+                    # values -- runs -- not lines. A line with no ts= is still
+                    # one run, and cannot be merged with another.
+                    match = re.search(r"ts=(\S+)", line)
+                    failure_stamps.add(match.group(1) if match else line.strip())
                 elif "event=backup_incomplete" in line:
                     incomplete += 1
     except OSError:
@@ -444,10 +455,11 @@ def probe_backups() -> Dict[str, Any]:
     if hours <= 36:
         lvl, hint = "ok", ""
     elif hours <= 168:
-        lvl, hint = "warn", "journalctl --user -u hybrid-ai-backup.service -n 50"
+        lvl, hint = "warn", _backup_journal_hint()
     else:
         lvl, hint = "fail", "Backups are not running. Try ./backup/backup.sh manually."
     detail = f"last success {hours}h ago"
+    failures = len(failure_stamps)
     if failures:
         detail += f" · {failures} failure(s) logged"
     if incomplete:
@@ -589,6 +601,22 @@ def _parse_events(path: str, limit: int = 4000) -> List[Tuple[str, str, str]]:
     return out
 
 
+def _backup_journal_hint() -> str:
+    """The journal command that can actually show this host's backup unit.
+
+    The install log records which mode installed the schedule, and the LAST
+    backup_schedule_installed event decides: its argument string carries
+    mode=system in system mode and nothing in user mode. Anything else -- no
+    such event, mode absent, an unreadable or missing log -- is treated as user
+    mode, whose strings are byte-identical to what the tile printed before.
+    """
+    system = False
+    for _stamp, name, rest in _parse_events(INSTALL_LOG):
+        if name == "backup_schedule_installed":
+            system = "mode=system" in rest
+    return BACKUP_SYSTEM_HINT if system else BACKUP_USER_HINT
+
+
 def _age_hours(stamp: str) -> Optional[int]:
     try:
         when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -649,7 +677,7 @@ def probe_jobs() -> List[Dict[str, Any]]:
             if max_age and hours is not None and hours > max_age:
                 state = "warn"
                 detail += " — overdue"
-                hint = ("journalctl --user -u hybrid-ai-backup.service -n 50"
+                hint = (_backup_journal_hint()
                         if label == "Backup" else "./backup/backup.sh --check")
         jobs.append({"name": label, "state": state, "detail": detail, "hint": hint})
 

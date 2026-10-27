@@ -134,6 +134,7 @@
 - scripts/test-deploy-remote.sh
 - scripts/test-deploy-trigger.sh
 - scripts/test-deploy-wiring-install.sh - FILE: scripts/test-deploy-wiring-install.sh
+- scripts/test-doctor-backup-counts.sh - FILE: scripts/test-doctor-backup-counts.sh
 - scripts/test-doctor-backup-probe.sh - Offline regression guard for doctor.sh's backup-repository probe.
 - scripts/test-doctor-lease-less.sh - FILE: scripts/test-doctor-lease-less.sh
 - scripts/test-doctor-post-deploy-log.sh - FILE: scripts/test-doctor-post-deploy-log.sh
