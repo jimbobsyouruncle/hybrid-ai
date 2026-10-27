@@ -1345,11 +1345,163 @@ run_prune_catch_up() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# STEP 9a-3. Install and declare the pre_tool_call secret-guard hook
+# ---------------------------------------------------------------------------
+# The guard (hermes/agent-hooks/secret-guard.py) is tracked source; on the host
+# it is inert until it is placed under a profile AND declared in that profile's
+# config.yaml. Nothing declared it before, so it never ran.
+#
+# Two halves, both per profile present under ${HYBRID_AI_HERMES_DATA_DIR}/profiles:
+#   1. place the file at profiles/<p>/agent-hooks/secret-guard.py, mode 0755
+#      (the runtime executes it, so 0644 is dead weight);
+#   2. declare it through the SUPPORTED path only -- `hermes config get` then
+#      `hermes config set`. There is no `hermes hooks add` verb. `config set`
+#      on hooks.pre_tool_call REPLACES the list, so the current value is read
+#      first, the guard entry is appended to it, and the whole list is written
+#      back: a peer hook is never dropped.
+#
+# The `command` written is the CONTAINER path (/root/.hermes/profiles/<p>/...),
+# because that is the path the runtime executes. hermes_data is bind-mounted at
+# /root/.hermes (hermes/docker-compose.hermes.yml), so HERMES_HOME points the
+# CLI at that same tree on the host.
+#
+# Idempotent by CONTENT, not just by presence: an installed file whose bytes and
+# mode already match is left untouched, because the consent allowlist records
+# the script's mtime -- rewriting the same bytes every deploy would silently
+# invalidate the owner's approval. A second run installs nothing, writes no
+# config and leaves the tree byte-identical.
+#
+# Consent is NOT granted here. hooks_auto_accept is never set: the owner grants
+# it per profile (TTY approval, or --accept-hooks / HERMES_ACCEPT_HOOKS=1 for one
+# run). An unconsented hook is skipped with a visible warning, by design.
+#
+# Fail-safe, never fail-closed: no sudo, never dies, never changes this script's
+# exit status. A missing CLI, a missing profiles dir, an unreadable config or a
+# failed `config get/set` warns and records an event, leaving the host exactly
+# as it was.
+install_secret_guard_hook() {
+  local source_file="${APP_DIR}/hermes/agent-hooks/secret-guard.py"
+  local profiles_root="${HYBRID_AI_HERMES_DATA_DIR}/profiles"
+  local guard_name="secret-guard.py"
+  local profile_dir profile target_dir target config_file existing merged
+  local container_command installed=0 declared=0 skipped=0
+
+  if [[ ! -f "$source_file" ]]; then
+    warn "Missing tracked secret guard: ${source_file}; nothing to install."
+    event "secret_guard_hook_failed" "reason=template_missing"
+    return 0
+  fi
+
+  if [[ ! -d "$profiles_root" ]]; then
+    warn "No Hermes profiles under ${profiles_root} yet; secret guard not installed."
+    event "secret_guard_hook_skipped" "reason=no_profiles"
+    return 0
+  fi
+
+  if ! command -v hermes >/dev/null 2>&1; then
+    warn "hermes CLI not found; the secret guard cannot be declared in any profile."
+    warn "Install it per profile once the CLI is available: hermes -p <profile> config set hooks.pre_tool_call ..."
+    event "secret_guard_hook_failed" "reason=hermes_missing"
+    return 0
+  fi
+
+  for profile_dir in "$profiles_root"/*/; do
+    [[ -d "$profile_dir" ]] || continue
+    profile="$(basename -- "$profile_dir")"
+    case "$profile" in .*) continue ;; esac
+
+    target_dir="${profile_dir%/}/agent-hooks"
+    target="${target_dir}/${guard_name}"
+
+    # 1. Place the guard, 0755 in a root-owned 0755 directory. The runtime MUST
+    # be able to read and execute it -- it runs as HYBRID_AI_UID, which is not
+    # root on a migrated host -- while the directory stays unwritable to that
+    # uid, so the agent cannot replace the guard that constrains it.
+    if [[ -f "$target" && "$(stat -c '%a' "$target" 2>/dev/null)" == "755" ]] \
+       && cmp -s "$source_file" "$target"; then
+      :
+    else
+      if ! install -d -m 0755 "$target_dir" \
+         || ! install -m 0755 "$source_file" "$target"; then
+        warn "Could not install the secret guard for profile '${profile}' at ${target}."
+        event "secret_guard_hook_failed" "reason=install_failed" "profile=${profile}"
+        continue
+      fi
+    fi
+    installed=$(( installed + 1 ))
+
+    # 2. Declare it in this profile's config, read-then-append-then-write.
+    config_file="${profile_dir%/}/config.yaml"
+    if [[ ! -f "$config_file" || ! -r "$config_file" ]]; then
+      warn "Profile '${profile}' has no readable config.yaml; secret guard not declared."
+      event "secret_guard_hook_skipped" "reason=config_unreadable" "profile=${profile}"
+      skipped=$(( skipped + 1 ))
+      continue
+    fi
+
+    container_command="/root/.hermes/profiles/${profile}/agent-hooks/${guard_name}"
+
+    if ! existing="$(HERMES_HOME="$HYBRID_AI_HERMES_DATA_DIR" \
+        hermes -p "$profile" config get hooks.pre_tool_call --json 2>/dev/null)"; then
+      warn "Could not read hooks.pre_tool_call for profile '${profile}'; not declared."
+      event "secret_guard_hook_failed" "reason=config_get_failed" "profile=${profile}"
+      skipped=$(( skipped + 1 ))
+      continue
+    fi
+
+    if printf '%s' "$existing" | jq -e --arg cmd "$container_command" \
+        'type == "array" and any(.[]?; type == "object" and (.command? // "") == $cmd)' \
+        >/dev/null 2>&1; then
+      declared=$(( declared + 1 ))
+      continue
+    fi
+
+    # A value that is neither a list nor null is a shape this step does not
+    # understand; refuse rather than overwrite a peer hook.
+    if ! printf '%s' "$existing" | jq -e 'type == "array" or . == null' >/dev/null 2>&1; then
+      warn "hooks.pre_tool_call for profile '${profile}' is not a list; refusing to replace it."
+      event "secret_guard_hook_skipped" "reason=unexpected_config_shape" "profile=${profile}"
+      skipped=$(( skipped + 1 ))
+      continue
+    fi
+
+    if ! merged="$(printf '%s' "$existing" | jq -c --arg cmd "$container_command" \
+        '((if type == "array" then . else [] end) + [{"command": $cmd, "matcher": ".*", "timeout": 10, "fail_closed": true}])')"; then
+      warn "Could not build the hooks.pre_tool_call list for profile '${profile}'."
+      event "secret_guard_hook_failed" "reason=config_merge_failed" "profile=${profile}"
+      skipped=$(( skipped + 1 ))
+      continue
+    fi
+
+    if ! HERMES_HOME="$HYBRID_AI_HERMES_DATA_DIR" \
+         hermes -p "$profile" config set hooks.pre_tool_call "$merged" >/dev/null 2>&1; then
+      warn "Could not declare the secret guard in profile '${profile}'."
+      event "secret_guard_hook_failed" "reason=config_set_failed" "profile=${profile}"
+      skipped=$(( skipped + 1 ))
+      continue
+    fi
+    declared=$(( declared + 1 ))
+  done
+
+  if (( installed == 0 && declared == 0 )); then
+    warn "Secret guard: nothing installed and nothing declared (${skipped} profile(s) skipped)."
+    event "secret_guard_hook_failed" "reason=no_profile_updated"
+    return 0
+  fi
+
+  ok "Secret guard: ${installed} profile(s) installed, ${declared} declared, ${skipped} skipped."
+  warn "Grant consent per profile (unconsented hooks are skipped): run hermes -p <profile> hooks list, then approve at the TTY prompt or run once with HERMES_ACCEPT_HOOKS=1."
+  event "secret_guard_hook_installed" "installed=${installed}" "declared=${declared}" "skipped=${skipped}"
+  return 0
+}
+
 install_firewall_unit || true
 install_deploy_unit || true
 install_deploy_polkit_rule || true
 install_post_deploy_verifier || true
 install_prune_scheduler || true
+install_secret_guard_hook || true
 
 if (( NO_START )); then
   hr; ok "--no-start requested. Environment prepared; Docker untouched."

@@ -2377,3 +2377,90 @@ docker builder prune
 
 The `hybrid-ai` and `hybrid-ai-backup` system accounts are kept too. Remove them
 by hand with `userdel`/`groupdel` if you are sure nothing else uses them.
+
+## The secret-guard hook is skipped or not blocking
+
+`hermes/agent-hooks/secret-guard.py` is a `pre_tool_call` hook. It only runs when
+it is installed into the profile AND declared in that profile's `config.yaml`
+AND allowlisted for that profile. Start with what the runtime thinks it has:
+
+```bash
+hermes -p <profile> hooks list          # is the guard declared?
+hermes -p <profile> hooks doctor        # does the runtime consider it healthy?
+```
+
+### The visible skip warning
+
+An unconsented hook does not run. The runtime logs this line and carries on:
+
+```
+shell hook for <event> (<command>) not allowlisted - skipped. Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true, or approve at the TTY prompt next run.
+```
+
+Reading it:
+
+| Part | Meaning |
+|---|---|
+| `<event>` | The event the hook is registered for. For this guard it is `pre_tool_call`. |
+| `<command>` | The hook's `command` value. For this guard it should be `/root/.hermes/profiles/<profile>/agent-hooks/secret-guard.py`. |
+
+If the warning is absent and the guard is declared, consent is in place. If the
+warning is absent and the guard is NOT declared, the install step never ran for
+that profile — check the install log for a `secret_guard_hook_*` event.
+
+### The allowlist file
+
+Consent lives at `~/.hermes/shell-hooks-allowlist.json` — one entry per (event,
+command) pair, each carrying the script's mtime. Check it with:
+
+```bash
+jq -r 'keys[]' ~/.hermes/shell-hooks-allowlist.json 2>/dev/null
+```
+
+Treat this file as sensitive metadata: it names credentials-adjacent paths. Do
+not paste its contents into an issue.
+
+### mtime drift invalidates consent
+
+The allowlist pins the script's modification time. Replacing the file with
+different bytes — a deploy that rewrote it, or a hand copy — leaves the allowlist
+entry stale, and the hook is skipped until the owner approves it again. That is
+intended: an edited hook must not inherit an approval given to the old one.
+
+`install.sh` STEP 9a-3 therefore leaves an installed guard alone when its bytes
+and mode already match the tracked source. A second install run does not touch
+the file, so the recorded mtime stays valid. If a deploy DID change the bytes,
+expect to grant consent again on the next run.
+
+### Grant consent again, per profile
+
+Approve at the TTY prompt on the next run, or accept for one run only:
+
+```bash
+HERMES_ACCEPT_HOOKS=1 hermes -p <profile> ...        # one run; or pass --accept-hooks
+```
+
+Never set `hooks_auto_accept: true`. It skips the per-profile decision and grants
+blanket trust to whatever the config names.
+
+### Interpreting `hermes hooks doctor`
+
+`doctor` reports the registered hooks and their state for one profile. Read it
+per profile, not once for the host:
+
+| Output | Meaning | Action |
+|---|---|---|
+| The guard is listed with its `command` and `timeout` | The declaration is in place. | Nothing. |
+| The guard is missing from the list | The install step never declared it, or the wrong profile was queried. | Check the install log for `secret_guard_hook_*`; run `install.sh` again. |
+| A "not allowlisted" or "skipped" note | Consent is absent or stale. | Approve at the TTY prompt, or run once with `HERMES_ACCEPT_HOOKS=1`. |
+| A `command` path the profile cannot execute | The file is not there, or is not mode `0755`. | Check `ls -l` on the path; `install -m 0755` it from the tree. |
+| A timeout warning | The `timeout` value is too small for the guard's work. | The declared default is 10 seconds; raise it in that profile's config. |
+
+### The guard blocks a call you expected to pass
+
+The guard blocks on a secret-file argument, an environment dump, or a shell
+reader aimed at a secret. An unrecognised payload is also a block — a malformed
+or unexpected payload fails closed rather than failing open. Confirm the intent
+by reading the block message: it names the failure class, never the payload and
+never a secret value. If a legitimate call is blocked, change the call to name
+the secret's consumer, not the secret. Do not weaken the rule.
