@@ -761,6 +761,7 @@
 - event()
 - run_step()
 - config_bytes()
+- reset_fixtures()
 
 ## scripts/test-status-backup-log-env.sh
 - ok()

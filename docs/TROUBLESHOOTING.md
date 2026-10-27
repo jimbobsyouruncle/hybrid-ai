@@ -2420,6 +2420,38 @@ If the warning is absent and the guard is declared, consent is in place. If the
 warning is absent and the guard is NOT declared, the install step never ran for
 that profile — check the install log for a `secret_guard_hook_*` event.
 
+### `reason=hermes_missing` in the install log
+
+`install.sh` declares the guard through one of two transports. It uses a host
+`hermes` CLI when one is on PATH. Otherwise it uses `docker exec` into the
+running `hermes-agent` container, with the absolute in-container CLI path
+`/opt/hermes-agent/.hermes/bin/hermes`. Neither passes host environment values
+into the container.
+
+An event of
+
+```
+event=secret_guard_hook_failed reason=hermes_missing
+```
+
+therefore means NEITHER a host `hermes` CLI NOR a running `hermes-agent`
+container was available. It is not a failure of the deploy: `install.sh` warns,
+records the event and continues.
+
+On a fresh device this event is expected at STEP 9a-3, which runs before
+`docker compose up`. The step is retried once immediately after `stack_started`,
+when the container is running, and that retry installs the guard. If the event is
+the LAST word in the log, check:
+
+```bash
+docker inspect -f '{{.State.Running}}' hermes-agent   # expect: true
+docker exec hermes-agent /opt/hermes-agent/.hermes/bin/hermes --version
+```
+
+If the container is not running, start the stack and re-run `install.sh`. If it
+is running but the exec fails, the image is missing the CLI at that path — check
+the image tag in `.env`.
+
 ### The allowlist file
 
 Consent lives at `~/.hermes/shell-hooks-allowlist.json` — one entry per (event,

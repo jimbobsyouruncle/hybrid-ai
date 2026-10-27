@@ -326,17 +326,23 @@ reads as an allow; that fail-open hole is closed. The stderr line names only the
 and never prints a secret value. No existing block rule was softened.
 
 **Installation.** `install.sh` STEP 9a-3 places the guard at
-`profiles/<profile>/agent-hooks/secret-guard.py` with mode `0755` (the runtime executes it) for every
-profile directory present under `$HYBRID_AI_HERMES_DATA_DIR/profiles`, then declares it in that
-profile's `config.yaml`. Declaration goes through the supported CLI only: `hermes -p <profile>
-config get hooks.pre_tool_call --json`, then, when the guard is not already there, `hermes -p
-<profile> config set hooks.pre_tool_call '<full list>'`. The list is read first and the guard entry
-appended to it, because `config set` replaces the whole list and a peer hook must never be dropped.
-There is no `hooks add` verb. `config.yaml` is never hand-edited. The `command` written is the
-container path the runtime executes. The step is idempotent by content: a file whose bytes and mode
-already match is not rewritten, so the mtime the consent allowlist records stays valid. A run that
-cannot proceed warns, records an event, and returns 0; it never calls `sudo` and never changes
-`install.sh`'s exit status.
+`profiles/<profile>/agent-hooks/secret-guard.py` with mode `0755` (the runtime executes it) in a
+root-owned `0755` directory, for every profile directory present under
+`$HYBRID_AI_HERMES_DATA_DIR/profiles`, then declares it in that profile's `config.yaml`. Declaration
+goes through the supported CLI only, over one of two transports: a `hermes` CLI on the host PATH, or
+`docker exec` into the running `hermes-agent` container using the absolute in-container CLI path
+`/opt/hermes-agent/.hermes/bin/hermes`. The container transport passes no host `HERMES_HOME` or
+`HYBRID_AI_HERMES_DATA_DIR` in; the container's own `/root/.hermes` is the same bind mount. The calls
+are `hermes -p <profile> config get hooks.pre_tool_call --json`, then, when the guard is not already
+there, `hermes -p <profile> config set hooks.pre_tool_call '<full list>'`. The list is read first and
+the guard entry appended to it, because `config set` replaces the whole list and a peer hook must
+never be dropped. There is no `hooks add` verb. `config.yaml` is never hand-edited. The `command`
+written is the container path the runtime executes, with `matcher: '.*'`, `timeout: 10` and
+`fail_closed: true`. The step is idempotent by content over both transports: a file whose bytes and
+mode already match is not rewritten, so the mtime the consent allowlist records stays valid. On a
+fresh device the step skips before `docker compose up` and is retried once after `stack_started`. A
+run with no transport at all (`reason=hermes_missing`) warns, records an event, and returns 0; it
+never calls `sudo` and never changes `install.sh`'s exit status.
 
 **Consent model.** A hook does not run until the owner consents to it, per profile. The allowlist is
 `~/.hermes/shell-hooks-allowlist.json`, one entry per (event, command) carrying the script's mtime.

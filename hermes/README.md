@@ -402,6 +402,33 @@ hermes -p <profile> config get hooks.pre_tool_call --json     # read the current
 hermes -p <profile> config set hooks.pre_tool_call '<full list>'   # append, then write back
 ```
 
+Two transports are resolved once, before the profile loop:
+
+- **Host CLI.** A `hermes` binary on the host PATH is run directly with
+  `HERMES_HOME=$HYBRID_AI_HERMES_DATA_DIR`, so it reads the bind-mounted tree.
+- **Container.** With no host CLI, `install.sh` uses `docker exec` into the running `hermes-agent`
+  container. It checks `docker inspect -f '{{.State.Running}}' hermes-agent` for `true`, then issues
+  the same two calls through the absolute in-container CLI path:
+
+  ```bash
+  docker exec hermes-agent /opt/hermes-agent/.hermes/bin/hermes -p <profile> config get hooks.pre_tool_call --json
+  docker exec hermes-agent /opt/hermes-agent/.hermes/bin/hermes -p <profile> config set hooks.pre_tool_call '<full list>'
+  ```
+
+  No host `HERMES_HOME` or `HYBRID_AI_HERMES_DATA_DIR` is passed into the container: the container
+  already has `/root/.hermes` as its profile root, and that is the same bind mount. The guard file is
+  still written on the host at `profiles/<p>/agent-hooks/secret-guard.py`, which the container sees
+  through the mount.
+
+With neither transport the step warns and records `reason=hermes_missing`, and the rest of the deploy
+continues.
+
+**Fresh-boot ordering.** STEP 9a-3 runs before `docker compose up`, so on a bare device the container
+does not exist yet and only the skip is possible there. The skip sets an internal retry flag, and
+`install.sh` calls the same function once more immediately after `stack_started` (before STEP 9b), when
+the `hermes-agent` container is running. That retry is a no-op when the first call already had a
+transport, so a redeploy does not repeat the work.
+
 `hermes config set` on `hooks.pre_tool_call` REPLACES the list, so the step reads the current value
 first, no-ops when the guard is already declared, and otherwise appends its entry and writes the whole
 list back. A peer hook is never dropped. The written shape:
@@ -416,17 +443,16 @@ hooks:
 ```
 
 The `command` is the CONTAINER path because that is what the runtime executes. `hermes_data` is
-bind-mounted at `/root/.hermes` (`hermes/docker-compose.hermes.yml`), so the installer points the CLI
-at the same tree on the host with `HERMES_HOME=$HYBRID_AI_HERMES_DATA_DIR`. `config.yaml` is never
-hand-edited.
+bind-mounted at `/root/.hermes` (`hermes/docker-compose.hermes.yml`), so both transports address the
+same tree and `config.yaml` is never hand-edited.
 
-The step is idempotent by content: a file whose bytes and mode already match is not rewritten, because
-the consent allowlist records the script's mtime and a needless rewrite would silently invalidate the
-owner's approval. A second run installs nothing, writes no config and leaves the tree byte-identical.
-Where it cannot run — hermes CLI absent, no profiles directory, an unreadable or non-list
-`hooks.pre_tool_call` — it warns, records an event (`secret_guard_hook_<reason>`) and returns 0. It
-never calls `sudo` and never changes `install.sh`'s exit status. On a host with no profiles yet the
-step skips cleanly, so today's behaviour is unchanged.
+The step is idempotent by content over BOTH transports: a file whose bytes and mode already match is
+not rewritten, because the consent allowlist records the script's mtime and a needless rewrite would
+silently invalidate the owner's approval. A second run installs nothing, writes no config (it issues
+`config get` only) and leaves the tree byte-identical. Where it cannot run — no transport, no profiles
+directory, an unreadable or non-list `hooks.pre_tool_call` — it warns, records an event
+(`secret_guard_hook_<reason>`) and returns 0. It never calls `sudo` and never changes `install.sh`'s
+exit status. On a host with no profiles yet the step skips cleanly.
 
 **2. The owner grants consent, per profile.** A hook does not run until it is allowlisted. Consent
 lives in `~/.hermes/shell-hooks-allowlist.json`, one entry per (event, command) with the script's
