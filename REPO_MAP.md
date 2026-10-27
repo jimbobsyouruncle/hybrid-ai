@@ -67,6 +67,9 @@
 - hermes/Dockerfile
 - hermes/README.md - hermes/ — Hermes Agent system orchestrator
 - hermes/docker-compose.hermes.yml - Passed through from the env file so the image's hermes uid/gid match
+## hermes/agent-hooks
+
+- hermes/agent-hooks/secret-guard.py - pre_tool_call guard: treat the model as adversarial.
 ## hermes/patches
 
 - hermes/patches/0001-kanban-prompt-body-chars.patch
@@ -150,6 +153,7 @@
 - scripts/test-read-probe.sh - FILE: scripts/test-read-probe.sh
 - scripts/test-run-post-deploy-verify.sh
 - scripts/test-sandbox-firewall.sh
+- scripts/test-secret-guard.sh - FILE: scripts/test-secret-guard.sh
 - scripts/test-status-backup-log-env.sh - FILE: scripts/test-status-backup-log-env.sh
 - scripts/test-status-backup-probe.sh - FILE: scripts/test-status-backup-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh

@@ -126,6 +126,12 @@
 ## hermes/Dockerfile
 - FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8
 
+## hermes/agent-hooks/secret-guard.py
+- def flatten(value, out)
+- def decide(payload)
+- def fail_closed(reason)
+- def main()
+
 ## hermes/docker-compose.hermes.yml
 - hermes
 
@@ -145,6 +151,7 @@
 - install_post_deploy_verifier()
 - install_prune_scheduler()
 - run_prune_catch_up()
+- install_secret_guard_hook()
 - print_phase_summary()
 - wait_for()
 - install_backup_scheduler_system()
@@ -732,6 +739,18 @@
 - drop_matches()
 - accept_matches()
 - line_of()
+
+## scripts/test-secret-guard.sh
+- ok()
+- bad()
+- check()
+- run_guard()
+- assert_block()
+- extract_function()
+- warn()
+- event()
+- run_step()
+- config_bytes()
 
 ## scripts/test-status-backup-log-env.sh
 - ok()

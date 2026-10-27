@@ -304,6 +304,57 @@ If anything surfaces, rotate it. Rewriting history is not sufficient — clones 
 
 **Preserve the logging discipline.** Every log line in this codebase contains metadata only. A single `print(messages)` left behind after debugging would write your entire conversation history into the container logs and undo the guarantees the rest of the system is built on.
 
+### The `pre_tool_call` secret guard
+
+`hermes/agent-hooks/secret-guard.py` is a tracked, review-gated `pre_tool_call` hook. It treats the
+model as adversarial and inspects every tool call before the runtime runs it.
+
+| What it does | Trigger |
+|---|---|
+| Blocks | A tool argument that names secret material: a `.env` file or variant, `auth.json`, `state.db`, `/proc/<pid>/environ`, `credentials[.json]`, an `id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa` key, `.netrc`, `.git-credentials`, or the proxy CA key and mappings. |
+| Blocks | A `terminal` command that enumerates the process environment or a credential store (`printenv`, a bare `env`, `set`, `export`, `declare -x`, `getenv`, `os.environ`, `process.env`, `/proc/self/environ`, `hermes ... secrets/auth/vault`). |
+| Blocks | A `terminal` command that combines a file reader (`cat`, `grep`, `jq`, `openssl`, and peers) with a secret-shaped target (`.env`, `keepass`, `keyring`, `secret`). |
+| Escalates to a human | Persistence and control-plane tools (`cronjob_manage`, `skill_manage`, `memory`, `delegate_task`), and writes into `config.yaml`, `agent-hooks/`, `skills/**/SKILL.md`, `plugins/`, `.hermes/cron/`, `systemd/*.service`, `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`. |
+
+**Fail-closed on unrecognised state.** A payload the guard cannot understand is a block, never an
+allow: invalid JSON, a non-object JSON value, empty stdin, a `hook_event_name` other than
+`pre_tool_call`, a missing or non-string `tool_name`, a `tool_input` that is not an object, or any
+exception raised while deciding. Each of those prints `{"action":"block","message":"Blocked: ..."}`
+on stdout and exits 2. The earlier baseline exited 1 on an unparseable payload, which the runtime
+reads as an allow; that fail-open hole is closed. The stderr line names only the failure class
+(`unparseable payload`, `unexpected event`, `unexpected payload shape`). It never echoes the payload
+and never prints a secret value. No existing block rule was softened.
+
+**Installation.** `install.sh` STEP 9a-3 places the guard at
+`profiles/<profile>/agent-hooks/secret-guard.py` with mode `0755` (the runtime executes it) for every
+profile directory present under `$HYBRID_AI_HERMES_DATA_DIR/profiles`, then declares it in that
+profile's `config.yaml`. Declaration goes through the supported CLI only: `hermes -p <profile>
+config get hooks.pre_tool_call --json`, then, when the guard is not already there, `hermes -p
+<profile> config set hooks.pre_tool_call '<full list>'`. The list is read first and the guard entry
+appended to it, because `config set` replaces the whole list and a peer hook must never be dropped.
+There is no `hooks add` verb. `config.yaml` is never hand-edited. The `command` written is the
+container path the runtime executes. The step is idempotent by content: a file whose bytes and mode
+already match is not rewritten, so the mtime the consent allowlist records stays valid. A run that
+cannot proceed warns, records an event, and returns 0; it never calls `sudo` and never changes
+`install.sh`'s exit status.
+
+**Consent model.** A hook does not run until the owner consents to it, per profile. The allowlist is
+`~/.hermes/shell-hooks-allowlist.json`, one entry per (event, command) carrying the script's mtime.
+An unconsented hook is skipped, and the runtime logs a visible warning:
+
+```
+shell hook for <event> (<command>) not allowlisted - skipped. Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true, or approve at the TTY prompt next run.
+```
+
+Consent is granted by a deliberate act: approving at the TTY prompt on the next run, or one run with
+`--accept-hooks` / `HERMES_ACCEPT_HOOKS=1`. `hooks_auto_accept: true` is never set by this
+repository: blanket silent trust would defeat the consent model. Because the allowlist pins the
+script's mtime, replacing the file with different bytes requires a fresh approval.
+
+**Names only.** The guard's rules and messages name credentials and credential stores; they never
+contain a value. Neither the guard, its tests, nor this document records a secret value. The guard
+also never prints file contents.
+
 ### GitHub credential separation
 
 Two distinct GitHub tokens are used. They are never interchangeable.

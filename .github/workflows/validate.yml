@@ -426,6 +426,19 @@ jobs:
         # run. Docker and friends are stubbed on PATH; the run uses --no-start.
         run: bash scripts/test-agent-image-hybrid-cutover.sh
 
+      - name: Secret-guard hook tests
+        # Offline. Proves hermes/agent-hooks/secret-guard.py blocks secret-file
+        # arguments, environment dumps and secret-harvest shell commands,
+        # allows a benign payload, and FAILS CLOSED (exit 2) on unrecognised
+        # state -- malformed JSON, non-object JSON, empty stdin, a foreign
+        # hook_event_name, a missing tool_name and a non-dict tool_input. The
+        # baseline exited 1 on an unparseable payload, which allowed the call.
+        # Also proves install.sh's STEP 9a-3 installs the guard 0755 into every
+        # profile, declares it exactly once without dropping a peer hook, and is
+        # idempotent on a second run. hermes is stubbed on PATH; profiles are
+        # fixture directories under a mktemp tree.
+        run: bash scripts/test-secret-guard.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. HYBRID_AI_DATA_DIR and

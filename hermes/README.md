@@ -378,6 +378,82 @@ The `--replace` flag keeps it to one gateway run instance across container resta
 
 ---
 
+## Agent hooks: the `pre_tool_call` secret guard
+
+`hermes/agent-hooks/secret-guard.py` is tracked source. It is a `pre_tool_call` hook that inspects
+every tool call before the runtime runs it: it blocks calls that name secret material, that dump the
+process environment, or that harvest secrets through a shell reader, and it escalates
+persistence/control-plane changes to a human. It fails closed — an unrecognised payload is a block
+(exit 2), never an allow. See [`../SECURITY.md`](../SECURITY.md) for the rule list.
+
+Nothing declared it before this change, so it never ran: the file was on the host untracked, mode
+0644, registered by no profile. Two things make it real.
+
+**1. `install.sh` STEP 9a-3 installs and declares it.** For EVERY profile directory present under
+`$HYBRID_AI_HERMES_DATA_DIR/profiles`:
+
+```bash
+# place the guard executable (the runtime executes it; 0644 is dead weight)
+install -m 0755 hermes/agent-hooks/secret-guard.py \
+  "$HYBRID_AI_HERMES_DATA_DIR/profiles/<profile>/agent-hooks/secret-guard.py"
+
+# declare it through the supported path -- there is no `hermes hooks add` verb
+hermes -p <profile> config get hooks.pre_tool_call --json     # read the current list
+hermes -p <profile> config set hooks.pre_tool_call '<full list>'   # append, then write back
+```
+
+`hermes config set` on `hooks.pre_tool_call` REPLACES the list, so the step reads the current value
+first, no-ops when the guard is already declared, and otherwise appends its entry and writes the whole
+list back. A peer hook is never dropped. The written shape:
+
+```yaml
+hooks:
+  pre_tool_call:
+    - command: /root/.hermes/profiles/<profile>/agent-hooks/secret-guard.py
+      matcher: '.*'
+      timeout: 10
+      fail_closed: true
+```
+
+The `command` is the CONTAINER path because that is what the runtime executes. `hermes_data` is
+bind-mounted at `/root/.hermes` (`hermes/docker-compose.hermes.yml`), so the installer points the CLI
+at the same tree on the host with `HERMES_HOME=$HYBRID_AI_HERMES_DATA_DIR`. `config.yaml` is never
+hand-edited.
+
+The step is idempotent by content: a file whose bytes and mode already match is not rewritten, because
+the consent allowlist records the script's mtime and a needless rewrite would silently invalidate the
+owner's approval. A second run installs nothing, writes no config and leaves the tree byte-identical.
+Where it cannot run — hermes CLI absent, no profiles directory, an unreadable or non-list
+`hooks.pre_tool_call` — it warns, records an event (`secret_guard_hook_<reason>`) and returns 0. It
+never calls `sudo` and never changes `install.sh`'s exit status. On a host with no profiles yet the
+step skips cleanly, so today's behaviour is unchanged.
+
+**2. The owner grants consent, per profile.** A hook does not run until it is allowlisted. Consent
+lives in `~/.hermes/shell-hooks-allowlist.json`, one entry per (event, command) with the script's
+mtime. Check what is declared:
+
+```bash
+hermes -p <profile> hooks list
+```
+
+Then grant it by a deliberate act — either approve at the TTY prompt on the next run, or accept for one
+run only:
+
+```bash
+HERMES_ACCEPT_HOOKS=1 hermes -p <profile> ...      # one run; or pass --accept-hooks
+```
+
+An unconsented hook is SKIPPED, and the runtime logs a visible warning:
+
+```
+shell hook for <event> (<command>) not allowlisted - skipped. Use --accept-hooks / HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true, or approve at the TTY prompt next run.
+```
+
+`hooks_auto_accept: true` is never set here. Silent blanket trust would defeat the consent model. After
+a grant, `hermes -p <profile> hooks test pre_tool_call` exercises it against a synthetic payload and
+`hermes -p <profile> hooks doctor` reports its state. Diagnosing a skipped hook is covered in
+[`../docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md).
+
 ## Environment variables
 
 Referenced by name only; values live in `.env`, which is gitignored.
