@@ -2065,12 +2065,18 @@ If the unit is in a failed state from an earlier run, clear it first:
 verify` on a stale file may also need the daemon-reload before the new
 directives take effect.
 
-**`unable to open cache: ... permission denied`.** The restic cache directory
-(or a per-repo subdirectory under it) is owned by another uid, usually after an
-earlier manual `sudo` run. This is non-fatal: `backup.sh` probes the cache and,
-when it is not writable, logs `restic_cache_unwritable` and falls back to a
-writable cache under the unit's runtime directory (`restic_cache_fallback`), so
-the backup still succeeds with no manual `chown`. To restore the intended cache:
+**`unable to open cache: ... permission denied`.** A directory under the restic
+cache is owned by another uid, usually after an earlier root run. restic writes
+three levels down (`<cache>/<repo>/snapshots/<prefix>/`), so the offending
+directory is often nested well below the top. `backup.sh` probes to that depth
+(bounded, directories only, symlinks never followed) and, when it is not
+writable, logs `restic_cache_unwritable` and falls back to a writable cache under
+the unit's runtime directory (`restic_cache_fallback`).
+
+In system mode the fallback is the last resort. If no fallback is writable, the
+run aborts before staging -- seconds, not a restic retry storm -- and logs
+`restic_cache_unusable` with the offending `path`, its `owner`, its `mode` and a
+`fix=` hint. To restore the intended cache:
 
 ```bash
 sudo chown -R hybrid-ai-backup:hybrid-ai-backup /var/cache/hybrid-ai-backup
@@ -2104,8 +2110,14 @@ OTHER diagnostic is a real failure, alone or mixed with the host-path line.
 | `cold_copy_fallback` | Online capture failed; containers stopped briefly for a verified cold copy | Install `sqlite3` to avoid the outage |
 | `backup_failed` | Run aborted (exit 1) | See `detail` and `backup.log` |
 | `backup_log_write_failed` | The run succeeded, but the log could not be written (restic's status, not tee's, decides success) | Check the log path's permissions; the backup itself is safe |
-| `restic_cache_unwritable` | The configured restic cache is not writable by this uid | Informational; `backup.sh` selects a fallback cache |
+| `restic_cache_unwritable` | A directory under the configured restic cache is not writable by this uid; `path` names the first offender | Informational; `backup.sh` selects a fallback cache |
 | `restic_cache_fallback` | A writable fallback cache was selected | To restore the intended cache, `chown -R hybrid-ai-backup:hybrid-ai-backup` it |
+| `restic_cache_unusable` | **System mode only**: every fallback cache was unwritable too, so the run aborted before staging (exit 1). The event carries `path`, `owner` (uid:gid), `mode` and a `fix=` hint | Run the `fix=` command the event names, then re-run the backup. Nothing was captured or uploaded |
+| `restic_cache_default` | No fallback was writable, so restic's own default cache is used. User mode only: system mode aborts with `restic_cache_unusable` instead | Re-run `./install.sh` as root to reconcile the cache's ownership |
+| `restic_cache_symlink_ignored` | A symlink inside the cache; it is reported and never followed | Remove it if it is not intended |
+| `backup_cache_ownership_repaired` | `install.sh` chowned the cache tree to `hybrid-ai-backup`; `path` names the cache | None; a second run repairs nothing |
+| `backup_cache_reconcile_skipped` | `install.sh` skipped the reconcile (`reason=no_account`, `reason=install_dir_failed` or `reason=chown_failed`) | Create the `hybrid-ai-backup` account, or run `./install.sh` again as root |
+| `backup_cache_symlink_ignored` | `install.sh` found a symlink inside the cache; it is reported and never followed | Remove it if it is not intended |
 | `retention_failed` | Pruning failed — backup itself is safe | Check R2 permissions |
 | `check_failed` | **Repository integrity failure** | **Do not prune.** See below |
 | `restore_test_success` | Rehearsal passed; backups are restorable | — |

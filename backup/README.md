@@ -252,7 +252,7 @@ relocation restores into the split layout.
 | `BACKUP_GROUP_GID` | the ONE supplementary group the status container is given so it can read `BACKUP_LOG`; `install.sh` resolves the `hybrid-ai-backup` group's gid by name in system mode, and uses the container's own primary gid in user mode | mode-dependent |
 | `BACKUP_CONF_DIR` | the user-mode credential directory | `~/.config/hybrid-ai-backup` |
 | `HYBRID_AI_BACKUP_CRED_DIR` | the directory the scripts read credentials from (default follows the mode: `BACKUP_CONF_DIR` in user mode, `/etc/credstore/hybrid-ai-backup` in system mode) | mode-dependent |
-| `RESTIC_CACHE_DIR` | the restic cache | `~/.cache/restic` |
+| `RESTIC_CACHE_DIR` | the restic cache (`<repo>/snapshots/<prefix>/` and `<repo>/index/` live under it) | `~/.cache/restic`; `/var/cache/hybrid-ai-backup` in system mode |
 
 Pre-restore safety copies (`webui_data.pre-restore-*`,
 `hermes_data.pre-restore-*`) still stay beside the data, on the same filesystem.
@@ -489,6 +489,33 @@ ONLY manual step; everything after it runs from the units. Card F must create:
    change what a unit does. Only the paths a unit does NOT pin come from
    `/etc/hybrid-ai/hybrid-ai.env`.
 
+   **Cache ownership is converged by the installer, not by hand.** The units'
+   `CacheDirectory=hybrid-ai-backup` chowns only the top directory, so a nested
+   directory left behind by an earlier root run stays root-owned and restic fails
+   three levels down (`<repo>/snapshots/<prefix>/`). Two things prevent that:
+
+   - `install.sh` runs `reconcile_backup_cache_ownership` on **every**
+     installation, because it rides the scheduler-repair path. It walks the
+     resolved cache with `find "$cache" ! -user hybrid-ai-backup -print -quit`
+     and, only when a foreign-owned entry exists, runs
+     `chown -R hybrid-ai-backup:hybrid-ai-backup "$cache"` and logs
+     `backup_cache_ownership_repaired`. A second run repairs nothing and logs no
+     repair event. It only ever touches that one path: never
+     `/var/lib/hybrid-ai-backup` (staging, `StateDirectory=`) and never
+     `/etc/credstore/hybrid-ai-backup`. Symlinks inside the cache are warned
+     about, never followed. A missing `hybrid-ai-backup` account warns and logs
+     `backup_cache_reconcile_skipped reason=no_account`; it is never fatal.
+   - A root-invoked `backup.sh` -- `--init` and the first-backup prompt -- gets
+     its **own** cache, `RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup-root`,
+     through the `RESTIC_CACHE_DIR` override rather than `systemd-run`. So no
+     entry under `/var/cache/hybrid-ai-backup` is root-owned after setup, while
+     `--init` on a host with no repository yet still works.
+
+   In system mode an unusable cache with no writable fallback is **fatal**: the
+   run aborts before staging, in seconds, with `restic_cache_unusable` carrying
+   the offending `path`, its `owner` (uid:gid), its `mode` and a `fix=` hint. User
+   mode keeps the older behaviour: it unsets `RESTIC_CACHE_DIR` and continues.
+
    `BACKUP_LOG` is **not** pinned by the units. The shared helper resolves it
    from the mode: in system mode it is `/var/log/hybrid-ai-backup/backup.log`,
    the units' `LogsDirectory=` (the one directory systemd grants write access to
@@ -539,7 +566,7 @@ was captured.
 | `No credentials at ~/.config/...` | Backups never configured | Run `./install.sh` |
 | `No credentials at /root/.config/hybrid-ai-backup/r2.env` on a system-mode host | The run resolved USER-mode paths because the layout file was not found; the credentials live in `/etc/credstore/hybrid-ai-backup` | Run it as `sudo env HYBRID_AI_ENV_FILE=/etc/hybrid-ai/hybrid-ai.env ./backup/backup.sh ...`, or start the unit: `sudo systemctl start hybrid-ai-backup-capture.service`. A bare `sudo ./backup/...` picks up the layout fallback (`/etc/hybrid-ai/hybrid-ai.env`) when `$HYBRID_AI_APP_DIR/.env` is absent, so it resolves system-mode paths too |
 | `tee: /var/log/hybrid-ai-backup/backup.log: Read-only file system` | A system-mode unit writing its log outside its `LogsDirectory=` (an old unit file without `LogsDirectory=hybrid-ai-backup`) | Update the units: re-run `./install.sh` as root, then `sudo systemctl daemon-reload` |
-| `unable to open cache: ... permission denied` | The restic cache (or a per-repo subdirectory) is owned by another uid, usually after an earlier manual `sudo` run | Self-healing: `backup.sh` detects the unwritable cache and falls back to a writable one (`restic_cache_unwritable` / `restic_cache_fallback` in the log). To restore the intended cache, `sudo chown -R hybrid-ai-backup:hybrid-ai-backup /var/cache/hybrid-ai-backup` |
+| `unable to open cache: ... permission denied` | A directory under the restic cache (`<repo>`, `<repo>/snapshots/<prefix>/`, `<repo>/index/`) is owned by another uid, usually after an earlier root run. `backup.sh` probes to that depth, so it sees this | Self-healing in both modes: `backup.sh` logs `restic_cache_unwritable` and falls back to a writable cache (`restic_cache_fallback`). In SYSTEM mode the fallback is the last resort: with no writable fallback the run aborts in seconds with `restic_cache_unusable` naming the path, owner and mode. `./install.sh` as root reconciles the ownership on its next run (`backup_cache_ownership_repaired`); by hand it is `sudo chown -R hybrid-ai-backup:hybrid-ai-backup /var/cache/hybrid-ai-backup` |
 | `has permissions 644; expected 600` | Permissions drifted on a `HYBRID_AI_BACKUP_CRED_DIR` file | `chmod 600 ~/.config/hybrid-ai-backup/*` |
 | `has permissions ...; a systemd LoadCredential copy must be 0400 or 0440` | A `$CREDENTIALS_DIRECTORY` copy has an unexpected mode | None: systemd materialises that tmpfs copy (0400/0440) on every start. If it reports another mode, check the `LoadCredential=` source file's mode |
 | `restic init failed` | Wrong account ID, bucket, or token | Verify the endpoint URL and that the token has Object Read & Write on that bucket |

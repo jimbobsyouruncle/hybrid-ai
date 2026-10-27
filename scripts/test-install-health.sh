@@ -113,7 +113,27 @@ EOF
 # `id` answers without a real account; chown is a no-op.
 # shellcheck disable=SC2016  # $@ must expand inside the generated stub
 printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "1000\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$BIN/id"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/chown"
+# chown records its argv; the cache-reconcile cases also let it clear the
+# foreign-owner marker the find stub reports, so a second run sees a repaired
+# cache (see the cache-reconcile section at the end).
+cat > "$BIN/chown" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${CHOWN_ARGV_LOG:-/dev/null}"
+rm -f "${FOREIGN_MARKER:-/nonexistent}" 2>/dev/null || true
+exit 0
+EOF
+# find is used by NO other step of install.sh, so modelling the reconcile's
+# ownership walk here cannot mask a different call: only the `-print -quit`
+# query (the first foreign-owned entry) is answered from the marker file;
+# every other invocation runs the real find.
+cat > "$BIN/find" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${*: -1}" == "-quit" ]]; then
+  [[ -n "${FOREIGN_MARKER:-}" && -f "${FOREIGN_MARKER}" ]] && cat "${FOREIGN_MARKER}"
+  exit 0
+fi
+exec /usr/bin/find "$@"
+EOF
 # sleep returns at once so the wait loops spin without real delay.
 printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/sleep"
 # getent resolves a docker group and any host name.
@@ -122,6 +142,12 @@ cat > "$BIN/getent" <<'EOF'
 case "${1:-}" in
   group) printf 'docker:x:999:\n' ;;
   hosts) printf '127.0.0.1 %s\n' "${2:-}" ;;
+  passwd)
+    # The cache-reconcile cases choose whether the backup account exists.
+    # getent exits 2 for an entry it cannot find, like the real tool.
+    [[ "${RECONCILE_ACCOUNT:-1}" == "1" ]] || exit 2
+    printf 'hybrid-ai-backup:x:999:999::/var/lib/hybrid-ai-backup:/usr/sbin/nologin\n'
+    exit 0 ;;
 esac
 exit 0
 EOF
@@ -141,6 +167,15 @@ EOF
 cat > "$BIN/install" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${INSTALL_ARGV_LOG:-/dev/null}"
+# The cache reconcile runs `install -d -o hybrid-ai-backup -g hybrid-ai-backup
+# <cache>`; that account does not exist on the builder host, so create the
+# directory as this uid and report success.
+case " $* " in
+  *" -o hybrid-ai-backup "*)
+    for a in "$@"; do last="$a"; done
+    mkdir -p "$last"
+    exit 0 ;;
+esac
 exec /usr/bin/install "$@"
 EOF
 # systemctl: record the argv and answer from a scratch state directory. It also
@@ -198,6 +233,7 @@ ln -sfn "$BIN_ROOT/id" "$BIN_NOSYS/id"
 INSTALL_ARGV="$WORK/install-argv.log"
 SYSTEMCTL_ARGV="$WORK/systemctl-argv.log"
 SUDO_ARGV="$WORK/sudo-argv.log"
+CHOWN_ARGV="$WORK/chown-argv.log"
 
 # run_install hermes_health log [unit_dir] [install_argv_log] [path]
 # The path argument picks the variant: ROOT_PATH for the privileged runs and
@@ -216,6 +252,9 @@ run_install() {
       HYBRID_AI_ENV_FILE="$LAYOUT" \
       HYBRID_AI_SYSTEMD_UNIT_DIR="$unit_dir" \
       INSTALL_ARGV_LOG="$argv_log" \
+      CHOWN_ARGV_LOG="$CHOWN_ARGV" \
+      FOREIGN_MARKER="${FOREIGN_MARKER:-}" \
+      RECONCILE_ACCOUNT="${RECONCILE_ACCOUNT:-1}" \
       SUDO_ARGV_LOG="$SUDO_ARGV" \
       SYSTEMCTL_LOG="$SYSTEMCTL_ARGV" \
       SYSTEMCTL_STATE="$WORK/sysstate" \
@@ -555,6 +594,146 @@ if [[ -e "$UNIT_INSTALLED" ]]; then
   bad "the run without systemctl installed the unit anyway"
 else
   ok "the run without systemctl installed nothing"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== the backup cache ownership reconcile runs on every system-mode install =="
+# Criterion: a root-owned nested directory under the cache must be converged by
+# the installer, not by a by-hand chown, and a second run must do nothing. The
+# reconcile rides install_backup_scheduler_system(), i.e. STEP 11, so these runs
+# pass NO --no-start. The ownership walk is modelled (find -print -quit answers
+# from FOREIGN_MARKER, chown clears it) because the builder host has neither a
+# hybrid-ai-backup account nor root.
+CACHE_UNDER_TEST="$WORK/restic"
+UNIT_INSTALLED="$SYSD/$UNIT"
+# STEP 11 needs a syntactically valid backup.sh and system-mode credentials
+# BEFORE it reaches the scheduler repair, which is where the reconcile runs. The
+# credential files are fixed placeholders; nothing is read from them here.
+mkdir -p "$APP/backup/system" "$WORK/conf"
+cp "$REPO/backup/backup.sh" "$APP/backup/"
+cp "$REPO"/backup/system/*.service "$REPO"/backup/system/*.timer "$APP/backup/system/"
+printf 'RESTIC_REPOSITORY=s3:https://example.invalid/bucket\nAWS_ACCESS_KEY_ID=t\nAWS_SECRET_ACCESS_KEY=t\n' > "$WORK/conf/r2.env"
+printf 'pw\n' > "$WORK/conf/repo-password"
+chmod 600 "$WORK/conf/r2.env" "$WORK/conf/repo-password"
+# System mode resolves the credentials to the credstore by default; name the
+# scratch directory instead so the credential-exists path (and thus the
+# scheduler repair, where the reconcile lives) is the one exercised.
+cp "$LAYOUT" "$WORK/etc/hybrid-ai/hybrid-ai.env.no-cred-dir"
+printf 'HYBRID_AI_BACKUP_CRED_DIR=%s\n' "$WORK/conf" >> "$LAYOUT"
+
+# (a) every installation: a foreign-owned entry is repaired once.
+rm -f "$UNIT_INSTALLED"; : > "$INSTALL_ARGV"; : > "$SYSTEMCTL_ARGV"
+rm -f "$CHOWN_ARGV"; rm -rf "${WORK:?}/sysstate"; mkdir -p "$WORK/sysstate"
+mkdir -p "$CACHE_UNDER_TEST/repoX/snapshots/19"
+FOREIGN_MARKER="$WORK/foreign-owner" && export FOREIGN_MARKER
+printf '%s\n' "$CACHE_UNDER_TEST/repoX/snapshots/19" > "$FOREIGN_MARKER"
+RECONCILE_ACCOUNT=1
+: > "$INSTALL_LOG"
+rc=0
+run_install ok "$WORK/cache-repair.log" "$SYSD" "$INSTALL_ARGV" "$ROOT_PATH" || rc=$?
+check "the cache-repair run exits 0" "0" "$rc"
+if grep -q "EVENT .*event=backup_cache_ownership_repaired .*path=${CACHE_UNDER_TEST}" "$INSTALL_LOG"; then
+  ok "backup_cache_ownership_repaired names the cache"
+else
+  bad "backup_cache_ownership_repaired was not logged"
+  sed 's/^/      /' "$WORK/cache-repair.log" >&2
+fi
+if grep -qxF "hybrid-ai-backup:hybrid-ai-backup $CACHE_UNDER_TEST" "$CHOWN_ARGV" 2>/dev/null \
+   || grep -qF -- "-R hybrid-ai-backup:hybrid-ai-backup $CACHE_UNDER_TEST" "$CHOWN_ARGV" 2>/dev/null; then
+  ok "the repair chowns -R the resolved cache path only"
+else
+  bad "no chown -R of the resolved cache path was recorded"
+  sed 's/^/      /' "$CHOWN_ARGV" >&2 || true
+fi
+if grep -qF "$WORK/data" "$CHOWN_ARGV" 2>/dev/null || grep -qF "$WORK/work" "$CHOWN_ARGV" 2>/dev/null; then
+  bad "the repair chowned outside the cache (staging/work touched)"
+else
+  ok "the repair touched nothing outside the cache"
+fi
+if grep -qF '/etc/credstore' "$CHOWN_ARGV" 2>/dev/null; then
+  bad "the repair touched the credstore"
+else
+  ok "the repair never touches the credstore"
+fi
+
+# (b) idempotence: the marker was cleared, so a second run repairs nothing.
+: > "$CHOWN_ARGV"; : > "$INSTALL_LOG"
+rc=0
+run_install ok "$WORK/cache-rerun.log" "$SYSD" "$INSTALL_ARGV" "$ROOT_PATH" || rc=$?
+check "the second cache run exits 0" "0" "$rc"
+if grep -q 'EVENT .*event=backup_cache_ownership_repaired' "$INSTALL_LOG"; then
+  bad "a second run emitted a repair event for an already-correct cache"
+else
+  ok "a second run emits no repair event"
+fi
+if [[ -s "$CHOWN_ARGV" ]]; then
+  bad "a second run chowned an already-correct cache"
+else
+  ok "a second run performs no chown"
+fi
+
+# (c) missing account: warn + skipped event, exit 0, no chown.
+: > "$CHOWN_ARGV"; : > "$INSTALL_LOG"
+printf '%s\n' "$CACHE_UNDER_TEST/repoX/snapshots/19" > "$FOREIGN_MARKER"
+RC_ACCOUNT_OLD="$RECONCILE_ACCOUNT"; RECONCILE_ACCOUNT=0
+rc=0
+run_install ok "$WORK/cache-noaccount.log" "$SYSD" "$INSTALL_ARGV" "$ROOT_PATH" || rc=$?
+RECONCILE_ACCOUNT="$RC_ACCOUNT_OLD"
+check "a run without the backup account exits 0" "0" "$rc"
+if grep -q 'EVENT .*event=backup_cache_reconcile_skipped .*reason=no_account' "$INSTALL_LOG"; then
+  ok "backup_cache_reconcile_skipped reason=no_account was logged"
+else
+  bad "backup_cache_reconcile_skipped reason=no_account was not logged"
+fi
+if [[ -s "$CHOWN_ARGV" ]]; then
+  bad "a run without the backup account chowned the cache"
+else
+  ok "a run without the backup account performs no chown"
+fi
+
+# (c2) root-run cache isolation: the root-invoked backup (--init and the first
+# backup) must NOT write into the unit cache, or it leaves root:root entries the
+# hybrid-ai-backup account can never write. Asserted on the CODE: run_backup
+# overrides RESTIC_CACHE_DIR with the dedicated -root cache.
+if grep -qF "RESTIC_CACHE_DIR=\"\$BACKUP_ROOT_CACHE_DIR\"" "$REPO/install.sh" \
+   && grep -qF "BACKUP_ROOT_CACHE_DIR=\"\${RESTIC_CACHE_DIR}-root\"" "$REPO/install.sh"; then
+  ok "run_backup gives the root-invoked backup its own cache"
+else
+  bad "run_backup does not isolate the root-invoked backup's cache"
+fi
+if grep -qF 'Environment=RESTIC_CACHE_DIR=/var/cache/hybrid-ai-backup' "$REPO/backup/system/hybrid-ai-backup-upload.service"; then
+  ok "the upload unit still pins the hybrid-ai-backup cache"
+else
+  bad "the upload unit no longer pins the hybrid-ai-backup cache"
+fi
+
+# (d) user mode is a no-op: no reconcile at all, even as root with an account.
+: > "$CHOWN_ARGV"; : > "$INSTALL_LOG"
+printf '%s\n' "$CACHE_UNDER_TEST/repoX/snapshots/19" > "$FOREIGN_MARKER"
+LAYOUT_SAVED="$WORK/etc/hybrid-ai/hybrid-ai.env.user-mode"
+sed 's/^HYBRID_AI_BACKUP_MODE=system$/HYBRID_AI_BACKUP_MODE=user/' "$LAYOUT" > "$LAYOUT_SAVED"
+cp "$LAYOUT" "$WORK/etc/hybrid-ai/hybrid-ai.env.system-mode"
+cp "$STACK" "$WORK/etc/hybrid-ai/stack.env.system-mode"
+cp "$LAYOUT_SAVED" "$LAYOUT"
+# The installer writes BACKUP_LOG into the STACK file, and the earlier system
+# runs pinned it at the system-mode path. Point it back at the user-mode log so
+# the no-op case tests the reconcile, not a stale stack pin.
+sed -i "s#^BACKUP_LOG=.*#BACKUP_LOG=${WORK}/log/backup.log#" "$STACK"
+rc=0
+run_install ok "$WORK/cache-usermode.log" "$SYSD" "$INSTALL_ARGV" "$ROOT_PATH" || rc=$?
+cp "$WORK/etc/hybrid-ai/hybrid-ai.env.system-mode" "$LAYOUT"
+cp "$WORK/etc/hybrid-ai/stack.env.system-mode" "$STACK"
+check "a user-mode run exits 0" "0" "$rc"
+if grep -q 'event=backup_cache_ownership_repaired\|event=backup_cache_reconcile_skipped' "$INSTALL_LOG"; then
+  bad "user mode ran the cache reconcile"
+else
+  ok "user mode is a no-op for the cache reconcile"
+fi
+if [[ -s "$CHOWN_ARGV" ]]; then
+  bad "a user-mode run chowned the cache"
+else
+  ok "a user-mode run performs no chown"
 fi
 
 # ---------------------------------------------------------------------------

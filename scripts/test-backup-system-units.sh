@@ -563,6 +563,62 @@ STUB
     else
       bad "D7: restic did not use the runtime fallback cache"
     fi
+
+    # D7b: the nesting PRODUCTION had, which the immediate-child probe missed.
+    # <cache>/repoX is writable; <cache>/repoX/snapshots/19 is not. restic writes
+    # three levels down (<repo>/snapshots/<prefix>/), so a probe that stops at
+    # the top dir and its immediate children passes this cache and the upload
+    # then spends ~15 minutes failing. Run it as the same unprivileged uid as
+    # D6b so the permission genuinely refuses the write.
+    D7B_CACHE="$D6B/cache-nested"; D7B_RUNTIME="$D6B/run-nested"
+    mkdir -p "$D7B_CACHE/repoX/snapshots/19" "$D7B_RUNTIME"
+    # Only the DEEPEST directory is unwritable; every ancestor is writable.
+    chmod 0555 "$D7B_CACHE/repoX/snapshots/19"
+    if (( ${#D6B_PRE[@]} > 0 )); then
+      # The fixture tree above was created as the calling uid; hand it to the
+      # dropped uid so the writable ancestors really are writable for it.
+      chown -R "$D6B_NUID:$D6B_NGID" "$D7B_CACHE" "$D7B_RUNTIME" 2>/dev/null || true
+      chmod 0555 "$D7B_CACHE/repoX/snapshots/19"
+    fi
+    if "${D6B_PRE[@]}" bash -c "[[ -w '$D7B_CACHE/repoX' && ! -w '$D7B_CACHE/repoX/snapshots/19' ]]"; then
+      D7B_RC=0
+      "${D6B_PRE[@]}" env \
+          HOME="$D6B_WORK" PATH="$D6B_BIN:/usr/bin:/bin" \
+          HYBRID_AI_APP_DIR="$D6B_APP" HYBRID_AI_DATA_DIR="$D6B_APP" \
+          HYBRID_AI_WORK_DIR="$D6B_WORK" HYBRID_AI_LOG_DIR="$D6B_WORK" \
+          HYBRID_AI_BACKUP_MODE=system HYBRID_AI_BACKUP_CRED_DIR="$D6B_CONF" \
+          BACKUP_LOG="$D6B_LOG_ALT" RESTIC_CACHE_DIR="$D7B_CACHE" \
+          RUNTIME_DIRECTORY="$D7B_RUNTIME" BACKUP_NO_PAUSE=1 \
+          bash "$D6B_APP/backup/backup.sh" --non-interactive \
+          > "$D6B/out4" 2>&1 || D7B_RC=$?
+      if (( D7B_RC == 0 )); then
+        ok "D7b: a nested unwritable cache does not fail the run"
+      else
+        bad "D7b: a nested unwritable cache failed the run (rc=${D7B_RC})"
+      fi
+      if grep -q 'restic_cache_unwritable' "$D6B/out4"; then
+        ok "D7b: the nested unwritable cache is detected (restic_cache_unwritable)"
+      else
+        bad "D7b: the nested unwritable cache was NOT detected"
+      fi
+      if grep -q 'restic_cache_fallback' "$D6B/out4"; then
+        ok "D7b: a writable fallback cache was selected for the nested case"
+      else
+        bad "D7b: no fallback cache was selected for the nested case"
+      fi
+      if grep -q 'snapshots/19' "$D6B/out4"; then
+        ok "D7b: the event names the offending nested path"
+      else
+        bad "D7b: the event does not name the offending nested path"
+      fi
+      if grep -q "restic-cache=${D7B_RUNTIME}/restic-cache" "$D6B/out4"; then
+        ok "D7b: restic ran against the fallback cache for the nested case"
+      else
+        bad "D7b: restic did not use the fallback cache for the nested case"
+      fi
+    else
+      bad "D7b fixture is not actually nested-unwritable; the case cannot run"
+    fi
   else
     bad "D6b fixture is not actually unwritable; the case cannot run"
   fi
