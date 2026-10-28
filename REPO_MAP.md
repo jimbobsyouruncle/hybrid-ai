@@ -62,6 +62,7 @@
 
 - docs/BUILDER_PUBLISH_SMOKE_TEST.md
 - docs/TROUBLESHOOTING.md - Troubleshooting & Operations
+- docs/tls-acme-design.md - TLS termination and ACME design (jarvis.lan -> daemonhub.dev)
 ## hermes
 
 - hermes/Dockerfile
