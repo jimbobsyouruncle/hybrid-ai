@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/logrotate/hybrid-ai-tls
+# PURPOSE (plain English):
+#   Rotates the two TLS observability logs:
+#     - tls-check.log  one line per host per watchdog run
+#     - tls-audit.log  the append-only issuance/renewal record
+#
+#   INSTALLED BY THE OPERATOR, not by install.sh. logrotate does NOT expand
+#   shell variables, so the placeholder below must be substituted with the
+#   resolved log directory (HYBRID_AI_LOG_DIR from .env, else <repo>/logs):
+#
+#     LOGDIR=/opt/hybrid-ai/logs        # or the HYBRID_AI_LOG_DIR value from .env
+#     sudo sed "s#__HYBRID_AI_LOG_DIR__#$LOGDIR#g" deploy/logrotate/hybrid-ai-tls \
+#       | sudo tee /etc/logrotate.d/hybrid-ai-tls >/dev/null
+#     sudo logrotate --debug /etc/logrotate.d/hybrid-ai-tls
+#
+#   An unsubstituted placeholder PARSES but matches no file and rotates
+#   nothing, so always check the debug output names both paths.
+#
+#   copytruncate keeps the writers happy without a reload: both scripts open the
+#   log with O_APPEND on every write, so truncation in place is safe and no
+#   process has to be signalled. Rotation is CONFIG, which is how an append-only
+#   log stays append-only inside the scripts themselves.
+# ---------------------------------------------------------------------------
+__HYBRID_AI_LOG_DIR__/tls-check.log __HYBRID_AI_LOG_DIR__/tls-audit.log {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0600 root root
+}
