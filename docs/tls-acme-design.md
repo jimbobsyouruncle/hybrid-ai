@@ -1431,9 +1431,9 @@ Restated explicitly, because every later task will be judged against this list.
    remove or widen the allowlist.
 2. **Loopback-only binds stay loopback-only.** `ollama` publishes
    `127.0.0.1:11434`, `status` publishes nothing, `openhands` stays on
-   `127.0.0.1:3001`. The Caddy admin endpoint, if enabled, binds
-   `localhost:2019` **inside the container**; it is never published on a host
-   port, and the non-TLS build keeps `admin off`. Port 443 is the only new
+   `[IP_ADDRESS]:3001`. The Caddy admin endpoint is enabled on TLS builds and
+   binds `localhost:2019` **inside the container**; it is never published on a
+   host port, and the non-TLS build keeps `admin off`. Port 443 is the only new
    *published* listener, and it is behind the same allowlist as port 80.
 3. **No secrets in git.** See 8.7. The token never enters the repo, the image,
    `.env`, an argument, or a log.
