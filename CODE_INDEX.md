@@ -139,6 +139,7 @@
 - hermes
 
 ## install.sh
+- tls_flag_value()
 - log()
 - ok()
 - warn()
@@ -354,6 +355,44 @@
 ## scripts/lib/tailscale-resolve.sh
 - mesh_range_ok()
 - resolve_mesh_address()
+
+## scripts/lib/tls.sh
+- tls__warn()
+- tls__ok()
+- tls__note()
+- tls__die()
+- tls_print_tradeoff()
+- tls_is_on()
+- tls_default_token_path()
+- tls_secret_name()
+- tls_ca_url()
+- tls_ca_label()
+- tls_validate_domain()
+- tls_validate_email()
+- tls_validate_validation()
+- tls_validate_dns_provider()
+- tls_validate_ca()
+- tls_validate_token_file()
+- tls_apply_flags()
+- tls_validate_settings()
+- tls_prompt_value()
+- tls_prompt_ca()
+- tls_prompt_flow()
+- tls_render_template()
+- tls_variants()
+- tls_substitute()
+- tls_solver_block()
+- tls_prepare_render_values()
+- tls_render_to_file()
+- tls__docker_ready()
+- tls_validate_compose_file()
+- tls_validate_caddyfile()
+- tls_render_and_install()
+- tls_dry_run()
+- tls__diff()
+- tls_print_urls()
+- tls_check_dns()
+- tls_load_env_file_values()
 
 ## scripts/prune-conversations.sh
 - log()
@@ -783,6 +822,13 @@
 - run_sync()
 - run_check()
 - inv_rows()
+
+## scripts/test-tls-installer-render.sh
+- pass()
+- fail()
+- render()
+- expect()
+- reject()
 
 ## scripts/test-uninstall.sh
 - ok()
