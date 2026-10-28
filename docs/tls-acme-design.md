@@ -1,0 +1,1667 @@
+# TLS termination and ACME design (`jarvis.lan` -> `daemonhub.dev`)
+
+Status: decision document. Later build tasks implement against this text.
+Audience: the repo owner, and whoever runs the next build task.
+
+This document decides how the hybrid-ai stack gets trusted HTTPS certificates
+for `daemonhub.dev`, how the installer exposes that, how the status app proves a
+certificate is healthy, and how the live host migrates from plain HTTP on
+`jarvis.lan` without an outage. It is documentation only. It changes no code.
+
+Everything below is grounded in the current repository:
+
+- `status/Caddyfile` -- global `auto_https off`, global `admin off`, sites
+  `http://status.{$LOCAL_DOMAIN}`, `http://hermes.{$LOCAL_DOMAIN}`,
+  `http://{$LOCAL_DOMAIN}`, plus the `(trusted_only)` and `(secure_headers)`
+  snippets.
+- `docker-compose.yml` -- `proxy` service (`caddy:2.8-alpine`,
+  `hybrid-ai-proxy`, publishes `"80:80"` only, mounts `./status/Caddyfile:ro`
+  and `${HYBRID_AI_DATA_DIR}/webui_data/caddy:/data`, sets `LOCAL_DOMAIN`), and
+  the `status` service with its `http://127.0.0.1:80/status/healthz`
+  healthcheck.
+- `install.sh` -- `prompt_secret` prompts (including `LOCAL_DOMAIN`) near
+  line 457, stack env file written near line 760 with `chmod 600`, DNS
+  validation for `$LOCAL_DOMAIN`, `hermes.$LOCAL_DOMAIN`,
+  `status.$LOCAL_DOMAIN` near line 1170, service URLs printed near line 1606,
+  `-h|--help` usage block at the top of the file.
+- `.env.example` -- `LOCAL_DOMAIN=yourhostname.com`, `HYBRID_AI_DATA_DIR`
+  layout settings.
+- `status/app.py` -- `GET /status/healthz`, `GET /status/health-summary`,
+  `GET /status/api`, `GET /status`, `GET /hub`.
+- `docs/` and `REPO_MAP.md` for file-naming conventions.
+
+---
+
+## 0. Decisions at a glance
+
+| # | Decision |
+|---|----------|
+| D1 | DNS-01 is the installer default validation method. HTTP-01 and TLS-ALPN-01 are opt-in. |
+| D2 | First DNS plugin is Cloudflare (`dns.providers.cloudflare`). Second documented provider is RFC 2136 dynamic DNS (`dns.providers.rfc2136`). |
+| D3 | The Caddy image is built locally from `caddy/Dockerfile` with `xcaddy`, pinned to `caddy:2.8` base plus pinned plugin versions. A stock `caddy:2.8-alpine` image is never used for TLS. |
+| D4 | The DNS API credential is a file, mounted with compose `secrets:` at `/run/secrets/cloudflare_dns_token`, never an env var, never an argument, never in git. |
+| D5 | Certificates are issued for the apex and for a wildcard, one certificate per site block, via DNS-01. |
+| D6 | `auto_https off` stays for DNS-01. It becomes `auto_https disable_redirects` only when `TLS_VALIDATION=http-01`. |
+| D7 | HTTP->HTTPS redirects are explicit `http://` site blocks returning 308, keeping `(trusted_only)` on them. |
+| D8 | Renewal is Caddy's own. No second issuer, no issuing systemd timer. One systemd timer runs a read-only watchdog. |
+| D9 | Certificate health is proven by a live TLS handshake (SNI per hostname), never by reading private keys. |
+| D10 | `TLS_ENABLED` defaults to `no`. The installer's existing behaviour is byte-for-byte unchanged while it is `no`. |
+| D11 | `jarvis.lan` (`LOCAL_DOMAIN`) is not decommissioned. It stays in the Caddyfile as the fallback. |
+| D12 | Staging CA is the default. Production is a deliberate second run. |
+
+### Planning assumptions
+
+Marked so a later reader can challenge them, not left open:
+
+- (Assumption) The public DNS zone `daemonhub.dev` is hosted at Cloudflare and
+  the owner holds an account-scoped API token capability. If the zone were
+  hosted elsewhere, D2's RFC 2136 path applies instead.
+- (Assumption) The Pi sits behind a home router with no inbound port forward on
+  80/443, and may additionally be behind CGNAT. This is why DNS-01 is the
+  default (section 1).
+- (Assumption) Pi-hole is the LAN resolver, so dnsmasq drop-ins under
+  `/etc/dnsmasq.d/` are the correct local-resolver surface (section 3).
+- (Assumption) The existing install is the one described by `REPO_MAP.md`:
+  `LOCAL_DOMAIN=jarvis.lan`, data under `HYBRID_AI_DATA_DIR`, containers
+  `ollama`, `open-webui`, `status`, `hybrid-ai-proxy`, `openhands`, `hermes`.
+- (Assumption) `openhands` stays loopback-only and gets no public hostname in
+  this change. Only `daemonhub.dev`, `hermes.daemonhub.dev` and
+  `status.daemonhub.dev` are published.
+
+---
+
+## 1. Validation method comparison and recommendation
+
+### 1.1 What each method proves
+
+| | **DNS-01** | **HTTP-01** | **TLS-ALPN-01** |
+|---|---|---|---|
+| Proof given to the CA | A TXT record at `_acme-challenge.<name>` containing a key authorisation | A file at `http://<name>/.well-known/acme-challenge/<token>` served on port 80 | A self-signed certificate with the `acme-tls/1` ALPN on port 443 |
+| Proves control of | The DNS zone (or the delegated challenge name) | The HTTP endpoint on port 80 | The TLS endpoint on port 443 |
+| Wildcard (`*.daemonhub.dev`) | **Yes** | No (CA forbids it) | No (CA forbids it) |
+| Host must be internet-reachable | **No** | Yes, on port 80 | Yes, on port 443 |
+| Works behind NAT / CGNAT / closed ports | **Yes** | No | No |
+| Rate-limit exposure | Low. Failures are DNS propagation problems, which do not count against the failed-validation limit in the same way as repeated HTTP probes. | High. Each failed probe counts toward the 5 failures per account per hostname per hour. | High, same as HTTP-01. |
+| Propagation wait | Yes. Caddy polls the authoritative nameservers until the TXT is visible. Typical 5-60 s on Cloudflare; up to several minutes on slow providers. Caddy's default bound is generous and the challenge is retried. | None; the CA fetches immediately. | None. |
+| Blast radius of the credential | A DNS API token: can mint certificates for **any** name in the zone it can write. It cannot read data or touch the host. | No stored credential at all. | No stored credential at all. |
+| Failure modes | Token expired or under-scoped; provider API outage; zone not yet delegated; TXT collisions when two challenges for the same name are in flight (Caddy serialises these). | Port 80 closed by the ISP or the router; CGNAT; captive portal intercepting the probe; a firewall rule blocking the CA's probe ranges; `trusted_only` aborting the probe. | Port 443 closed; an existing proxy answering 443 with the wrong cert; ALPN stripped by a middlebox. |
+
+### 1.2 Recommendation
+
+**Decision: DNS-01 is the installer default, with a Cloudflare API token.**
+
+Justification, in the order that matters for this host:
+
+1. The Pi has no inbound port forward and may be behind CGNAT. HTTP-01 and
+   TLS-ALPN-01 both fail outright in that network position; DNS-01 does not
+   care where the host is.
+2. The owner has said validation will be done by DNS record. DNS-01 is the only
+   method that expresses that.
+3. One wildcard certificate (`*.daemonhub.dev`) covers every present and future
+   service subdomain, so adding `status.`, `hermes.`, or a later `chat.` costs
+   no new issuance or installer prompt.
+4. The credential is the only cost, and it is a file on the Pi that cannot read
+   application data and cannot run anything (section 2.4 quantifies it).
+
+### 1.3 When HTTP-01 or TLS-ALPN-01 is the right choice instead
+
+State this exactly, because the installer prints it:
+
+- **Choose HTTP-01 when** the DNS zone is hosted somewhere with no usable
+  provider API (no plugin, no RFC 2136), **and** the host is directly reachable
+  on port 80 from the internet (a VPS, a forwarded port, a tunnel that
+  terminates port 80).
+- **Choose TLS-ALPN-01 when** the host is directly reachable on 443, port 80 is
+  unavailable or already owned by something else, and you need per-host
+  certificates without a DNS token. It cannot do wildcards, so every hostname
+  is a separate authorisation.
+- **Choose HTTP-01 or TLS-ALPN-01 over DNS-01 when** policy forbids holding a
+  DNS write token at all -- for example a shared zone where a zone-wide DNS
+  edit would let a compromise of this host redirect someone else's mail. That
+  is a real reason to prefer a reachable host with no DNS credential.
+
+### 1.4 User-facing tradeoff summary (the text the installer prints)
+
+The installer prints this verbatim at first enablement, before the prompt:
+
+```text
+How should the certificate authority prove you own the domain?
+
+  dns    (recommended)  You add a TXT record that Caddy writes for you through
+                        your DNS provider's API. Works even though this Pi has
+                        no open ports to the internet, and it is the only method
+                        that gives you one wildcard certificate for every
+                        subdomain. Cost: a DNS API token is stored on this Pi.
+
+  http                  The CA fetches a file over port 80 from the internet.
+                        No token is stored anywhere, but your router must forward
+                        port 80 and your ISP must not block it. No wildcard.
+
+  tlsalpn               The CA checks a special certificate on port 443. No token
+                        is stored, but port 443 must be reachable from the
+                        internet. No wildcard.
+
+Pick 'http' or 'tlsalpn' if you cannot or will not store a DNS token and you can
+open a port. Pick 'dns' otherwise. Default: dns
+```
+
+---
+
+## 2. DNS provider integration
+
+### 2.1 First provider: Cloudflare
+
+**Decision: Cloudflare first, because `daemonhub.dev` is already on Cloudflare
+(assumption stated in section 0), it has the fastest TXT propagation of the
+mainstream providers, and its Caddy module is the most widely deployed.**
+
+Exact Caddy module and directive:
+
+- Caddy module: `dns.providers.cloudflare`
+- Go import path: `github.com/caddy-dns/cloudflare`
+- Caddyfile syntax:
+
+```caddyfile
+tls {
+    dns cloudflare {file./run/secrets/cloudflare_dns_token}
+    propagation_timeout 120s
+    propagation_delay 10s
+    resolvers 1.1.1.1 8.8.8.8
+}
+```
+
+`{file.…}` is a Caddy placeholder that reads the token at request time, so the
+value never enters the rendered Caddyfile, the container image, an env var, or
+`docker inspect`.
+
+### 2.2 Second provider, documented path: RFC 2136
+
+**Decision: the second supported provider is RFC 2136 dynamic DNS updates, not a
+second SaaS API.**
+
+- Caddy module: `dns.providers.rfc2136`
+- Go import path: `github.com/caddy-dns/rfc2136`
+- Caddyfile syntax:
+
+```caddyfile
+tls {
+    dns rfc2136 {
+        key_name     {$RFC2136_KEY_NAME}
+        key_alg      hmac-sha512
+        key_secret   {file./run/secrets/rfc2136_key_secret}
+        server       {$RFC2136_SERVER}
+        zone         {$TLS_DOMAIN}
+    }
+}
+```
+
+Justification: a TSIG key is scoped to a zone by the *server*, not by a web UI,
+so "this key may only update `daemonhub.dev`" is enforceable on the DNS side.
+It also covers any registrar that offers dynamic updates, which is the common
+case for self-hosters who are not on Cloudflare. It is second, not first,
+because it needs server-side TSIG configuration that Cloudflare users do not
+have to do.
+
+Adding a third provider is a one-line change in the build file plus a new
+`--tls-dns-provider` value; it is not specified here because it is not needed.
+
+### 2.3 Baking the module into the image
+
+**The stock `caddy:2.8-alpine` image contains no DNS provider modules.** This is
+a hard fact, not a preference: an unbuilt image fails at startup with
+`unrecognized directive: dns` and Caddy exits, taking the proxy down.
+
+**Decision: build the image in `caddy/Dockerfile` with `xcaddy`, pinning both the
+Caddy version and the plugin versions, and let compose build it via a `build:`
+stanza so `docker compose build proxy` and CI exercise the same path.**
+
+New file `caddy/Dockerfile`:
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+# Caddy + the ACME DNS provider modules. The stock caddy:2.8-alpine image has
+# no DNS providers, and the Caddyfile refuses to load without them.
+FROM caddy:2.8-builder-alpine AS builder
+
+ARG CADDY_VERSION=2.8.4
+ARG CLOUDFLARE_DNS_VERSION=v0.2.1
+ARG RFC2136_DNS_VERSION=v0.2.0
+
+RUN xcaddy build "v${CADDY_VERSION}" \
+      --with github.com/caddy-dns/cloudflare@${CLOUDFLARE_DNS_VERSION} \
+      --with github.com/caddy-dns/rfc2136@${RFC2136_DNS_VERSION}
+
+FROM caddy:2.8-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+RUN caddy version && caddy list-modules | grep -E '^dns\.providers\.(cloudflare|rfc2136)$'
+```
+
+Compose then uses:
+
+```yaml
+  proxy:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+```
+
+The `RUN ... caddy list-modules | grep` line is the build-time gate: a missing
+module fails the build instead of failing at container start.
+
+Explicit alternative, if a local image build is unacceptable on the Pi: publish
+`hybrid-ai-caddy:2.8.4-dns` from CI (`.github/workflows/validate.yml` already
+gates the repo) to GHCR and set `CADDY_IMAGE` in `.env` to that digest-pinned
+reference. The installer prefers a local build and only sets `CADDY_IMAGE` when
+the operator asks for it. Either way the stock image is never used for TLS.
+
+### 2.4 Credential fields per provider
+
+| Provider | Field | Where it comes from | Format |
+|---|---|---|---|
+| Cloudflare | API token with `Zone:DNS:Edit` and `Zone:Zone:Read`, restricted to zone `daemonhub.dev` | Cloudflare dashboard -> My Profile -> API Tokens -> Create Token -> Edit zone DNS template | 40-character opaque string, no prefix |
+| RFC 2136 | `key_name` | TSIG key name configured on the nameserver | FQDN, e.g. `acme-daemonhub` or `acme-daemonhub.example.` |
+| RFC 2136 | `key_alg` | Chosen by the operator | `hmac-sha256`, `hmac-sha384`, or `hmac-sha512` (use `hmac-sha512`) |
+| RFC 2136 | `key_secret` | Produced by `tsig-keygen` / `dnssec-keygen -a HMAC-SHA512` | Base64 |
+| RFC 2136 | `server` | Authoritative nameserver that accepts updates | `host:port`, port defaults to 53 |
+
+### 2.5 Where the token is stored
+
+| Item | Value |
+|---|---|
+| Path on host | `/etc/hybrid-ai/acme/cloudflare_dns_token` |
+| Owner | `root:root` |
+| Mode | `0600` (directory `/etc/hybrid-ai/acme` is `0700`) |
+| Created by | The operator, with `sudo install -m 0600 -o root -g root /dev/null <path>` then an editor or a pipe from `pass`/1Password CLI. Never `echo` into a shell argument. |
+| Path in container | `/run/secrets/cloudflare_dns_token` (compose `secrets:`, file driver) |
+| Mode in container | `0444`, on an in-memory mount, visible only inside the `proxy` container |
+| Referenced from | `status/Caddyfile` as `{file./run/secrets/cloudflare_dns_token}` |
+| Not stored in | git, `.env`, `.env.example`, the image, a Dockerfile `ARG`, an env var, a command line, an install log |
+| Overridable path | `HYBRID_AI_TLS_TOKEN_FILE` in `.env` (path only, never the value) |
+
+For RFC 2136, the same rules apply to `/etc/hybrid-ai/acme/rfc2136_key_secret`,
+mounted at `/run/secrets/rfc2136_key_secret`.
+
+### 2.6 Scoping to the minimum
+
+**Decision: the token is restricted to the single zone `daemonhub.dev`, with
+`Zone:DNS:Edit` plus `Zone:Zone:Read` and no other permission.** Nothing else is
+granted: no `Zone:Zone:Edit`, no `Account:*`, no analytics, no R2, no Workers.
+
+Cloudflare does not offer per-record permissions. A token either may edit DNS in
+a zone or may not. The achievable minimum is therefore "one zone, DNS records
+only", and this design takes exactly that. To compensate for the missing
+record-level limit, `daemonhub.dev` is a dedicated stack zone: it holds only the
+records this stack needs, so a zone-wide DNS edit can damage nothing else.
+
+If record-level isolation is ever required, the documented upgrade path is a
+CNAME delegation: publish `_acme-challenge.daemonhub.dev` as a CNAME to a
+challenge name in a separate small zone, and scope the token to that second zone
+only. That path is not built here because it doubles the DNS surface for a risk
+already bounded by the dedicated zone.
+
+Verification that the scoping is what was intended:
+
+```bash
+# 1. The token's own permissions, printed by Cloudflare (must list exactly
+#    Zone:DNS:Edit and Zone:Zone:Read for one zone resource).
+curl -s -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
+  https://api.cloudflare.com/client/v4/user/tokens/verify | jq '.result.status'
+# expected: "active"
+
+# 2. Reading a zone we own must succeed...
+curl -s -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
+  "https://api.cloudflare.com/client/v4/zones?name=daemonhub.dev" | jq '.result | length'
+# expected: 1
+
+# 3. ...and any other zone must be refused.
+curl -s -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
+  "https://api.cloudflare.com/client/v4/zones?name=example.com" | jq '.result | length'
+# expected: 0
+
+# 4. A write outside the DNS record scope (creating a second zone) must 403.
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"scope-probe.example.com","account":{"id":"unknown"}}' \
+  https://api.cloudflare.com/client/v4/zones
+# expected: 403 (or 401)
+```
+
+Note the `$(sudo cat …)` pattern above reads the token into an argument. That is
+acceptable only in this one-off verification and it will appear in shell history.
+Prefer `curl -H @<(printf 'Authorization: Bearer %s\n' "$(sudo cat …)")` or, for
+repeated use, `export CF_TOKEN="$(sudo cat …)"` in a shell with `HISTFILE=/dev/null`.
+
+### 2.7 What an attacker holding the token could and could not do
+
+| Capability | Possible? | Why |
+|---|---|---|
+| Create, change or delete any DNS record in `daemonhub.dev` | **Yes** | `Zone:DNS:Edit` on the zone. This is the accepted residual risk. |
+| Point `*.daemonhub.dev` anywhere, including an attacker's host | **Yes** | Same permission. |
+| Obtain a certificate for any name in `daemonhub.dev` | **Yes** | It can satisfy DNS-01 for the zone. |
+| Break mail or other records in `daemonhub.dev` | **Yes** | Same permission; mitigated by keeping the zone dedicated to the stack. |
+| Read, write or delete records in any other zone | No | Token is zone-scoped; verified by check 3 above. |
+| Change nameservers, DNSSEC, or zone settings | No | Needs `Zone:Zone:Edit`. |
+| Read Cloudflare account settings, billing, API keys of other tokens | No | Needs `Account:*`. |
+| Reach the Pi, read `webui_data`, read the OpenHands credential | No | The token is a DNS credential with no host access. |
+| Escalate to a Cloudflare account takeover | No | No account-level permission. |
+
+Mitigations that stay in force: the token lives `0600 root` on the host, is
+mounted read-only into one container, Cloudflare audit-log notifications are
+enabled for the zone, and the token is rotated by re-running the installer with
+a new file (section 8.6).
+
+---
+
+## 3. Split-horizon DNS
+
+**Decision: public authoritative records on Cloudflare, and a local dnsmasq
+rewrite on Pi-hole so LAN clients resolve the same names to the internal Pi IP
+and never hairpin through the router.**
+
+### 3.1 Public authoritative records (Cloudflare, `daemonhub.dev` zone)
+
+| Name | Type | Value | Proxy status | TTL |
+|---|---|---|---|---|
+| `daemonhub.dev` | A | the WAN address of the Pi's router, if a port forward exists; otherwise omitted | DNS only | 300 |
+| `daemonhub.dev` | AAAA | the corresponding IPv6 address, if any; otherwise omitted | DNS only | 300 |
+| `*.daemonhub.dev` | A | same as apex | DNS only | 300 |
+| `_acme-challenge.daemonhub.dev` | TXT | written by Caddy per issuance | DNS only | 120 (Caddy manages) |
+
+Key points:
+
+- Records are **DNS only** (grey cloud). Cloudflare's orange-cloud proxy
+  terminates TLS itself and would break the Pi's own certificate, the
+  `trusted_only` IP allowlist, and the WebSocket traffic to Open WebUI.
+- If there is no port forward (the default assumption, section 0), the apex and
+  wildcard A records may be omitted entirely: DNS-01 does not need them, and
+  `_acme-challenge` TXT alone is enough to issue. The only records then are the
+  TXT records Caddy writes and whatever the owner wants for reference.
+- A wildcard A record plus no apex A record is legal and common.
+
+### 3.2 Local resolver rewrite (Pi-hole host, not this repo)
+
+**These files are host state. They are not repo files and must not be committed.**
+
+Pi-hole's embedded dnsmasq reads every `*.conf` in `/etc/dnsmasq.d/`:
+
+```bash
+sudo tee /etc/dnsmasq.d/05-hybrid-ai.conf >/dev/null <<'EOF'
+# hybrid-ai :: split-horizon rewrite for daemonhub.dev.
+# LAN clients get the Pi's LAN address; public clients get whatever the
+# authoritative zone says. Managed by hand; not part of the hybrid-ai repo.
+
+# Internal address of this Pi as seen from the LAN.
+address=/daemonhub.dev/192.168.1.50
+
+# Explicit per-service entries. dnsmasq matches the longest suffix first, so
+# these are redundant with the wildcard above but are kept so a single service
+# can be pointed somewhere else (for example a test host) without touching the
+# wildcard line.
+address=/hermes.daemonhub.dev/192.168.1.50
+address=/status.daemonhub.dev/192.168.1.50
+address=/daemonhub.dev/192.168.1.50
+
+# The Pi's loopback name, unchanged from today.
+address=/jarvis.lan/192.168.1.50
+
+# Local domain search, so `ping hermes` works on the LAN.
+local=/daemonhub.dev/
+domain=daemonhub.dev
+EOF
+
+sudo pihole restartdns
+```
+
+Notes on the exact semantics:
+
+- `address=/daemonhub.dev/<ip>` is dnsmasq's wildcard form: it answers the apex
+  **and every subdomain** under `daemonhub.dev` with `<ip>`, at any depth.
+  Repeating it per service is documentation, not necessity, and the duplicate
+  apex line above is intentionally harmless.
+- dnsmasq has no `*.` glob syntax in `address=`; the `/<domain>/` form is the
+  wildcard. Do not write `address=/*.daemonhub.dev/…`; that matches a literal
+  `*`.
+- `local=/daemonhub.dev/` makes dnsmasq authoritative for the suffix so
+  upstream servers are never asked.
+- Do not add `server=/daemonhub.dev/1.1.1.1` alongside `address=`; the last
+  matching directive in load order wins and the split horizon silently breaks.
+  File names sort lexically, so `05-hybrid-ai.conf` loads before Pi-hole's own
+  `01-pihole.conf`.
+- Replace `192.168.1.50` with the Pi's real LAN address
+  (`hostname -I | awk '{print $1}'`, the same value `install.sh` derives at
+  line 1169).
+
+### 3.3 Verification
+
+From a LAN client (a laptop on the same network):
+
+```bash
+dig +short hermes.daemonhub.dev @192.168.1.50      # -> 192.168.1.50
+dig +short status.daemonhub.dev @192.168.1.50      # -> 192.168.1.50
+dig +short daemonhub.dev @192.168.1.50             # -> 192.168.1.50
+getent hosts daemonhub.dev                          # -> 192.168.1.50 (uses the client's resolver)
+curl -sSI https://status.daemonhub.dev/status/healthz | head -1   # HTTP/2 200
+```
+
+From the Pi itself:
+
+```bash
+dig +short daemonhub.dev @127.0.0.1                 # -> 192.168.1.50 via Pi-hole
+getent hosts hermes.daemonhub.dev                   # -> 192.168.1.50
+```
+
+`getent hosts` is what `install.sh` already uses for its subdomain check at line
+1176, so the same code path validates the new names.
+
+### 3.4 A client that uses public DNS
+
+A LAN client configured with `8.8.8.8` (or any resolver that is not the Pi-hole)
+gets the **public** answer. With no port forward, that is either NXDOMAIN or an
+address that cannot be reached -- the classic split-horizon failure. It does not
+break the Pi, and it does not break certificate issuance; it only means that
+client cannot reach the services until it uses the LAN resolver.
+
+Documented consequences:
+
+- Hairpinning is avoided for correctly configured clients. A client on public DNS
+  takes the WAN path, which either works (port forward present) or fails fast.
+- Certificate validation is unaffected either way: the certificate is for the
+  name, and the name resolves consistently from each resolver's point of view.
+- The installer warns when `getent hosts` disagrees with the expected internal
+  IP, and names the dnsmasq drop-in as the fix.
+
+---
+
+## 4. Caddy as TLS terminator
+
+### 4.1 Proposed diff to `status/Caddyfile`
+
+One global concern changes and new site blocks are added. The `(trusted_only)`
+and `(secure_headers)` snippets are **unchanged**, and every HTTPS site imports
+`trusted_only` exactly as the HTTP sites do today.
+
+```diff
+ {
+-        auto_https off
++        # DNS-01 does not need Caddy's automatic HTTP challenge listener or its
++        # automatic redirects: both are explicit below, so the behaviour is
++        # visible in this file. HTTP-01 mode is the one exception; see
++        # docs/tls-acme-design.md section 4.5.
++        auto_https {$ACME_AUTO_HTTPS:off}
+         admin off
++        email {$ACME_EMAIL}
++        acme_ca {$ACME_CA}
++        # Keep logs where the container's log collector already looks.
++        log {
++                output stdout
++                format json
++        }
+ }
+
+ (trusted_only) {
+         @untrusted not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fd7a:115c:a1e0::/48
+         abort @untrusted
+ }
+
+ (secure_headers) {
+         header {
+                 Strict-Transport-Security "max-age=31536000; includeSubDomains"
+                 X-Content-Type-Options "nosniff"
+                 X-Frame-Options "SAMEORIGIN"
+                 Referrer-Policy "strict-origin-when-cross-origin"
+         }
+ }
+
++(tls_dns) {
++        # One DNS-01 challenge solves both the apex and the wildcard.
++        tls {
++                dns cloudflare {file./run/secrets/cloudflare_dns_token}
++                propagation_timeout 120s
++                propagation_delay 10s
++                resolvers 1.1.1.1 8.8.8.8
++        }
++}
++
++# --- HTTPS: daemonhub.dev ------------------------------------------------
++https://{$TLS_DOMAIN} {
++        import trusted_only
++        import secure_headers
++        import tls_dns
++
++        handle /status* {
++                import trusted_only
++                reverse_proxy status:8088
++        }
++        handle /hub* {
++                import trusted_only
++                reverse_proxy status:8088
++        }
++        handle /health {
++                rewrite * /status/health-summary
++                reverse_proxy status:8088
++        }
++        handle_path /ollama/* {
++                import trusted_only
++                reverse_proxy ollama:11434
++        }
++        handle {
++                reverse_proxy open-webui:8080
++        }
++}
++
++https://hermes.{$TLS_DOMAIN} {
++        import trusted_only
++        import secure_headers
++        import tls_dns
++
++        reverse_proxy hermes:8501
++}
++
++https://status.{$TLS_DOMAIN} {
++        import trusted_only
++        import secure_headers
++        import tls_dns
++
++        redir / /status 302
++        reverse_proxy status:8088
++}
++
++https://*.{$TLS_DOMAIN} {
++        # Wildcard catch-all. Unknown subdomain gets a bare 404, so a probe
++        # cannot enumerate services.
++        import trusted_only
++        import secure_headers
++        import tls_dns
++
++        respond 404
++}
++
++# --- HTTP -> HTTPS redirect (port 80 stays open for redirect + HTTP-01) ---
++http://{$TLS_DOMAIN}, http://*.{$TLS_DOMAIN} {
++        import trusted_only
++        redir https://{host}{uri} 308
++}
+```
+
+Notes on the diff, all deliberate:
+
+- **`(trusted_only)` is imported at site level and again inside each protected
+  `handle`.** The existing comment explains why: a matching `handle` runs before
+  site-level `abort`/`respond`, so a site-level import alone would be bypassed.
+  The HTTPS blocks copy that structure exactly.
+- **The allowlist is neither removed nor widened.** `100.64.0.0/10` (rendered
+  `[IP_ADDRESS]/10` in the checked-in file) and `fd7a:115c:a1e0::/48` remain.
+  HTTPS is not authentication. A certificate proves the *server's* identity to
+  the browser; it says nothing about the *client*. Removing the allowlist would
+  turn a private host into a public one.
+- **`(secure_headers)` is imported on HTTPS sites only.** Sending HSTS on plain
+  HTTP would be ignored at best and confusing at worst; `(secure_headers)` is
+  defined but its use is new.
+- **One `tls` block per site** means Caddy obtains one certificate per site
+  block: the apex certificate and the wildcard. Both are DNS-01, both use the
+  same challenge name, so Caddy serialises them.
+- The wildcard catch-all is a change in behaviour: previously an unknown host
+  did not match any site and Caddy answered 404 with its default page. Now it
+  reaches a `respond 404` behind `trusted_only`.
+
+### 4.2 Certificate and key storage
+
+| Item | Value |
+|---|---|
+| Inside the container | `/data/caddy/certificates/` (Caddy's `$XDG_DATA_HOME` under `/data`) |
+| On the host | `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/` -- the `proxy` mount is `…/webui_data/caddy:/data`, so `/data/caddy` lands one level deeper |
+| Production CA directory | `acme-v02.api.letsencrypt.org-directory/<hostname>/` |
+| Staging CA directory | `acme-staging-v02.api.letsencrypt.org-directory/<hostname>/` |
+| Files per host | `<host>.crt`, `<host>.key`, `<host>.json` (metadata: `sans`, `not_after`, `renewal_info`) |
+| Owner | `root:root` inside the container (the caddy image runs as root by default and must, to bind 80/443 and write `/data`) |
+| Modes | Caddy creates `0700` directories and `0600` files on first write. Do not relax them. |
+| Parent directory owner | The installing user owns `${HYBRID_AI_DATA_DIR}/webui_data/caddy`; Caddy's earlier writes may have created it as the container's root user. The installer ensures the directory exists and is `0700` before the first start, and never makes it group- or world-readable. |
+| Read by | The `proxy` container only. **The `status` container must not mount it**, because it contains private keys; `status` never needs key material (section 6). |
+
+Verified after issuance:
+
+```bash
+sudo ls -l "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/daemonhub.dev/"
+# expected: -rw------- root root  <host>.crt/.key/.json
+sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates"
+# expected: 700 root:root
+```
+
+### 4.3 Port publishing
+
+```diff
+     ports:
+-      - "80:80"
++      # 80 stays published: it carries the HTTP->HTTPS redirect, and in
++      # HTTP-01 mode it carries the challenge. 443 carries all HTTPS.
++      - "80:80"
++      - "443:443"
++      - "443:443/udp"   # HTTP/3; harmless if the network drops it
+```
+
+`80:80` is retained because the redirect and HTTP-01 both need it. Dropping it
+would leave `http://` clients on a connection error rather than a redirect, and
+would break the existing HTTP-on-`jarvis.lan` fallback.
+
+The compose `healthcheck` on the proxy keeps using `http://127.0.0.1:80/status/healthz`
+and therefore still passes with TLS enabled: it is a plain HTTP liveness probe
+inside the container, not a client request.
+
+### 4.4 Compose changes, in full
+
+```diff
+   proxy:
+-    image: caddy:2.8-alpine
++    build:
++      context: ./caddy
++      dockerfile: Dockerfile
++    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+     container_name: hybrid-ai-proxy
+     restart: unless-stopped
+     depends_on:
+       - open-webui
+       - status
+     mem_limit: 128m
+     cpus: "0.5"
+     ports:
+       - "80:80"
++      - "443:443"
++      - "443:443/udp"
+     volumes:
+       - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
+       - ${HYBRID_AI_DATA_DIR:?…}/webui_data/caddy:/data
++    secrets:
++      - cloudflare_dns_token
+     environment:
+       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
++      TLS_DOMAIN: ${TLS_DOMAIN:-}
++      ACME_EMAIL: ${ACME_EMAIL:-}
++      ACME_CA: ${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
++      ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-off}
+       DO_NOT_TRACK: "true"
+     security_opt:
+       - no-new-privileges:true
+```
+
+plus, at the top level (compose file secrets are file-backed, no Swarm needed):
+
+```yaml
+secrets:
+  cloudflare_dns_token:
+    file: ${HYBRID_AI_TLS_TOKEN_FILE:?HYBRID_AI_TLS_TOKEN_FILE must be set when TLS is enabled}
+```
+
+When TLS is disabled the `secrets:` stanza and the `443` entries are **not**
+emitted at all -- the installer selects a TLS-less variant so the compose file
+is byte-for-byte equivalent to today's. In practice the installer renders the
+`secrets:` block from a template fragment and validates with
+`docker compose config -q`; an empty `secrets:` mapping is a compose error, so
+it must be absent rather than empty.
+
+Container hardening is unchanged: `no-new-privileges:true`, the same `mem_limit`
+and `cpus`, the same read-only Caddyfile mount, the same 128 MB ceiling. The
+`build:` stanza adds build-time, not run-time, surface.
+
+### 4.5 `auto_https`, `admin`, and the HTTP-01 exception
+
+- **DNS-01 (default):** global `auto_https off`. Challenges are solved through
+  DNS, so Caddy needs no HTTP listener of its own, and every listener in the
+  file is explicit. `ACME_AUTO_HTTPS=off` in `.env`.
+- **HTTP-01:** `ACME_AUTO_HTTPS=disable_redirects`. With `off`, Caddy refuses to
+  serve `/.well-known/acme-challenge/*` and issuance fails with
+  `no solvers available for remaining challenges`. With `disable_redirects`,
+  Caddy serves the challenge on port 80 and does not add its own redirect; the
+  explicit `http://` block still provides the 308.
+- **TLS-ALPN-01:** same as DNS-01, `auto_https off`. The challenge is solved on
+  the 443 listener, which the `https://` sites already own.
+- **Admin API:** stays `admin off` globally. Nothing in this design needs the
+  admin API, so it is not re-enabled and not bound to any interface. Where a
+  later task needs it (for example `caddy reload`), the binding is
+  `admin localhost:2019` -- loopback inside the container, never published, and
+  reached with `docker compose exec`. `caddy reload` works over the loopback
+  admin endpoint in that mode.
+
+### 4.6 Secrets at runtime
+
+Requirement, restated because it is easy to get wrong: **Caddy must be able to
+read the DNS token at runtime without the token landing in the image or in git.**
+
+How each path is closed:
+
+| Path | Closed by |
+|---|---|
+| Image | The token is never a `COPY`, never an `ARG`, never an `ENV` in `caddy/Dockerfile`. The build only copies the Caddy binary. |
+| Git | `.gitignore` already ignores `.env`, `*.key`, `*.pem`, `*.crt`, `authkey*`, `runtime.env`. The token lives outside the repo entirely (`/etc/hybrid-ai/acme/`). |
+| Env var | The token is not an environment variable, so it does not appear in `docker inspect` or `/proc/<pid>/environ`. |
+| Command line | `install.sh` never accepts the token as an argument. It accepts a *path* (`--tls-token-file`), or reads the value silently from a TTY. |
+| Rendered config | `{file./run/secrets/cloudflare_dns_token}` is a placeholder; the value is read at challenge time. |
+| Logs | Caddy's JSON logs record the challenge type and names, not the token. The installer's redaction in `status/app.py` (`REDACTIONS`) already covers key-shaped strings. |
+
+---
+
+## 5. Renewal
+
+### 5.1 Cadence
+
+**Decision: rely on Caddy's built-in renewal. No second issuer, no competing
+systemd timer.**
+
+Justification: Caddy renews each certificate when roughly one third of its
+lifetime remains -- for a 90-day Let's Encrypt certificate that is about 30 days
+before expiry -- and it retries on failure while it still has time in hand. A
+second timer calling `certbot renew` or `lego` would issue *separate*
+certificates, doubling rate-limit consumption and creating two sources of truth
+for what the proxy serves. The failure mode of a competing system is worse than
+the failure mode of none.
+
+What Caddy does, concretely: it schedules renewal from the certificate's
+`not_after` metadata, checks its schedule on start and periodically while
+running, and reloads the new certificate in place.
+
+### 5.2 The one residual timer
+
+**Decision: one systemd timer, `hybrid-ai-tls-check.timer`, runs
+`scripts/tls-check.sh` read-only and alerts on failure. It never issues, never
+renews, never writes to cert storage.**
+
+- Unit: `deploy/hybrid-ai-tls-check.service` + `.timer`, daily at 06:10 (the
+  backup timers already run at 03:30 and the prune at 04:20, so this slot is
+  free and a failure is seen at breakfast rather than at 3 a.m.).
+- `ExecStart=/usr/bin/env bash ${APP_DIR}/scripts/tls-check.sh --quiet`
+- Exit code drives the alert; the unit is `Type=oneshot` and read-only, with
+  `NoNewPrivileges=yes`, `ProtectSystem=strict`, `PrivateTmp=yes`.
+- Its job is to catch the case Caddy's own retries cannot: a token that expired
+  three weeks ago and a renewal that has been failing silently since.
+
+### 5.3 Reload strategy
+
+**Decision: reload, never restart, for certificate and configuration changes.**
+
+- Caddy swaps renewed certificates in memory with no reload at all: the renewal
+  path writes the new cert to `/data` and atomically replaces the in-memory
+  `Certificate` object. No signal, no restart, no dropped connection.
+- After editing `status/Caddyfile`, apply it with:
+
+```bash
+# Validate first -- a bad config must never reach the running proxy.
+docker compose exec proxy caddy validate --config /etc/caddy/Caddyfile
+# Apply. This uses the loopback admin endpoint inside the container.
+docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile
+# Or, on the host, without entering the container:
+docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml \
+  exec proxy caddy reload --config /etc/caddy/Caddyfile
+```
+
+- `caddy reload` performs a graceful, zero-downtime swap. **A container restart
+  is not required**, and is actively discouraged: `docker compose restart proxy`
+  drops every in-flight WebSocket, which includes an active Open WebUI chat
+  stream.
+- If the admin endpoint is off (the DNS-01 default), `caddy reload` fails with
+  `connect: connection refused`. In that mode the apply path is
+  `docker compose up -d proxy` after `caddy validate` in a throwaway container:
+
+```bash
+docker run --rm -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  hybrid-ai-caddy:2.8.4-dns caddy validate --config /etc/caddy/Caddyfile
+docker compose up -d proxy
+```
+
+**Decision on which of the two applies: TLS builds set `admin localhost:2019`
+so `caddy reload` works and restarts are avoidable.** The admin listener is
+loopback-only inside the container, the port is not published, and the container
+still runs with `no-new-privileges:true`. This is the one deliberate departure
+from `admin off`, and it is required to honour "reload without restart". For
+deployments that will not accept an admin listener at all, the
+`docker compose up -d proxy` path above is the documented alternative.
+
+### 5.4 Proving renewal works
+
+Run all of this with the **staging** CA first. Staging issues untrusted
+certificates, which is exactly why it is safe to repeat.
+
+```bash
+# 0. Point at staging and start.
+#    .env:  ACME_CA=https://acme-staging-v02.api.letsencrypt.org/directory
+docker compose up -d proxy
+docker compose logs -f proxy | grep -E '"logger":"tls"'
+
+# 1. Confirm the certificate exists in staging storage.
+docker compose exec proxy sh -c \
+  'ls -l /data/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/'
+# expected: daemonhub.dev/  hermes.daemonhub.dev/  status.daemonhub.dev/  wildcard_.daemonhub.dev/
+
+# 2. Confirm the stored metadata carries the expected expiry and renewal window.
+docker compose exec proxy sh -c \
+  'cat /data/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/daemonhub.dev/daemonhub.dev.json' \
+  | jq '{sans, not_after, renewal_info}'
+# expected: not_after ~90 days out (staging certs are 90-day), and a
+#           renewal_info.renew_at roughly 30 days before not_after.
+
+# 3. Confirm the served chain matches what is on disk (staging chain -> untrusted,
+#    so the handshake is expected to fail verification; the certificate must
+#    still be present and match the SAN).
+openssl s_client -connect 127.0.0.1:443 -servername daemonhub.dev </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+# expected: issuer contains "STAGING", dates show ~90 days, SAN has
+#           daemonhub.dev and *.daemonhub.dev
+
+# 4. Force a renewal without waiting 60 days: move the certificate aside and
+#    restart the proxy. Caddy sees no managed certificate and reissues.
+docker compose stop proxy
+sudo mv "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/daemonhub.dev" \
+        "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/staging-hold/daemonhub.dev.$(date +%s)"
+docker compose start proxy
+docker compose logs --since 2m proxy | grep -iE 'obtaining|renew|certificate' | head
+# expected: "obtaining certificate" then "certificate obtained successfully"
+```
+
+Where renewal events appear:
+
+- **Caddy logs** (`logger: "tls"`, `msg: "certificate obtained successfully"`,
+  `msg: "renewing certificate"`, `msg: "renewal attempted"`). These are on
+  stdout and therefore in `docker logs hybrid-ai-proxy` and in the container's
+  `json-file` log (already capped at `max-size: 5m`, `max-file: 2`).
+- **Cert storage metadata**: `<host>.json` under the active CA directory carries
+  `not_after` and `renewal_info`; comparing `not_after` over time is the
+  durable proof, independent of log rotation.
+- **The audit record** (section 6.5): `scripts/tls-check.sh` appends one line
+  per observation to `${HYBRID_AI_LOG_DIR}/tls-check.log`, so issuance and
+  renewal show up as a jump in `not_after`.
+
+Then switch to production:
+
+```bash
+# .env: ACME_CA=https://acme-v02.api.letsencrypt.org/directory
+docker compose up -d proxy
+docker compose logs -f proxy | grep -E '"logger":"tls"'
+openssl s_client -connect 127.0.0.1:443 -servername daemonhub.dev </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -dates -ext subjectAltName
+# expected: issuer "C = US, O = Let's Encrypt, CN = R11" (or similar), verify return code: 0
+```
+
+### 5.5 Rate limits and why staging is the default
+
+| Let's Encrypt limit | Value | What it means here |
+|---|---|---|
+| Certificates per registered domain | 50 per week | A normal install uses 2-3. Only a loop of forced renewals exhausts it. |
+| Duplicate certificates | 5 per week | Re-running an install that reissues the *same* names five times in a week hits this. This is the limit a careless debug loop breaks. |
+| Failed validations | 5 per account per hostname per hour | A misconfigured token hits this after five attempts. |
+| New orders per account | 300 per 3 hours | Not reachable at this scale. |
+
+**Production is not the default** because a first-time install is exactly when
+names, tokens and the Caddyfile are wrong, and every wrong attempt counts. With
+`ACME_CA` defaulting to staging, a broken install can be retried all afternoon
+for no cost, and the single switch to production happens when everything is
+verified. The installer prints the staging issuer string in the success message
+so an operator cannot mistake a staging certificate for a working one.
+
+---
+
+## 6. Health checks
+
+### 6.1 What the check must assert
+
+For each configured hostname (`daemonhub.dev`, `hermes.daemonhub.dev`,
+`status.daemonhub.dev`):
+
+| # | Assertion | How |
+|---|---|---|
+| 1 | A certificate is served at all | `ssl` handshake to `proxy:443` with SNI = hostname, from the `status` container |
+| 2 | The chain validates against the system trust store | `ssl.create_default_context().verify_mode = CERT_REQUIRED`; `SSLError` on failure |
+| 3 | The certificate matches the hostname (SAN) | `ssl.match_hostname` semantics -- Python's `check_hostname`, or explicit `getpeercert()['subjectAltName']` comparison when the chain is staging and verification is off |
+| 4 | Not expired | `notAfter` vs now |
+| 5 | Days to expiry above threshold | computed from `notAfter` |
+| 6 | The served certificate equals the stored one | compare the leaf's SHA-256 fingerprint with the `.crt` on disk when readable (optional; `status` cannot read `/data` today, so this is a CLI-only assertion) |
+
+Assertion 3 is checked separately from 2 on purpose: a staging certificate has a
+valid chain shape and correct SANs but an untrusted issuer. Reporting "SAN wrong"
+for a staging cert would send an operator down the wrong path.
+
+### 6.2 Thresholds and exit codes
+
+| Condition | Severity | Exit code |
+|---|---|---|
+| All hostnames fine, more than 14 days left | OK | `0` |
+| Any hostname with fewer than **14** days left, but at least 7 | WARN | `1` |
+| Any hostname with fewer than **7** days left, but not expired | CRITICAL | `2` |
+| Any hostname expired, no certificate served, chain invalid, or SAN mismatch | CRITICAL | `2` for expired/SAN; `3` for missing/invalid |
+| Could not connect to `proxy:443` at all, or TLS disabled | MISSING/INVALID | `3` |
+
+Exact rule set, so an implementation has nothing to interpret:
+
+```text
+days = floor((notAfter - now) / 86400)
+if TLS disabled:                                   exit 3  (SKIPPED, not an error)
+elif connect fails or no cert or chain invalid:     exit 3
+elif SAN does not contain hostname:                 exit 3
+elif days <= 0:                                     exit 2
+elif days < 7:                                      exit 2
+elif days < 14:                                     exit 1
+else:                                               exit 0
+```
+
+`14` and `7` are not arbitrary: Caddy starts renewing at ~30 days, so 14 days
+still leaves two weeks of retries, and 7 days is the point at which a human
+must be woken up. Both are compile-time constants in `scripts/tls-check.sh` and
+are reported in the output so the log explains itself.
+
+### 6.3 Proposed endpoint
+
+**Decision: `GET /status/tls`, JSON, inside `status/app.py`.** Not a new service,
+not a new container: the status app already serves `/status/healthz`,
+`/status/health-summary`, `/status/api`, `/status`, `/hub`, and it is already on
+a container that can reach `proxy:443` over the shared network.
+
+Response body:
+
+```json
+{
+  "enabled": true,
+  "checked_at": "2026-10-28T01:05:29Z",
+  "overall": "warn",
+  "exit_code": 1,
+  "hosts": [
+    {
+      "hostname": "hermes.daemonhub.dev",
+      "certificate": true,
+      "chain_valid": true,
+      "san_match": true,
+      "issuer": "C=US, O=Let's Encrypt, CN=R11",
+      "not_after": "2027-01-20T00:00:00Z",
+      "days_to_expiry": 84,
+      "severity": "ok"
+    }
+  ]
+}
+```
+
+Placement in `status/app.py`, concretely:
+
+- New module-level constants next to `LOCAL_DOMAIN`:
+  `TLS_ENABLED = os.getenv("TLS_ENABLED", "false").lower() in ("1","true","yes")`,
+  `TLS_HOSTS = [h for h in os.getenv("TLS_HOSTS", "").split(",") if h]`,
+  `TLS_WARN_DAYS = 14`, `TLS_CRIT_DAYS = 7`,
+  `TLS_PROBE_ADDR = os.getenv("TLS_PROBE_ADDR", "proxy:443")`.
+- A new function `collect_tls_status() -> Dict[str, Any]` beside `collect_status()`,
+  using only the standard library (`ssl`, `socket`, `datetime`). It opens one
+  connection per hostname with `server_hostname=<host>` and `verify_mode=CERT_NONE`
+  for the metadata read, then a second with `CERT_REQUIRED` to prove the chain.
+  The two-pass form is what lets a staging certificate report
+  `"chain_valid": false` without hiding its SAN and dates.
+- A new branch in `do_GET`, mirroring the existing `/status/api` branch:
+  `/status/tls` returns `200` when `overall` is `ok`, `200` with
+  `"overall":"warn"` on warn (a warn is not a failed probe), and `503` on
+  critical or missing. The body is always the same JSON shape.
+- **Read-only posture preserved:** the endpoint only dials `proxy:443` and reads
+  no files, no Docker socket, no `/data`. It never touches private keys. It
+  performs no writes. `/status/tls` is behind `(trusted_only)` via the existing
+  proxy routing for `/status*`, so it is not a public probe.
+
+In `status/Caddyfile`, no new site is needed: the apex block already routes
+`/status*` to `status:8088`, and the `status.` site proxies everything. Both now
+cover `/status/tls` automatically. The one line to add is in the status app's
+own documentation comment at the top of the file (the endpoint list at
+`status/app.py:53`), plus the `TLS_HOSTS` / `TLS_ENABLED` env vars in the
+`status` service in `docker-compose.yml`:
+
+```diff
+     environment:
+       TAILSCALE_IP: ${TAILSCALE_IP:-}
+       STATUS_PORT: "8088"
+       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
++      TLS_ENABLED: ${TLS_ENABLED:-false}
++      TLS_HOSTS: ${TLS_HOSTS:-}
++      TLS_PROBE_ADDR: proxy:443
+```
+
+### 6.4 How the existing endpoints surface it
+
+- `/status/healthz` **does not change.** It is a liveness probe for Docker and
+  must stay a constant, dependency-free `200 ok`. Making it depend on
+  certificate state would restart a healthy proxy's healthcheck path for an
+  unrelated reason and cascade into an outage.
+- `/status/health-summary` gains one clause: overall is `fail` if TLS is enabled
+  and `collect_tls_status()["overall"] == "critical"`. `warn` maps to the
+  existing warning state, so the endpoint's `200`/`503` contract is unchanged.
+- `/status/api` gains a `"tls"` key holding the same object as `/status/tls`.
+- `/status` and `/hub` gain one row: "TLS certificates", showing the worst
+  severity, the nearest expiry date, and the days remaining. Clicking it shows
+  the per-host table.
+
+### 6.5 Alerting and the audit record
+
+**Decision: reuse what the host already has -- `doctor.sh`'s exit codes and the
+existing monitoring/webhook/email path -- rather than adding an alerting
+channel.**
+
+- `scripts/tls-check.sh --quiet` is the CLI form of the same logic, for the
+  systemd timer and for `doctor.sh`. It prints one line per host and exits with
+  the codes from 6.2. `doctor.sh` gains a section that calls it and maps
+  `1` to its own warning and `2`/`3` to its own failure, so `./doctor.sh` alone
+  is still sufficient, and `./doctor.sh --quiet` still exits non-zero on a
+  problem.
+- `deploy/hybrid-ai-tls-check.service` runs it daily. The alert rides the
+  existing path: the host already mails on non-zero exits from
+  `hybrid-ai-check` and already has webhooks for deploy events, so the TLS unit
+  reuses the same `OnFailure=` target as `hybrid-ai-check.service`. No new
+  mail relay, no new webhook secret.
+- The audit record is append-only text, one line per host per run, in
+  `${HYBRID_AI_LOG_DIR}/tls-check.log` (`0600`, owned by the installing user):
+
+```text
+ts=2026-10-28T06:10:02Z host=daemonhub.dev issuer="CN=R11" not_after=2027-01-20T00:00:00Z days=84 severity=ok exit=0
+ts=2026-10-28T06:10:02Z host=hermes.daemonhub.dev issuer="CN=R11" not_after=2027-01-20T00:00:00Z days=84 severity=ok exit=0
+```
+
+  A renewal is visible as a sudden jump in `days` for every host, and an
+  issuance is the first line mentioning a host. Because `not_after` is recorded,
+  the log answers "when did this certificate change?" without needing Docker
+  logs, which are capped at 5 MB x 2 files.
+
+---
+
+## 7. Migration runbook outline
+
+Governed by D11: **`jarvis.lan` is not decommissioned in this change.** The
+dual-name period is the whole cutover, and it never ends until a later, separate
+decision.
+
+### 7.1 Dual-name period
+
+Both names are in the Caddyfile at once:
+
+| Name | Scheme | Purpose during cutover |
+|---|---|---|
+| `jarvis.lan` | http | Unchanged fallback. Existing bookmarks, `install.sh`-printed URLs, `OPENHANDS_SANDBOX_HOST`, status page links all keep working. |
+| `daemonhub.dev`, `hermes.`, `status.` | https | New primary. Verified in parallel before anyone is told to switch. |
+
+Both must resolve and both must serve. Nothing is removed from the Caddyfile in
+this change; the HTTPS blocks are additions.
+
+### 7.2 TTL lowering, first
+
+Before any DNS change: lower every `daemonhub.dev` record TTL to **300 s** and
+wait at least one old TTL (one hour, to be safe) so a rollback propagates
+quickly. Do this at least an hour before the cutover window, not during it.
+
+### 7.3 Order of operations
+
+1. Lower DNS TTLs to 300 s; wait one hour. (No service impact.)
+2. Create the Cloudflare API token, scoped as in section 2.6. Verify it with the
+   four checks in 2.6.
+3. Write the token to `/etc/hybrid-ai/acme/cloudflare_dns_token` (`0600 root`).
+4. Build the Caddy image (`docker compose build proxy`). Verify
+   `caddy list-modules | grep dns.providers`.
+5. Add the dnsmasq drop-in on the Pi-hole host and `pihole restartdns`. Verify
+   `dig @<pihole> daemonhub.dev` from a LAN client.
+6. Create the public records that make sense: `_acme-challenge` TXT is written by
+   Caddy; apex/wildcard A only if a port forward exists.
+7. Set `.env` TLS keys with `ACME_CA` = **staging**. Run the installer with
+   `--tls`.
+8. Validate and apply the Caddyfile. Confirm staging certificates issue for all
+   four site blocks (section 5.4 step 1-3).
+9. Verify every service over HTTPS on staging (browsers will warn; use `curl -k`
+   or accept the warning).
+10. Switch `ACME_CA` to production, apply, confirm the trusted chain
+    (section 5.4).
+11. Run the TLS health check; confirm exit `0` and ~90 days.
+12. Print the new URLs; leave the old ones printed as well.
+13. Watch for one week; keep the rollback trigger armed.
+
+### 7.4 Which internal URLs change
+
+| Surface | Before | After | Action |
+|---|---|---|---|
+| `install.sh` printed URLs (line ~1606) | `http://daemonhub.dev` etc. on `LOCAL_DOMAIN` | `https://daemonhub.dev`, `https://hermes.…`, `https://status.…` | Print **both** during the dual-name period; `https` first, `http://jarvis.lan` second |
+| `OPENHANDS_SANDBOX_HOST` | the LAN hostname | unchanged | OpenHands stays loopback-only; do not point it at the public name |
+| `LOCAL_DOMAIN` | `jarvis.lan` | unchanged | New `TLS_DOMAIN` variable carries `daemonhub.dev`; `LOCAL_DOMAIN` keeps its meaning for the HTTP fallback |
+| Status page links | `http://jarvis.lan/status` | add `https://status.daemonhub.dev/status` | Both links shown until the fallback retires |
+| Bookmarks / docs | `http://jarvis.lan` | `https://daemonhub.dev` | User action, documented in the release note |
+| Hermes / status subdomains | `http://hermes.jarvis.lan` | `https://hermes.daemonhub.dev` | Both live during cutover |
+
+### 7.5 Verifying each service over HTTPS
+
+Run from a LAN client, and repeat from the Pi itself:
+
+```bash
+for h in daemonhub.dev hermes.daemonhub.dev status.daemonhub.dev; do
+  printf '%-28s ' "$h"
+  curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' "https://$h/"
+done
+# expected: 200 0 / 200 0 / 302 0   (the status site redirects / to /status)
+
+# The allowlist still applies over HTTPS: from a host outside the allowlist the
+# connection must be closed, not served.
+curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' https://daemonhub.dev/ || echo "aborted (expected)"
+# expected: "aborted (expected)" or an empty-reply error -- NOT 200
+
+# Redirect works.
+curl -sSI http://daemonhub.dev/ | head -3
+# expected: HTTP/1.1 308 Permanent Redirect, Location: https://daemonhub.dev/
+
+# HSTS present on the HTTPS sites.
+curl -sSI https://daemonhub.dev/ | grep -i strict-transport-security
+
+# Services behind the proxy.
+curl -sS https://status.daemonhub.dev/status/healthz          # -> ok
+curl -sS https://daemonhub.dev/health                         # -> ok
+curl -sS https://daemonhub.dev/status/api | jq '.overall'     # -> "ok"
+curl -sS -o /dev/null -w '%{http_code}\n' https://hermes.daemonhub.dev/  # -> 200
+```
+
+### 7.6 Rollback
+
+**Trigger (concrete):** roll back if any of these is true 30 minutes after the
+production switch, and do not spend that window debugging a public site:
+
+1. Any of the three hostnames returns a non-`2xx`/`3xx` over HTTPS when the
+   equivalent `http://jarvis.lan` path returns `200`, or
+2. the TLS health check exits `2` or `3`, or
+3. certificate issuance for any site block fails twice in a row with a
+   non-recoverable error (bad token, wrong zone), or
+4. `docker compose ps` shows `hybrid-ai-proxy` not `healthy`, or
+5. an untrusted client can retrieve content over HTTPS (allowlist bypass).
+
+**Steps, in order, all reversible:**
+
+```bash
+# 1. Revert the Caddyfile to the previous version (HTTPS blocks removed).
+git -C "${HYBRID_AI_APP_DIR}" stash push -- status/Caddyfile   # or restore from backup
+docker compose exec proxy caddy validate --config /etc/caddy/Caddyfile
+docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile
+
+# 2. Revert the port publish, so nothing new is listening.
+#    Edit docker-compose.yml to drop 443 (keep 80), then:
+docker compose up -d proxy
+
+# 3. Revert .env TLS keys. Setting TLS_ENABLED=no is enough; the installer
+#    renders the TLS-less compose variant on the next run.
+sed -i 's/^TLS_ENABLED=.*/TLS_ENABLED=no/' "${HYBRID_AI_ENV_FILE}"
+
+# 4. Revert DNS. Two independent halves:
+#    a) Public: delete the _acme-challenge TXT records Caddy created and any
+#       apex/wildcard A records added for this change. Restore TTLs to their
+#       previous value.
+#    b) Local: remove the dnsmasq drop-in and restart the resolver.
+sudo rm -f /etc/dnsmasq.d/05-hybrid-ai.conf
+sudo pihole restartdns
+
+# 5. Confirm the fallback is untouched.
+curl -sS http://jarvis.lan/status/healthz     # -> ok
+curl -sS http://hermes.jarvis.lan/            # -> 200
+curl -sS http://status.jarvis.lan/status/healthz  # -> ok
+```
+
+The certificate storage under `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates`
+is deliberately **left in place** by a rollback: it holds no state that hurts,
+and re-enabling TLS then resumes with the existing certificate instead of
+issuing a duplicate and burning rate limit. Delete it only when the rollback is
+permanent, and then delete the `acme-v02` directory as a whole.
+
+`jarvis.lan` is the fallback at every step and is never changed by this
+migration, which is why "rollback" is a matter of removing additions rather than
+undoing a destructive change.
+
+---
+
+## 8. Installer surface
+
+### 8.1 Prompts and defaults
+
+| Prompt | Variable | Default | When asked |
+|---|---|---|---|
+| Enable HTTPS with Let's Encrypt? | `TLS_ENABLED` | `no` | Always, after `LOCAL_DOMAIN` |
+| Base domain for certificates | `TLS_DOMAIN` | `daemonhub.dev` | Only if TLS enabled |
+| ACME account email | `ACME_EMAIL` | none (required) | Only if TLS enabled |
+| Validation method | `TLS_VALIDATION` | `dns` | Only if TLS enabled; prints the tradeoff text from section 1.4 first |
+| DNS provider | `ACME_DNS_PROVIDER` | `cloudflare` | Only if `TLS_VALIDATION=dns` |
+| Provider credential file path | `HYBRID_AI_TLS_TOKEN_FILE` | `/etc/hybrid-ai/acme/cloudflare_dns_token` | Only if `TLS_VALIDATION=dns`; the installer verifies it is a readable regular file, `0600`, and not inside the repo, and never prints its contents |
+| Certificate authority | `ACME_CA` | staging | Only if TLS enabled; the prompt offers `staging` (default) or `production` and maps to the URL |
+
+All prompts go through the existing `prompt_secret` helper so an existing `.env`
+value is reused and no prompt repeats on re-run. The token itself is never
+prompted by value: the operator is asked for the *path* and told how to create
+the file.
+
+### 8.2 Non-interactive flags and env equivalents
+
+| Flag | Env equivalent | Value |
+|---|---|---|
+| `--tls` / `--no-tls` | `TLS_ENABLED=1` / `0` | Enable HTTPS |
+| `--tls-domain <name>` | `TLS_DOMAIN=<name>` | Base domain |
+| `--tls-email <addr>` | `ACME_EMAIL=<addr>` | ACME account email |
+| `--tls-validation <dns\|http\|tlsalpn>` | `TLS_VALIDATION=<...>` | Validation method |
+| `--tls-dns-provider <cloudflare\|rfc2136>` | `ACME_DNS_PROVIDER=<...>` | DNS plugin |
+| `--tls-acme-ca <staging\|production\|url>` | `ACME_CA=<url>` | CA endpoint |
+| `--tls-token-file <path>` | `HYBRID_AI_TLS_TOKEN_FILE=<path>` | **Path**, never the token |
+| `--dry-run` | `HYBRID_AI_DRY_RUN=1` | Render and validate, change nothing |
+| (existing) `--non-interactive` | -- | Never prompt; fail on a missing required value |
+| (existing) `--no-start` | -- | Write config, do not touch Docker |
+
+`--dry-run` prints every file it would write (paths only, plus a unified diff of
+`status/Caddyfile` and `docker-compose.yml`), runs `docker compose config -q`
+against the rendered compose file, validates the Caddyfile with
+`caddy validate` in a throwaway container, and exits `0` without touching Docker
+or any file. It is the required way to preview the change on the live host.
+
+Parsing goes in the existing `for arg in "$@"` loop at the top of `install.sh`
+and in the same style as `--wake-runpod`; an unknown flag still exits `2`.
+
+### 8.3 Files the installer writes
+
+| File | Content | Mode |
+|---|---|---|
+| `$ENV_FILE` (stack env, e.g. `.env`) | Adds `TLS_ENABLED`, `TLS_DOMAIN`, `ACME_EMAIL`, `ACME_CA`, `TLS_VALIDATION`, `ACME_DNS_PROVIDER`, `HYBRID_AI_TLS_TOKEN_FILE`, `TLS_HOSTS`, `ACME_AUTO_HTTPS`, `CADDY_IMAGE`. No secret values. | `0600` (unchanged) |
+| `status/Caddyfile` | Rendered from `status/Caddyfile.tmpl` with the HTTPS blocks present or absent | `0644` (unchanged; not a secret) |
+| `docker-compose.yml` | Rendered from `docker-compose.yml.tmpl`, TLS or non-TLS variant | `0644` |
+| `${HYBRID_AI_LOG_DIR}/install.log` | Existing event log; gains `event tls_enabled`, `event tls_cert_issued host=…` lines. No token. | `0600` |
+| `/etc/hybrid-ai/acme/` drop-in | **Not written by the installer.** The operator creates the token file. The installer only validates it. | `0700` dir / `0600` file |
+
+The templates live beside the files they render, and the rendered files stay
+tracked in git (they are the current state). This keeps `git diff` meaningful
+after an install and keeps the non-TLS rendering byte-identical to today's
+checked-in files.
+
+### 8.4 Idempotency rules
+
+Re-running the installer must be a no-op when nothing changed:
+
+1. **No duplicated blocks.** Rendering is not appending. The template already
+   contains the HTTPS blocks, marked with managed begin/end comments; the
+   renderer strips any existing managed region and writes exactly one. Running
+   twice produces a byte-identical file (`sha256sum` comparison is the test).
+2. **Certificates are never clobbered.** The install never deletes
+   `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates`. Reissuing is
+   Caddy's decision, not the installer's. The only file the installer *moves* is
+   under an explicit `--force-reissue`, and it moves rather than deletes.
+3. **.env is rewritten, not appended** (existing behaviour: `mv -f` then
+   `chmod 600`). New keys are added once; an existing value is preserved and
+   printed as "already set", exactly as `prompt_secret` does today.
+4. **Token file is never rewritten.** If the path exists with the right mode it
+   is accepted; if it is missing, the installer stops before rendering anything.
+5. **Re-run with `TLS_ENABLED=no`** removes the managed TLS region, drops the
+   `443` publishes and the `secrets:` stanza, and leaves certificates on disk.
+6. **Compose validation gates every render**: `docker compose config -q` runs
+   before the file is moved into place; a broken render aborts with the previous
+   file intact.
+
+### 8.5 Validation rules
+
+| Input | Rule | Failure |
+|---|---|---|
+| `TLS_DOMAIN` | Lowercase, 1-253 chars, at least two labels, only `a-z 0-9 -` and `.`, no leading/trailing hyphen, not an IP, not `.local` or `.lan`, not equal to `LOCAL_DOMAIN` | `die` with the reason |
+| `ACME_EMAIL` | Exactly one `@`, non-empty local part, domain with at least one dot and no whitespace | `die` |
+| `TLS_VALIDATION` | One of `dns`, `http`, `tlsalpn` | `die` |
+| `ACME_DNS_PROVIDER` | One of `cloudflare`, `rfc2136` | `die` |
+| `ACME_CA` | `staging`, `production`, or an `https://` URL | `die` |
+| `HYBRID_AI_TLS_TOKEN_FILE` | Absolute path, exists, regular file, not a symlink out of `/etc/hybrid-ai`, mode `0600` or stricter, owner root, not under `HYBRID_AI_APP_DIR` | `die` with the exact fix command |
+| `TLS_DOMAIN` + `TLS_VALIDATION=http` | Warn loudly: HTTP-01 cannot issue a wildcard, so the installation degrades to three per-host certificates and no wildcard | `warn`, continue |
+| `TLS_DOMAIN` + no port forward, `TLS_VALIDATION=dns` | Nothing to check locally; the CA reports it | -- |
+| DNS resolution of `TLS_DOMAIN` | If `getent hosts` fails, warn and print the dnsmasq lines from section 3.2 (same as today's subdomain check at line 1176) | `warn` |
+
+### 8.6 Behaviour when TLS is disabled
+
+**Requirement: with `TLS_ENABLED=no`, install behaviour is byte-for-byte
+unchanged.** Concretely:
+
+- No new interactive prompt appears (the TLS question defaults to `no` and is
+  the only new prompt; with `--non-interactive` and no `TLS_ENABLED`, it takes
+  `no` without asking).
+- `status/Caddyfile` renders identically to the checked-in file today: same
+  global block, same three `http://` sites, same snippets.
+- `docker-compose.yml` renders identically: `caddy:2.8-alpine`, `"80:80"` only,
+  no `secrets:`, no `build:`.
+- `status/app.py` gains the endpoint but its behaviour with TLS off is inert:
+  `/status/tls` returns HTTP `200` with
+  `{"enabled": false, "overall": "skipped", "exit_code": 3, ...}`, and no other
+  endpoint changes its answer, because a TLS check that is switched off is not a
+  fault. The CLI `scripts/tls-check.sh`
+  exits `3` in that state, and `doctor.sh` treats `3` as "skipped", not as a
+  failure. That difference is deliberate: an HTTP monitor must not page, a CLI
+  must be able to say "I did not do this".
+- `install.sh` prints the same URLs it prints today.
+- New `.env` keys are written with their defaults, so a later `--tls` run has
+  something to read.
+
+### 8.7 Secret hygiene rules (non-negotiable)
+
+- No secret value may reach git. `.gitignore` already covers `.env`, `*.key`,
+  `*.pem`, `*.crt`; the token lives outside the repo.
+- No secret may reach a world-readable path. Token file `0600 root`, directory
+  `0700 root`; `install.log` is `0600`; the rendered `.env` is `0600`.
+- No secret may reach shell history. The installer never accepts a token value
+  as an argument; the operator creates the file with an editor or a pipe, and
+  the documented `curl` verification uses `$(sudo cat …)` only in a throwaway
+  shell with `HISTFILE=/dev/null`.
+- No secret may reach process arguments. `docker compose` uses a file-backed
+  `secrets:` entry, not `environment:`. `ps auxww` shows no token.
+- No secret may reach an image layer. `caddy/Dockerfile` copies one binary and
+  nothing else; there is no `ARG` or `ENV` for credentials.
+- Rotation is a file replacement plus `docker compose up -d proxy`; it does not
+  require an edit to any tracked file.
+
+---
+
+## 9. Controls that must not be weakened
+
+Restated explicitly, because every later task will be judged against this list.
+
+1. **The trusted-network allowlist in `status/Caddyfile` stays as it is.** The
+   loopback ranges, the RFC 1918 ranges, the `100.64.0.0/10` mesh range
+   (rendered `[IP_ADDRESS]/10` in the checked-in file) and
+   `fd7a:115c:a1e0::/48` all remain, and every HTTPS site imports
+   `(trusted_only)` at site level *and* inside each protected `handle`.
+   **HTTPS is not authentication.** A certificate proves the server to the
+   client; it says nothing about the client. Adding TLS is never a reason to
+   remove or widen the allowlist.
+2. **Loopback-only binds stay loopback-only.** `ollama` publishes
+   `127.0.0.1:11434`, `status` publishes nothing, `openhands` stays on
+   `127.0.0.1:3001`. The Caddy admin endpoint, if enabled, binds
+   `localhost:2019` inside the container and is never published. Port 443 is the
+   only new listener, and it is behind the same allowlist as port 80.
+3. **No secrets in git.** See 8.7. The token never enters the repo, the image,
+   `.env`, an argument, or a log.
+4. **The OpenHands credential stays read-only.** The agent's repo clone remains
+   mounted read-only into Hermes at `/agent-repo`, and `OPENHANDS_WORKSPACE`
+   remains outside the deployment directory so a sandbox cannot read `.env`.
+   Nothing in this design gives the proxy or the status app access to that
+   credential, and nothing widens the mount.
+5. **Container hardening stays.** `no-new-privileges:true` on the proxy, the
+   128 MB / 0.5 CPU caps, `restart: unless-stopped`, the capped `json-file`
+   logging, read-only Caddyfile mount, read-only Docker socket for `status`.
+   The one addition, `build:`, does not change run-time privileges.
+6. **The status app's read-only posture stays.** It keeps the read-only Docker
+   socket, the read-only `webui_data` mount, and the read-only log mounts. The
+   new `/status/tls` endpoint only opens outbound TLS connections to
+   `proxy:443`; it reads no files, reads no key material, and writes nothing.
+   The certificate directory is deliberately **not** mounted into `status`,
+   because it holds private keys.
+7. **Certificate private keys are never readable by anything but the proxy.**
+   Storage is `0700` directories and `0600` files, owned by container root.
+   Health checks use a TLS handshake, not the key files.
+
+---
+
+## 10. Consolidated file list
+
+Everything this design creates or changes. "Repo" means this git repository;
+"host" means the Raspberry Pi's filesystem, outside git.
+
+| # | Path | Repo / host | Action | Purpose | Permissions / owner |
+|---|---|---|---|---|---|
+| 1 | `docs/tls-acme-design.md` | repo | **create** | This document | `0644`, tracked |
+| 2 | `status/Caddyfile` | repo | modify | Add `https://` site blocks, `(tls_dns)` snippet, `http://` 308 redirect site, global `email`/`acme_ca`/`auto_https` vars, `admin localhost:2019`, `(secure_headers)` imports on HTTPS only. Keep `(trusted_only)` unchanged everywhere. | `0644` |
+| 3 | `status/Caddyfile.tmpl` | repo | **create** | Managed-region template so the installer can render TLS/non-TLS variants idempotently (8.4) | `0644` |
+| 4 | `docker-compose.yml` | repo | modify | Proxy `build:`/`image:`, `443:443` + `443:443/udp` publishes, `secrets:` entry and top-level `secrets:` block, `TLS_*`/`ACME_*` env; `status` service gains `TLS_ENABLED`/`TLS_HOSTS`/`TLS_PROBE_ADDR` | `0644` |
+| 5 | `docker-compose.yml.tmpl` | repo | **create** | Same managed-region pattern for the TLS / non-TLS compose variants | `0644` |
+| 6 | `install.sh` | repo | modify | New flags (8.2), TLS prompts after `LOCAL_DOMAIN` (8.1), validation (8.5), rendering + idempotency (8.3/8.4), `--dry-run`, DNS verification for `TLS_DOMAIN`, dual URL printing (7.4), `--help` text | `0755` |
+| 7 | `scripts/lib/tls.sh` | repo | **create** | Installer helper sourced by `install.sh`: argument parsing for `--tls-*`, prompt text from 1.4, input validation, token-file checks, template rendering, compose/Caddyfile validation, dry-run output. Keeps `install.sh` readable. | `0644` (sourced, not executed) |
+| 8 | `scripts/tls-check.sh` | repo | **create** | Certificate health CLI: live handshake per hostname, thresholds 14/7 days, exit codes 0/1/2/3 (6.2), one-line audit record to `${HYBRID_AI_LOG_DIR}/tls-check.log`, `--quiet`. Called by `doctor.sh` and the timer. | `0755` |
+| 9 | `status/app.py` | repo | modify | `TLS_*` constants, `collect_tls_status()`, `GET /status/tls`, `"tls"` key in `/status/api`, TLS clause in `/status/health-summary`, TLS row in `/status` and `/hub`, endpoint list comment at line ~53. No new writes, no key access. | `0644` |
+| 10 | `doctor.sh` | repo | modify | Call `scripts/tls-check.sh`, map exit `1` to warn, `2`/`3` to its own failure/skip handling, so one command still diagnoses everything | `0755` |
+| 11 | `deploy/hybrid-ai-tls-check.service` | repo | **create** | Daily read-only watchdog unit (5.2): `Type=oneshot`, `NoNewPrivileges=yes`, `ProtectSystem=strict`, same `OnFailure=` target as `hybrid-ai-check.service` | `0644` |
+| 12 | `deploy/hybrid-ai-tls-check.timer` | repo | **create** | `OnCalendar=*-*-* 06:10:00`, `Persistent=true` | `0644` |
+| 13 | `caddy/Dockerfile` | repo | **create** | `xcaddy` build of Caddy 2.8.4 with `dns.providers.cloudflare` + `dns.providers.rfc2136`, pinned versions, with a build-time `caddy list-modules` gate (2.3) | `0644` |
+| 14 | `caddy/.dockerignore` | repo | **create** | Keep the build context to one file; nothing from the repo or any secret can enter a layer | `0644` |
+| 15 | `.env.example` | repo | modify | Document `TLS_ENABLED`, `TLS_DOMAIN`, `ACME_EMAIL`, `ACME_CA`, `TLS_VALIDATION`, `ACME_DNS_PROVIDER`, `HYBRID_AI_TLS_TOKEN_FILE`, `TLS_HOSTS`, `ACME_AUTO_HTTPS`, `CADDY_IMAGE` -- **paths and defaults only, no token** | `0644` |
+| 16 | `REPO_MAP.md`, `CODE_INDEX.md` | repo | regenerate | Produced by the agent-context workflow, not by hand; listed so the build task runs it | generated |
+| 17 | `/etc/hybrid-ai/acme/cloudflare_dns_token` | host | **create (operator)** | Cloudflare API token, `Zone:DNS:Edit` + `Zone:Zone:Read` on `daemonhub.dev` only | `0600`, `root:root`; parent dir `0700 root:root` |
+| 18 | `/etc/hybrid-ai/acme/rfc2136_key_secret` | host | create (operator, only for the RFC 2136 provider) | TSIG secret for dynamic DNS updates | `0600`, `root:root` |
+| 19 | `/etc/dnsmasq.d/05-hybrid-ai.conf` | host (Pi-hole) | **create** | Split-horizon rewrite for `daemonhub.dev` (3.2). Host state, not a repo file. | `0644`, `root:root`; read by `pihole-FTL` |
+| 20 | `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/` | host | created by Caddy | Certificate and key storage; `acme-v02…` and `acme-staging-v02…` subdirectories per CA | `0700` dirs, `0600` files, `root:root` (container root) |
+| 21 | `${HYBRID_AI_LOG_DIR}/tls-check.log` | host | created by `tls-check.sh` | Append-only audit record of every issuance and renewal observation | `0600`, installing user |
+| 22 | `${HYBRID_AI_LOG_DIR}/install.log` | host | appended by `install.sh` | Existing event log; gains `tls_enabled` / `tls_cert_issued` events, never a token | `0600` |
+
+Not changed by this design, deliberately: `openhands/docker-compose.openhands.yml`,
+`hermes/`, `openwebui/`, `backup/`, `runpod/`, `.gitignore` (already covers the
+relevant patterns), `SECURITY.md`.
+
+---
+
+## 11. Secrets table
+
+No secret value appears in this document, and none may appear in any file this
+design touches.
+
+| Secret | What it is | Where it is stored | Permissions | Who reads it | If leaked |
+|---|---|---|---|---|---|
+| Cloudflare ACME API token | Zone-scoped API token: `Zone:DNS:Edit` + `Zone:Zone:Read` on `daemonhub.dev` | `/etc/hybrid-ai/acme/cloudflare_dns_token` (host); mounted read-only at `/run/secrets/cloudflare_dns_token` | `0600 root:root` on host; `0444` on an in-memory mount inside the proxy container | `caddy` (the proxy container) only, via `{file./run/secrets/cloudflare_dns_token}` | Attacker can create/change/delete **any** record in `daemonhub.dev`, redirect all traffic for the zone, and obtain certificates for any name in it. Cannot touch other zones, cannot read account data, cannot reach the Pi, cannot escalate to account takeover (2.7). Rotate: new token, replace the file, `docker compose up -d proxy`. |
+| RFC 2136 TSIG secret | HMAC key for dynamic DNS updates | `/etc/hybrid-ai/acme/rfc2136_key_secret` (host); `/run/secrets/rfc2136_key_secret` | Same as above | `caddy` only | Attacker can update records in the single zone the TSIG key is authorised for on that nameserver. Cannot read the zone, cannot update other zones, no host access. Rotate: regenerate TSIG on both sides. |
+| `WEBUI_SECRET_KEY` (existing) | Open WebUI session signing key | `$ENV_FILE` | `0600` | `open-webui` | Existing risk, unchanged by this design. Not used by TLS. |
+| `OPENROUTER_API_KEY` (existing) | Inference API key | `$ENV_FILE` | `0600` | `open-webui`, `openhands`, `hermes` | Existing risk, unchanged. Not used by TLS. |
+| `RUNPOD_API_KEY` (existing) | RunPod control-plane key | `$ENV_FILE` | `0600` | `install.sh`, `openwebui` pipe | Existing risk, unchanged. Not used by TLS. |
+| `ACME_EMAIL` | **Not a secret.** Account contact address | `$ENV_FILE`, rendered into the Caddyfile | `0600` file, `0644` config | `caddy` | Public metadata in the issued certificate's CA account and in CT logs. No access granted. |
+| Certificate private keys | Per-host private keys | `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/` | `0600`, `0700` dirs | `caddy` only; **not** mounted into `status` | Attacker can impersonate the site to clients that do not check the chain and can decrypt recorded traffic to that site if they also control the network path. Cannot reach any service credential. Rotate: delete the host directory and let Caddy reissue (section 5.4 step 4). |
+| `TLS_HOSTS`, `TLS_DOMAIN`, `ACME_CA`, `TLS_VALIDATION`, `ACME_DNS_PROVIDER` | **Not secrets.** Configuration | `$ENV_FILE`, compose env | `0600` file | `caddy`, `status` | Reveal hostnames and the CA in use. No access granted. |
+
+---
+
+## 12. First-time enablement runbook for the current host
+
+Target: the existing `jarvis.lan` Pi install, currently serving HTTP on port 80
+with `LOCAL_DOMAIN=jarvis.lan`. Staging first, production last, `jarvis.lan`
+untouched throughout.
+
+Each step lists the command and the expected output. Stop at the first
+unexpected result and follow the rollback in 7.6.
+
+### Step 1 -- Pre-flight, no changes
+
+```bash
+cd "${HYBRID_AI_APP_DIR:-$HOME/hybrid-ai}"
+git status --short          # expected: clean, or only files you intend to change
+docker compose ps           # expected: ollama, open-webui, status, hybrid-ai-proxy Up/healthy
+curl -sS http://jarvis.lan/status/healthz   # expected: ok
+ss -lntp | grep -E ':(80|443)\s'            # expected: 80 only (docker-proxy)
+```
+
+### Step 2 -- Lower DNS TTLs (Cloudflare dashboard)
+
+Set every `daemonhub.dev` record to TTL 300. Wait at least one hour before
+Step 3.
+
+Expected: dashboard shows 300 s. No command verifies this; propagation is
+observed in Step 8.
+
+### Step 3 -- Create and verify the API token
+
+Cloudflare -> My Profile -> API Tokens -> Create Token -> "Edit zone DNS"
+template -> Zone Resources: Include, Specific zone, `daemonhub.dev` -> add
+`Zone:Zone:Read` -> Create.
+
+```bash
+sudo install -d -m 0700 -o root -g root /etc/hybrid-ai/acme
+sudo install -m 0600 -o root -g root /dev/null /etc/hybrid-ai/acme/cloudflare_dns_token
+sudoedit /etc/hybrid-ai/acme/cloudflare_dns_token    # paste the token, save, quit
+sudo stat -c '%a %U:%G %n' /etc/hybrid-ai/acme /etc/hybrid-ai/acme/cloudflare_dns_token
+# expected:
+#   700 root:root /etc/hybrid-ai/acme
+#   600 root:root /etc/hybrid-ai/acme/cloudflare_dns_token
+```
+
+Then run the four verification checks from section 2.6. Expected: `"active"`,
+`1`, `0`, `403`.
+
+### Step 4 -- Build the Caddy image
+
+```bash
+docker compose build proxy
+# expected: build succeeds, and the build-time gate prints:
+#   dns.providers.cloudflare
+#   dns.providers.rfc2136
+docker image inspect hybrid-ai-caddy:2.8.4-dns --format '{{.Id}}'   # expected: sha256:…
+```
+
+A build failure here means a plugin version pin is wrong. Fix the pin; do not
+fall back to the stock image.
+
+### Step 5 -- Local split-horizon DNS
+
+```bash
+sudo tee /etc/dnsmasq.d/05-hybrid-ai.conf >/dev/null <<'EOF'
+address=/daemonhub.dev/192.168.1.50
+address=/hermes.daemonhub.dev/192.168.1.50
+address=/status.daemonhub.dev/192.168.1.50
+local=/daemonhub.dev/
+EOF
+sudo pihole restartdns
+# expected: "Restarting pihole-FTL..." and it comes back within a few seconds
+
+dig +short daemonhub.dev @127.0.0.1          # expected: 192.168.1.50
+dig +short hermes.daemonhub.dev @127.0.0.1   # expected: 192.168.1.50
+dig +short status.daemonhub.dev @127.0.0.1   # expected: 192.168.1.50
+```
+
+From a LAN laptop: `dig +short daemonhub.dev @192.168.1.50` -> `192.168.1.50`.
+A laptop on public DNS is expected to answer differently; that is section 3.4,
+not a fault.
+
+### Step 6 -- Public records
+
+With no port forward, add **nothing** except letting Caddy write the
+`_acme-challenge` TXT. If a port forward exists, also add `daemonhub.dev` and
+`*.daemonhub.dev` A records, **DNS only (grey cloud)**.
+
+```bash
+dig +short TXT _acme-challenge.daemonhub.dev @1.1.1.1   # expected: empty before Step 9
+```
+
+### Step 7 -- Dry run
+
+```bash
+./install.sh --tls --tls-domain daemonhub.dev --tls-email you@example.com \
+             --tls-validation dns --tls-dns-provider cloudflare \
+             --tls-acme-ca staging --dry-run
+# expected: a unified diff showing the new https:// blocks and the 443 publish,
+#           "compose config valid", "Caddyfile valid", and exit 0 with NO change
+git status --short          # expected: still clean
+```
+
+### Step 8 -- Enable TLS against staging
+
+```bash
+./install.sh --tls --tls-domain daemonhub.dev --tls-email you@example.com \
+             --tls-validation dns --tls-dns-provider cloudflare \
+             --tls-acme-ca staging
+# expected:
+#   [ OK ] .env written (0600).
+#   [ OK ] Caddyfile rendered with the HTTPS site blocks.
+#   [ OK ] 443 published.
+#   [ ! ] Certificate issued by the STAGING CA (not trusted by browsers yet).
+docker compose logs --since 3m proxy | grep -E '"logger":"tls"' | tail -5
+# expected: "obtaining certificate" ... "certificate obtained successfully" x4
+```
+
+### Step 9 -- Verify staging issuance and storage
+
+```bash
+docker compose exec proxy sh -c \
+  'ls /data/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/'
+# expected: daemonhub.dev  hermes.daemonhub.dev  status.daemonhub.dev  wildcard_.daemonhub.dev
+
+sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates"
+# expected: 700 root:root
+
+openssl s_client -connect 127.0.0.1:443 -servername daemonhub.dev </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -dates -ext subjectAltName
+# expected: issuer contains "STAGING"; SAN includes daemonhub.dev, *.daemonhub.dev
+```
+
+### Step 10 -- Verify every service (staging; expect browser warnings)
+
+```bash
+curl -ksS https://status.daemonhub.dev/status/healthz        # expected: ok
+curl -ksS https://daemonhub.dev/health                       # expected: ok
+curl -ksS https://daemonhub.dev/status/api | jq '.overall'   # expected: "ok"
+curl -ksS -o /dev/null -w '%{http_code}\n' https://hermes.daemonhub.dev/   # expected: 200
+curl -sSI http://daemonhub.dev/ | head -2                    # expected: 308 + Location: https://...
+curl -ksS -o /dev/null -w '%{http_code}\n' https://daemonhub.dev/status/tls  # expected: 200
+```
+
+Then prove the allowlist still holds: from a host outside the allowlist,
+`curl -sS --max-time 5 https://daemonhub.dev/` must fail to return content.
+
+### Step 11 -- Switch to production
+
+```bash
+sed -i 's|^ACME_CA=.*|ACME_CA=https://acme-v02.api.letsencrypt.org/directory|' .env
+docker compose up -d proxy
+docker compose logs --since 3m proxy | grep -E '"logger":"tls"' | tail -5
+# expected: new orders against acme-v02, "certificate obtained successfully"
+
+openssl s_client -connect 127.0.0.1:443 -servername hermes.daemonhub.dev </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -dates -ext subjectAltName
+# expected: issuer "O = Let's Encrypt", verify return code: 0
+```
+
+### Step 12 -- Health check and audit line
+
+```bash
+./scripts/tls-check.sh; echo "exit=$?"
+# expected: 3 OK lines with ~90 days, then exit=0
+tail -3 "${HYBRID_AI_LOG_DIR}/tls-check.log"
+# expected: one ts=… line per host with days≈90 severity=ok
+./doctor.sh --quiet; echo "exit=$?"      # expected: exit=0
+```
+
+### Step 13 -- Dual-name verification, then announce
+
+```bash
+# Both names must serve. HTTPS first, the fallback second.
+for u in https://daemonhub.dev/ https://hermes.daemonhub.dev/ \
+         https://status.daemonhub.dev/status/healthz \
+         http://jarvis.lan/status/healthz http://hermes.jarvis.lan/; do
+  printf '%-52s ' "$u"
+  curl -skS -o /dev/null -w '%{http_code}\n' "$u"
+done
+# expected: 200 200 200 200 200   (all five)
+```
+
+Update bookmarks and the release note. `jarvis.lan` stays published and listed
+in the installer output.
+
+### Step 14 -- Keep the rollback armed for one week
+
+Leave `status/Caddyfile` and the previous `docker-compose.yml` in git history so
+reverting is a `git checkout` of two files. The rollback trigger and steps are
+section 7.6. If nothing fires in a week, lower the rigour: keep the daily
+`tls-check` timer and stop watching manually.
+
+---
+
+## 13. Summary of the calls made
+
+Short restatement, so a reviewer can disagree with a specific decision rather
+than with the whole document.
+
+1. **DNS-01 by default**, because the host has no inbound ports and the owner
+   validates by DNS. HTTP-01/TLS-ALPN-01 remain available and are the right
+   answer only for a directly reachable host that must not hold a DNS token.
+2. **Cloudflare first, RFC 2136 second.** Cloudflare for propagation speed and
+   an existing zone; RFC 2136 because a TSIG key is zone-scoped by the server.
+3. **A locally built `xcaddy` image** pinned to Caddy 2.8.4 and plugin
+   versions, with a build-time `list-modules` gate. The stock image is never
+   used for TLS.
+4. **Zone-scoped credential, accepted residual risk.** Cloudflare has no
+   per-record permissions; the minimum is one zone with DNS edit. The zone is
+   dedicated to this stack, and the CNAME-delegation upgrade path is documented.
+5. **Token as a file-backed compose secret**, read with `{file.…}`. Never an env
+   var, never an argument, never in the image.
+6. **Split horizon via dnsmasq `address=/daemonhub.dev/<ip>`**, a host file
+   outside the repo, with the wildcard form explained and the apex plus
+   per-service entries written out.
+7. **Explicit `https://` site blocks, explicit `http://` 308 redirects, and
+   `auto_https off` retained** for DNS-01. `(trusted_only)` and
+   `(secure_headers)` preserved; the allowlist is not widened.
+8. **Caddy's own renewal, plus a read-only daily watchdog.** No second issuer.
+   Reload in place, never restart, with a loopback-only admin endpoint to make
+   reload possible.
+9. **Certificate health by live handshake**, with 14-day WARN and 7-day
+   CRITICAL thresholds, exit codes 0/1/2/3, and a new `GET /status/tls`
+   endpoint that never reads keys.
+10. **Dual-name cutover, `jarvis.lan` kept.** Rollback is removal of additions,
+    with a concrete five-condition trigger.
+11. **`TLS_ENABLED` defaults to `no`,** and a disabled install stays
+    byte-for-byte as it is today.
