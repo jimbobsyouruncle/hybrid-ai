@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/hybrid-ai-tls-check.service
+# PURPOSE (plain English):
+#   Runs the TLS certificate health check once, on demand, as the deploying
+#   user. The script connects to the live TLS endpoint with SNI, reads the
+#   certificate that is actually served, and records the result.
+#
+#   The unit records the issuance/renewal audit line FIRST (tls-audit.sh
+#   compares the certificate serial against the last one it saw, so a changed
+#   serial is proof of a renewal), then checks health (tls-check.sh probes the
+#   live endpoint and alerts when a certificate is close to expiry).
+#
+#   THIS UNIT IS A READ-ONLY WATCHDOG. CADDY ITSELF ISSUES AND RENEWS: Caddy
+#   renews inside its ~30-day window and swaps the new certificate in memory,
+#   with no reload and no restart. This timer therefore NEVER issues, NEVER
+#   renews, NEVER reloads anything and NEVER restarts anything. It only reads
+#   what is stored and what the endpoint serves, appends audit lines, and
+#   alerts when a certificate is close to expiry.
+#
+#   The repository path is not fixed, so this unit deliberately carries no
+#   Documentation= line: a stale absolute path is worse than none.
+#
+#   SCHEDULE: hybrid-ai-tls-check.timer runs it daily at 06:10. install.sh
+#   installs and enables that timer ONLY when TLS is enabled.
+#
+#   NO Restart= AT ALL, deliberately: a failing check must not loop. A failure
+#   stays visible in `systemctl --user status hybrid-ai-tls-check.service` and
+#   in the journal.
+#
+#   Hardening is tight because the job is read-only toward the host: the only
+#   writable path is the log directory the audit append needs.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=hybrid-ai TLS certificate health check (read-only watchdog)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO_DIR__
+# Audit FIRST: it is the only record that a certificate was issued or renewed.
+# The leading '-' is load-bearing: tls-audit.sh exits 3 before first issuance
+# and 1 on unreadable storage, and without the prefix systemd would abort the
+# unit there and never run the health check, so no verdict and no alert.
+ExecStart=-/usr/bin/env bash __REPO_DIR__/scripts/tls-audit.sh
+ExecStart=/usr/bin/env bash __REPO_DIR__/scripts/tls-check.sh --quiet --audit --alert
+TimeoutStartSec=5min
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The leading '-' makes systemd tolerate the directory not existing yet.
+ReadWritePaths=-__REPO_DIR__/logs
+# The other documented log directory. ProtectSystem=strict makes /var/log
+# read-only, so the audits could not append there without this entry.
+ReadWritePaths=-/var/log/hybrid-ai
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+Nice=19
+
+[Install]
+WantedBy=default.target

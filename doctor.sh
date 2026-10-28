@@ -1754,6 +1754,54 @@ fi
 unset LL_SKIP
 
 # ---------------------------------------------------------------------------
+# 9. TLS certificates
+#
+# Certificate health is only meaningful when TLS is enabled, so this section is
+# skipped entirely on a plain HTTP install. When TLS is on, scripts/tls-check.sh
+# probes the live endpoint and reports how many days the served certificate has
+# left. The script is read-only, so doctor.sh stays read-only.
+# ---------------------------------------------------------------------------
+section "TLS certificates"
+
+TLS_ENABLED_VAL="$(env_get TLS_ENABLED | tr '[:upper:]' '[:lower:]')"
+case "$TLS_ENABLED_VAL" in
+  yes|true|1|on) TLS_IS_ON=1 ;;
+  *)             TLS_IS_ON=0 ;;
+esac
+
+if (( ! TLS_IS_ON )); then
+  (( QUIET )) || printf '  %s-%s skipped (TLS disabled)\n' "$C_DIM" "$C_RST"
+elif [[ ! -f "${SCRIPT_DIR}/scripts/tls-check.sh" ]]; then
+  (( QUIET )) || printf '  %s-%s skipped (scripts/tls-check.sh not installed)\n' "$C_DIM" "$C_RST"
+else
+  # Hand the check the values env_get already resolved. env_get accepts a value
+  # from EITHER resolved file, while --env-file names exactly one, so passing
+  # the values keeps the watchdog and this section from disagreeing.
+  TLS_OUT="$(TLS_ENABLED=yes \
+               TLS_HOSTS="$(env_get TLS_HOSTS)" \
+               LOCAL_DOMAIN="$(env_get LOCAL_DOMAIN)" \
+               TLS_PROBE_ADDR="$(env_get TLS_PROBE_ADDR)" \
+               bash "${SCRIPT_DIR}/scripts/tls-check.sh" --quiet 2>&1)"
+  TLS_RC=$?
+  # The last line is the script's own one-line summary; it names the overall
+  # severity and the counts, which is exactly what the operator needs next.
+  TLS_SUMMARY="$(printf '%s\n' "$TLS_OUT" | tail -1)"
+  case "$TLS_RC" in
+    0) pass "served TLS certificate(s) healthy (${TLS_SUMMARY})" ;;
+    1) warn "a served TLS certificate is inside the warning window (${TLS_SUMMARY})" \
+            "Inspect with: ${SCRIPT_DIR}/scripts/tls-check.sh  (Caddy renews at ~30 days; check the proxy's logs if the serial has not changed)" ;;
+    2) fail "a served TLS certificate is expired or inside the critical window (${TLS_SUMMARY})" \
+            "Run ${SCRIPT_DIR}/scripts/tls-check.sh for the host and serial, then check that the proxy container is running and can reach the ACME directory." ;;
+    3) fail "the TLS certificate check could not validate a certificate (${TLS_SUMMARY})" \
+            "Run ${SCRIPT_DIR}/scripts/tls-check.sh for the full report; a staging CA also lands here by design." ;;
+    *) warn "the TLS certificate check returned an unexpected exit code (${TLS_RC}): ${TLS_SUMMARY}" \
+            "Run ${SCRIPT_DIR}/scripts/tls-check.sh by hand and inspect its output." ;;
+  esac
+  unset TLS_OUT TLS_SUMMARY
+fi
+unset TLS_ENABLED_VAL TLS_IS_ON
+
+# ---------------------------------------------------------------------------
 # Post-deploy verification log (WARNING ONLY)
 # ---------------------------------------------------------------------------
 # scripts/deploy-remote.sh starts scripts/run-post-deploy-verify.sh in a

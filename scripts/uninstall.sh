@@ -310,6 +310,8 @@ USER_UNITS=(
   hybrid-ai-backup.timer
   hybrid-ai-check.service
   hybrid-ai-check.timer
+  hybrid-ai-tls-check.service
+  hybrid-ai-tls-check.timer
 )
 FIREWALL_CHAIN="DOCKER-USER"
 FIREWALL_TAG="hybrid-ai-sandbox-egress"

@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# FILE: deploy/hybrid-ai-tls-check.timer
+# PURPOSE (plain English):
+#   Runs the read-only TLS certificate health check daily at 06:10.
+#
+#   Persistent=true plus an ENABLED timer is what makes it run after a reboot:
+#   systemd remembers the last run and fires a missed run once the host is back
+#   up. Verify it after a reboot with:
+#     systemctl --user list-timers hybrid-ai-tls-check.timer
+#     systemctl --user is-enabled hybrid-ai-tls-check.timer
+#
+#   This timer NEVER issues, renews, reloads or restarts anything. Caddy owns
+#   issuance and renewal: it renews inside its ~30-day window and swaps the
+#   certificate in memory, with no reload and no restart.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Daily hybrid-ai TLS certificate health check
+
+[Timer]
+OnCalendar=*-*-* 06:10:00
+Persistent=true
+RandomizedDelaySec=5min
+Unit=hybrid-ai-tls-check.service
+
+[Install]
+WantedBy=timers.target

@@ -1818,6 +1818,12 @@ BACKUP_UNITS=(
   hybrid-ai-backup.timer
   hybrid-ai-check.service
   hybrid-ai-check.timer
+  # TLS certificate health watchdog. Its templates live in deploy/, not
+  # backup/; the install loop below falls back to that directory. The timer is
+  # only ENABLED when TLS_ENABLED is true (see the enable block below), so a
+  # TLS-off install keeps exactly the schedule it had.
+  hybrid-ai-tls-check.service
+  hybrid-ai-tls-check.timer
 )
 SYSTEM_UNITS=(
   hybrid-ai-backup-capture.service
@@ -2016,6 +2022,8 @@ install_backup_scheduler() {
   log "Installing backup systemd user units..."
   for unit in "${BACKUP_UNITS[@]}"; do
     source_file="${APP_DIR}/backup/${unit}"
+    # The TLS watchdog units live in deploy/ with the other host units.
+    [[ -f "$source_file" ]] || source_file="${APP_DIR}/deploy/${unit}"
     target_file="${unit_dir}/${unit}"
 
     if [[ ! -f "$source_file" ]]; then
@@ -2091,6 +2099,32 @@ install_backup_scheduler() {
     event "check_timer_verification_failed"
     return 1
   fi
+
+  # TLS certificate watchdog. Enabled ONLY when TLS is on, so a TLS-off install
+  # is behaviourally identical to before. The units are installed above either
+  # way; an inactive timer does nothing.
+  tls_enabled_val="$(grep -E '^[[:space:]]*TLS_ENABLED=' "${HYBRID_AI_STACK_ENV_FILE:-/dev/null}" 2>/dev/null | tail -1 | cut -d= -f2-)"
+  tls_enabled_val="${tls_enabled_val//\"/}"; tls_enabled_val="${tls_enabled_val//\'/}"
+  tls_enabled_val="$(printf '%s' "$tls_enabled_val" | tr '[:upper:]' '[:lower:]')"
+  case "$tls_enabled_val" in
+    yes|true|1|on)
+      if systemctl --user enable --now hybrid-ai-tls-check.timer >/dev/null 2>&1; then
+        ok "TLS certificate watchdog timer enabled and active (daily 06:10)."
+      else
+        warn "TLS certificate watchdog timer could not be enabled or started."
+        event "tls_check_timer_failed"
+      fi
+      if ! systemctl --user is-enabled hybrid-ai-tls-check.timer >/dev/null 2>&1 ||
+         ! systemctl --user is-active hybrid-ai-tls-check.timer >/dev/null 2>&1; then
+        warn "TLS certificate watchdog timer verification failed."
+        event "tls_check_timer_verification_failed"
+      fi
+      ;;
+    *)
+      printf '  (skipped: TLS disabled)\n'
+      ;;
+  esac
+  unset tls_enabled_val
 
   # Linger requires root. Do not invoke sudo from this installer because that
   # would make non-interactive deployments dependent on sudo policy.
