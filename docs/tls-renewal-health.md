@@ -102,11 +102,11 @@ script compares certificate serials instead. A NEW SERIAL IS PROOF OF A RENEWAL.
 `scripts/tls-audit.sh` walks Caddy's managed storage:
 
 ```
-<data>/webui_data/caddy/caddy/certificates/<acme-ca-dir>/<host>/<host>.crt
+<data>/caddy/caddy/certificates/<acme-ca-dir>/<host>/<host>.crt
 ```
 
 That root is derived in ONE place, `scripts/lib/hybrid-ai-env.sh`, as
-`HYBRID_AI_CADDY_CERT_ROOT="${HYBRID_AI_WEBUI_DATA_DIR}/caddy/caddy/certificates"`.
+`HYBRID_AI_CADDY_CERT_ROOT="${HYBRID_AI_CADDY_DATA_DIR}/caddy/certificates"`.
 `tls-audit.sh` and `tls-dry-run-renewal.sh` both default their certificate root
 to that exported value (`--cert-root` still wins). If Caddy's `/data` mount ever
 moves, the helper constant is the only line to edit; no script hardcodes the

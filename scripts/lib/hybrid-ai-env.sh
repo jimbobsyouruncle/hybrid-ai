@@ -387,15 +387,18 @@ hybrid_ai_env_load() {
   HYBRID_AI_HERMES_DATA_DIR="${HYBRID_AI_DATA_DIR}/hermes_data"
   HYBRID_AI_WEBUI_DATA_DIR="${HYBRID_AI_DATA_DIR}/webui_data"
   HYBRID_AI_OLLAMA_DATA_DIR="${HYBRID_AI_DATA_DIR}/ollama_data"
+  # Caddy's /data lives beside webui_data, NOT inside it: the status container
+  # mounts webui_data read-only, so ACME private keys must not sit in that tree.
+  HYBRID_AI_CADDY_DATA_DIR="${HYBRID_AI_DATA_DIR}/caddy"
   # Caddy's managed ACME storage, defined ONCE. Anything that needs to know where
-  # issuance and renewal land reads this, so a future relocation of Caddy's
-  # /data is a one-line change here rather than a hunt through the scripts.
-  HYBRID_AI_CADDY_CERT_ROOT="${HYBRID_AI_WEBUI_DATA_DIR}/caddy/caddy/certificates"
+  # issuance and renewal land reads this, so a relocation of Caddy's /data is a
+  # one-line change here rather than a hunt through the scripts.
+  HYBRID_AI_CADDY_CERT_ROOT="${HYBRID_AI_CADDY_DATA_DIR}/caddy/certificates"
   HYBRID_AI_INSTALL_LOG="${HYBRID_AI_LOG_DIR}/install.log"
   HYBRID_AI_BACKUP_STAGING_DIR="${HYBRID_AI_WORK_DIR}/.backup-staging"
   HYBRID_AI_RESTORE_WORK_DIR="${HYBRID_AI_WORK_DIR}/.restore-work"
   export HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR HYBRID_AI_OLLAMA_DATA_DIR
-  export HYBRID_AI_CADDY_CERT_ROOT
+  export HYBRID_AI_CADDY_DATA_DIR HYBRID_AI_CADDY_CERT_ROOT
   export HYBRID_AI_INSTALL_LOG HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR
 
   # BACKUP_LOG keeps its name. In user mode its default is unchanged:

@@ -73,6 +73,25 @@ else
   fail "TLS-off render is not idempotent"
 fi
 
+# Caddy /data isolation: the proxy bind source must be a sibling of webui_data
+# (${HYBRID_AI_DATA_DIR}/caddy), so once TLS is enabled ACME private keys land
+# OUTSIDE the tree the status container mounts read-only.
+off_compose="$WORK/off1/docker-compose.yml"
+mount_prefix="      - \${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}"
+proxy_data_line="${mount_prefix}/caddy:/data"
+status_ro_line="${mount_prefix}/webui_data:/data/webui_data:ro"
+if grep -Fxq -- "$proxy_data_line" "$off_compose" \
+   && ! grep -Fq -- 'webui_data/caddy' "$off_compose"; then
+  pass "Caddy /data is isolated: proxy bind source is …/caddy, outside webui_data"
+else
+  fail "Caddy /data is NOT isolated: proxy bind source is missing …/caddy or still under webui_data"
+fi
+if grep -Fxq -- "$status_ro_line" "$off_compose"; then
+  pass "status read-only webui_data mount line is present and byte-unchanged"
+else
+  fail "status read-only webui_data mount line changed or is missing"
+fi
+
 # --- TLS on ----------------------------------------------------------------
 TLS_ENABLED="yes"
 TLS_DOMAIN="daemonhub.dev"

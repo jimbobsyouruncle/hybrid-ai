@@ -79,6 +79,7 @@ check "WORK_DIR default is the repo dir" "$REPO" "$(resolve "$EMPTY" HYBRID_AI_W
 check "hermes_data keeps its name" "${REPO}/hermes_data" "$(resolve "$EMPTY" HYBRID_AI_HERMES_DATA_DIR)"
 check "webui_data keeps its name" "${REPO}/webui_data" "$(resolve "$EMPTY" HYBRID_AI_WEBUI_DATA_DIR)"
 check "ollama_data keeps its name" "${REPO}/ollama_data" "$(resolve "$EMPTY" HYBRID_AI_OLLAMA_DATA_DIR)"
+check "caddy data dir is a sibling of webui_data" "${REPO}/caddy" "$(resolve "$EMPTY" HYBRID_AI_CADDY_DATA_DIR)"
 check "install.log default" "${REPO}/install.log" "$(resolve "$EMPTY" HYBRID_AI_INSTALL_LOG)"
 check "backup.log default" "${REPO}/backup.log" "$(resolve "$EMPTY" BACKUP_LOG)"
 check "staging default" "${REPO}/.backup-staging" "$(resolve "$EMPTY" HYBRID_AI_BACKUP_STAGING_DIR)"
@@ -144,7 +145,7 @@ for v in HYBRID_AI_APP_DIR HYBRID_AI_ENV_FILE HYBRID_AI_STACK_ENV_FILE \
          HYBRID_AI_DATA_DIR \
          HYBRID_AI_LOG_DIR HYBRID_AI_WORK_DIR \
          HYBRID_AI_HERMES_DATA_DIR HYBRID_AI_WEBUI_DATA_DIR \
-         HYBRID_AI_OLLAMA_DATA_DIR HYBRID_AI_INSTALL_LOG \
+         HYBRID_AI_OLLAMA_DATA_DIR HYBRID_AI_CADDY_DATA_DIR HYBRID_AI_INSTALL_LOG \
          HYBRID_AI_BACKUP_STAGING_DIR HYBRID_AI_RESTORE_WORK_DIR \
          HYBRID_AI_HERMES_HOME_DIR HYBRID_AI_BACKUP_MODE \
          HYBRID_AI_POST_DEPLOY_VERIFY_CMD HYBRID_AI_POST_DEPLOY_VERIFY_LOG \
@@ -166,6 +167,7 @@ HYBRID_AI_WORK_DIR=${CLONE}
 HYBRID_AI_HERMES_DATA_DIR=${CLONE}/hermes_data
 HYBRID_AI_WEBUI_DATA_DIR=${CLONE}/webui_data
 HYBRID_AI_OLLAMA_DATA_DIR=${CLONE}/ollama_data
+HYBRID_AI_CADDY_DATA_DIR=${CLONE}/caddy
 HYBRID_AI_INSTALL_LOG=${CLONE}/install.log
 HYBRID_AI_BACKUP_STAGING_DIR=${CLONE}/.backup-staging
 HYBRID_AI_RESTORE_WORK_DIR=${CLONE}/.restore-work

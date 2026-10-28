@@ -296,8 +296,9 @@ read -r -p "  Type RESTORE to proceed: " confirm < /dev/tty
 # Stop the application
 #
 # More than one container touches the data being replaced: open-webui writes
-# webui.db and Chroma, the proxy writes Caddy state into webui_data/caddy, the
-# status page holds a read handle on webui.db, and Hermes writes hermes_data.
+# webui.db and Chroma, the proxy writes Caddy state into $HYBRID_AI_CADDY_DATA_DIR
+# ($HYBRID_AI_DATA_DIR/caddy), the status page holds a read handle on webui.db, and
+# Hermes writes hermes_data.
 # Stopping everything is robust to future containers being added.
 # ---------------------------------------------------------------------------
 if command -v docker >/dev/null 2>&1; then
@@ -451,7 +452,9 @@ else
 fi
 
 # Caddy needs this directory before the proxy starts again.
-mkdir -p "${HYBRID_AI_DATA_DIR}/webui_data/caddy"
+mkdir -p "${HYBRID_AI_CADDY_DATA_DIR}"
+chmod 700 "${HYBRID_AI_CADDY_DATA_DIR}"
+chown "$(id -u):$(id -g)" "${HYBRID_AI_CADDY_DATA_DIR}" 2>/dev/null || true
 
 # --- Home-directory state (~/.hermes, ~/.openhands) -------------------------
 # Offered, not forced: on an existing Pi the live copy is usually newer.

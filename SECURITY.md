@@ -564,7 +564,7 @@ Everything below is root-owned unless noted.
 | Path | Mode | Holds |
 |---|---|---|
 | `/opt/hybrid-ai` | 0755 | A clone of the public https remote at `origin/main`, fetched with hooks disabled and credential helpers cleared |
-| `/var/lib/hybrid-ai/` | 0755 | Durable data: `hermes_data`, `webui_data`, `ollama_data`, `openhands`, `hermes-home` |
+| `/var/lib/hybrid-ai/` | 0755 | Durable data: `hermes_data`, `webui_data`, `ollama_data`, `caddy`, `openhands`, `hermes-home` |
 | `/var/lib/hybrid-ai-agent` | 0755 | The OpenHands agent workspace (a clone). A SIBLING of the data dir, owned by `hybrid-ai`. Never inside `/var/lib/hybrid-ai` |
 | `/var/lib/hybrid-ai-repos` | 0755 | The read-only agent repo reference tree. A SIBLING of the data dir, owned by `hybrid-ai`. Never inside `/var/lib/hybrid-ai` |
 | `/var/log/hybrid-ai` | 0755 | `install.log`, `backup.log`, migration manifests |
@@ -572,6 +572,15 @@ Everything below is root-owned unless noted.
 | `/etc/hybrid-ai/hybrid-ai.env` | **0644** | The LAYOUT file: names and paths only, no secret. Readable by `hybrid-ai-backup` and `hybrid-ai-deploy` |
 | `/etc/hybrid-ai/stack.env` | 0600 | The STACK secrets, written only by `install.sh` |
 | `/etc/credstore/hybrid-ai-backup` | 0700 | `r2.env` and `repo-password`, mode 0600 |
+
+Caddy's `/data` — its managed ACME storage, and therefore the per-host TLS private
+keys once TLS is enabled — is `${HYBRID_AI_DATA_DIR}/caddy`, a SIBLING of `webui_data`.
+`install.sh` creates that directory as `0700`, owned by the installing user, and it is
+never group- or world-readable; Caddy's own subdirectories are `0700` and its key files
+`0600`, written by container-root. The `status` container mounts only `webui_data`
+read-only, so it cannot reach key material. The pre-relocation path
+`<data>/webui_data/caddy` is left in place as a harmless orphan, and any host that ever
+enabled TLS must inspect it for key material before deleting it.
 
 The bootstrap refuses an existing `/opt/hybrid-ai` that is not a clone of the
 public remote, or whose origin carries a credential.

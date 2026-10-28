@@ -37,8 +37,8 @@ usage() {
 Usage: tls-audit.sh [options]
 
   --cert-root PATH   Caddy managed certificate root
-                     (default $HYBRID_AI_DATA_DIR/webui_data/caddy/caddy/certificates,
-                      else <repo>/data/webui_data/caddy/caddy/certificates)
+                     (default $HYBRID_AI_DATA_DIR/caddy/caddy/certificates,
+                      else <repo>/data/caddy/caddy/certificates)
   --log-dir DIR      directory for the log and state file
                      (default $HYBRID_AI_LOG_DIR, else $HYBRID_AI_DATA_DIR/logs)
   --audit-log PATH   append-only audit log (default <log dir>/tls-audit.log)
