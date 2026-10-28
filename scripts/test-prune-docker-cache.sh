@@ -329,6 +329,13 @@ mkdir -p "$I_APP/scripts/lib" "$I_BIN" "$WORK/i-data" "$WORK/i-log" \
 cp "$REPO/install.sh" "$I_APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$I_APP/scripts/lib/"
 cp "$REPO/scripts/lib/build-gate.sh" "$I_APP/scripts/lib/"
+
+# install.sh sources scripts/lib/tls.sh and its TLS render step reads the
+# tracked templates, so the scratch app tree must carry them too.
+mkdir -p "$I_APP/status"
+cp "$REPO/scripts/lib/tls.sh" "$I_APP/scripts/lib/"
+cp "$REPO/status/Caddyfile.tmpl" "$I_APP/status/Caddyfile.tmpl"
+cp "$REPO/docker-compose.yml.tmpl" "$I_APP/docker-compose.yml.tmpl"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$I_APP/scripts/setup-agent-workspace.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$I_APP/scripts/sync-agent-repos.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$I_APP/scripts/check-hermes-nonroot.sh"

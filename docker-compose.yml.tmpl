@@ -1,0 +1,440 @@
+# ---------------------------------------------------------------------------
+# FILE: docker-compose.yml
+# PURPOSE (plain English):
+#   This file is the blueprint for the programs that run on your Raspberry Pi.
+#   Docker Compose reads it and starts each one as a "container" -- an isolated
+#   mini-environment that bundles an app with everything it needs.
+#
+#   The containers are:
+#     - ollama      : runs small AI models directly on the Pi
+#     - open-webui  : the chat website you actually open in your browser
+#     - status      : the health/diagnostics page
+#     - proxy       : Caddy, giving you one address for everything
+#
+#   A fifth, OpenHands, lives in openhands/docker-compose.openhands.yml and is
+#   layered on top as an overlay. See the note below.
+#
+# HOW IT IS RUN:
+#   Never run this by hand. The install.sh script runs it for you, because it
+#   first has to generate the .env file that fills in all the ${VARIABLES}
+#   below. If you run it manually you will get "variable is not set" warnings.
+#
+#   install.sh effectively calls:
+#     docker compose -f docker-compose.yml \
+#                    -f openhands/docker-compose.openhands.yml \
+#                    --env-file .env up -d --remove-orphans
+#
+#   ALWAYS PASS BOTH FILES. A "up -d --remove-orphans" without the overlay
+#   treats the OpenHands container as an orphan and DELETES it.
+#
+# THE PERSISTENCE CONTRACT (important -- read this):
+#   ./ollama_data  -> downloaded AI model files
+#   ./webui_data   -> your chat history, uploaded documents, and vector database
+#
+#   These are "bind mounts": real folders on the Pi's disk that get mapped
+#   into the containers. We deliberately did NOT use Docker "named volumes",
+#   because named volumes are hidden away in Docker's internals and are easy to
+#   delete by accident. With bind mounts, you can see your data, back it up
+#   with a normal file copy, and destroy/rebuild containers as often as you
+#   like without ever losing it.
+#
+#   Back up these two folders. Everything else in this repo is disposable.
+# ---------------------------------------------------------------------------
+
+services:
+
+  # -------------------------------------------------------------------------
+  # OLLAMA :: the local, lightweight AI engine
+  #
+  # Handles the cheap, fast, private work: routing decisions, short summaries,
+  # and turning your documents into embeddings (the numeric representations
+  # that make document search work). Anything it can answer never leaves the Pi.
+  # -------------------------------------------------------------------------
+  ollama:
+    # SECURITY: pin to an explicit version, not :latest. A mutable tag means
+    # `docker compose pull` can silently swap the image underneath you, which
+    # is both a supply-chain risk and an unreproducible-deploy problem.
+    # Bump deliberately after reading the release notes.
+    # Overridable so a version bump is an .env change plus a restart, not a
+    # commit. The default is still an explicit pin, never :latest.
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.34.4}
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      # "127.0.0.1:" at the front means ONLY this Pi can reach this port.
+      # Without that prefix, the port would be open to your whole network.
+      # Open WebUI still reaches it privately via the Docker network.
+      - "127.0.0.1:11434:11434"
+    volumes:
+      # Format is  <folder on the Pi>:<folder inside the container>
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/ollama_data:/root/.ollama
+    # A REAL, kernel-enforced memory cap. This is what actually stops a model
+    # from taking the whole machine down -- unlike OLLAMA_MAX_VRAM, which was
+    # never honoured by Ollama and has been removed upstream.
+    mem_limit: ${OLLAMA_MEM_LIMIT:-8g}
+    mem_reservation: 512m
+    # Leave roughly half a core for the OS, the UI, and the proxy. Without
+    # this, a busy inference run makes the whole Pi feel unresponsive,
+    # including the web UI you are waiting on. install.sh computes this from
+    # your actual core count and writes it to .env.
+    cpus: ${OLLAMA_CPUS:-3.5}
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      # How long a model stays resident. Reloading a 2 GB model from disk is
+      # slow; on a 16 GB Pi there is room to keep it warm much longer, which
+      # makes follow-up questions feel far faster than the first one.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      # One request at a time. On a bandwidth-bound machine, concurrency does
+      # not raise total throughput -- it just makes every request slower and
+      # multiplies KV cache memory.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      # Ollama caps every model at 4096 tokens unless told otherwise, which
+      # quietly truncates long chats and RAG context.
+      #
+      # VERSION DEPENDENCY: OLLAMA_CONTEXT_LENGTH is honoured only by newer
+      # Ollama servers. On an older pinned image it is silently ignored and
+      # you get 4096 regardless -- the same class of failure as the removed
+      # OLLAMA_MAX_VRAM. install.sh verifies this after start and warns if
+      # the setting did not take effect.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+      OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-1}
+      # f16 by default. q8_0 halves KV cache memory but requires flash
+      # attention to be active; when Ollama auto-disables it for an
+      # unsupported architecture, the runner panics instead of degrading.
+      # See the note in install.sh before opting in.
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-f16}
+      # --- Privacy: switch off every telemetry/analytics phone-home ---------
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+      OTEL_SDK_DISABLED: "true"
+    healthcheck:
+      # Docker runs this command periodically. If it fails repeatedly, Docker
+      # marks the container unhealthy -- which is how open-webui knows to wait.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      # Cap log size. An unbounded log file will eventually fill the disk.
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # OPEN WEBUI :: the chat interface and the brain of the control plane
+  #
+  # This is the website you visit at http://<pi-address>:3000. It stores your
+  # conversations, holds your uploaded documents, runs the vector database, and
+  # hosts the "pipe" function that reaches out to the cloud GPU when you pick
+  # the big model.
+  # -------------------------------------------------------------------------
+  open-webui:
+    # SECURITY: pinned for the same reason as Ollama above. ":main" tracks
+    # the development branch and can change on any push upstream.
+    image: ${WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.4}
+    container_name: open-webui
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        # Do not start until Ollama's healthcheck is passing, otherwise
+        # Open WebUI boots with an empty model list and confuses you.
+        condition: service_healthy
+    # Embedding documents is Open WebUI's most memory-hungry operation by far;
+    # this cap keeps a large upload from destabilising the whole machine.
+    mem_limit: ${WEBUI_MEM_LIMIT:-3g}
+    mem_reservation: 256m
+    cpus: ${WEBUI_CPUS:-2.0}
+    ports:
+      # Reachable from your whole network (and tailnet) on port 3000.
+      - "3000:8080"
+    volumes:
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data:/app/backend/data
+      # Mounted read-only (":ro"). This just makes the pipe source visible
+      # inside the container for reference; you still import it through the UI.
+      #
+      # NOTE: because the pasted function lives in webui_data/webui.db, editing
+      # the file here does NOT change what Open WebUI executes. Re-paste it.
+      - ./openwebui:/app/backend/data/functions_src:ro
+    environment:
+      # --- Where to find the local model engine ----------------------------
+      # "ollama" resolves to the other container by name on the Docker network.
+      OLLAMA_BASE_URL: http://ollama:11434
+
+      # --- Login session encryption ----------------------------------------
+      # Generated once by install.sh and then reused forever. If this value
+      # changes, everyone gets logged out.
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      WEBUI_AUTH: ${WEBUI_AUTH:-true}
+
+      # --- Cloud GPU settings, read by openwebui/runpod_pipe.py ------------
+      RUNPOD_HOST: ${RUNPOD_HOST}
+      PI_HOST: ${PI_HOST}
+      # So the pipe's connection-error message names the right peer instead of
+      # a hardcoded string that may not match what you called the pod.
+      PEER_HOSTNAME: ${PEER_HOSTNAME:-runpod-worker}
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY}
+      RUNPOD_POD_ID: ${RUNPOD_POD_ID}
+      VLLM_PORT: ${VLLM_PORT:-8000}
+      VLLM_MODEL_NAME: ${VLLM_MODEL_NAME:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}
+      POD_WARMUP_TIMEOUT: ${POD_WARMUP_TIMEOUT:-600} 
+      # Pipe tuning, read by openwebui/runpod_pipe.py via os.getenv(). These 
+      # are also exposed in the Valves panel; the Valves default to these. 
+      VLLM_DISPLAY_NAME: ${VLLM_DISPLAY_NAME:-Qwen2.5-Coder-32B (RunPod)} 
+      VLLM_REQUEST_TIMEOUT: ${VLLM_REQUEST_TIMEOUT:-900} 
+      VLLM_MAX_TOKENS: ${VLLM_MAX_TOKENS:-4096} 
+      PIPE_LOG_LEVEL: ${PIPE_LOG_LEVEL:-INFO}
+
+      # --- Privacy / zero-trace enforcement --------------------------------
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+      OTEL_SDK_DISABLED: "true"
+      # Stop the app calling out to community servers to share or rate chats.
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_MESSAGE_RATING: "false"
+      ENABLE_OPENAI_API: ${ENABLE_OPENAI_API:-false}
+      # Document search stays local: embeddings are computed inside this
+      # container and stored in Chroma on your disk. Nothing is shipped out.
+      RAG_EMBEDDING_ENGINE: ""
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      VECTOR_DB: chroma
+      CHROMA_TELEMETRY_DISABLED: "true"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      
+    dns:
+      - 100.100.100.100
+    extra_hosts:
+      # Lets the container reach services running on the Pi itself.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # Tries curl, then wget, then Python. Open WebUI images have shipped
+      # different toolsets over time, and a healthcheck that fails only
+      # because a binary is missing produces a container marked "unhealthy"
+      # while it is actually serving perfectly -- a confusing false alarm.
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -fsS http://localhost:8080/health >/dev/null 2>&1 ||
+          wget -qO- http://localhost:8080/health >/dev/null 2>&1 ||
+          python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health',timeout=5).status==200 else 1)" ||
+          exit 1
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # STATUS PAGE :: at-a-glance health, log tails, and one-click diagnostics
+  #
+  # Reached at http://<your-pi>/status via the proxy below.
+  #
+  # SECURITY POSTURE -- this container is deliberately starved of privilege:
+  #   - It is given NO credentials. Not .env, not an API key, nothing. It
+  #     cannot leak what it was never given.
+  #   - Its filesystem is read-only, it drops every Linux capability, and it
+  #     runs as an unprivileged user. Its ONLY supplementary group is the
+  #     backup account's gid, so it can read the 0640 backup log (BACKUP_GROUP_GID).
+  #   - It mounts only what it measures: webui_data and two log files, all
+  #     read-only.
+  #   - Docker socket access is read-only AND the app only ever issues GET
+  #     requests. See status/README.md for the important caveat about what
+  #     socket access really means.
+  # -------------------------------------------------------------------------
+  status:
+    image: python:3.12-slim
+    container_name: hybrid-ai-status
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    # No published ports. The proxy is the only way in, which is what keeps
+    # the IP allowlist in the Caddyfile from being trivially bypassed.
+    expose:
+      - "8088"
+    # Tiny by design; capped so it can never crowd out inference.
+    mem_limit: 256m
+    cpus: "0.5"
+    command: ["python", "-u", "/app/app.py"]
+    volumes:
+      - ./status/app.py:/app/app.py:ro
+      # Read-only Docker socket: needed for container state and log tails.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Measured, never read for content.
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data:/data/webui_data:ro
+      # Writer and reader must name ONE path. The units (system mode) and
+      # backup.sh (user mode) write whatever scripts/lib/hybrid-ai-env.sh
+      # resolves BACKUP_LOG to; install.sh writes that resolved value into the
+      # stack env file, so this bind source is the file that is actually being
+      # written. Fail-closed: an unset value refuses the parse instead of
+      # mounting a path nothing writes.
+      - ${BACKUP_LOG:?BACKUP_LOG must be set - run ./install.sh}:/data/backup.log:ro
+      - ${HYBRID_AI_LOG_DIR:?HYBRID_AI_LOG_DIR must be set - run ./install.sh}/install.log:/data/install.log:ro
+      # The post-deploy verifier's log: read-only display data for the Deploy
+      # verification tile. Same single-file pattern as the two logs above.
+      - ${HYBRID_AI_POST_DEPLOY_VERIFY_LOG:-/var/log/hybrid-ai-post-deploy-verify.log}:/data/post-deploy-verify.log:ro
+    environment:
+      STATUS_PORT: "8088"
+      LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
+      OLLAMA_URL: http://ollama:11434
+      WEBUI_URL: http://open-webui:8080
+      HERMES_URL: http://hermes:8501
+      OPENHANDS_URL: http://openhands:3000
+      WEBUI_DATA_PATH: /data/webui_data
+      BACKUP_LOG_PATH: /data/backup.log
+      INSTALL_LOG_PATH: /data/install.log
+      POST_DEPLOY_VERIFY_LOG_PATH: /data/post-deploy-verify.log
+      # Not a secret: the pod's MagicDNS name, and it is masked in all output.
+      # The status container resolves it through this service's `dns:` entry
+      # (the tailnet resolver), so no stored mesh address is needed.
+      # DERIVED BOOLEAN presence flag: "1" when RUNPOD_API_KEY is set on the
+      # host, empty otherwise. Only this derived flag enters the container; the
+      # key value itself is never passed to this service.
+      RUNPOD_KEY_PRESENT: ${RUNPOD_API_KEY:+1}
+      RUNPOD_HOST: ${RUNPOD_HOST}
+      PI_HOST: ${PI_HOST}
+      VLLM_PORT: ${VLLM_PORT:-8000}
+      PYTHONDONTWRITEBYTECODE: "1"
+      DO_NOT_TRACK: "true"
+    dns:
+      - 100.100.100.100
+    user: "${HYBRID_AI_UID:-${STATUS_UID:-1000}}:${DOCKER_GID:-999}"
+    # Exactly ONE supplementary group: the backup account's gid, so the
+    # read-only backup log (0640, group hybrid-ai-backup) is readable without
+    # widening the file to the world and without running this service as root.
+    # In user mode install.sh writes the same value as the primary gid, so the
+    # container gains no access it did not already have. Fail-closed for the
+    # same reason as BACKUP_LOG: an unset value would silently leave the
+    # Backups tile blind.
+    group_add:
+      - "${BACKUP_GROUP_GID:?BACKUP_GROUP_GID must be set - run ./install.sh}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8088/status/healthz',timeout=5)\" || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # -------------------------------------------------------------------------
+  # REVERSE PROXY :: one address for everything
+  #
+  #   http://<your-pi>/status  -> status page (restricted to LAN + tailnet)
+  #   http://<your-pi>/        -> Open WebUI
+  #
+  # Port 3000 remains published on open-webui so existing bookmarks and the
+  # health checks in install.sh keep working unchanged.
+  #
+  # OpenHands is DELIBERATELY not proxied. See the note at the end of
+  # status/Caddyfile for why.
+  # -------------------------------------------------------------------------
+  proxy:
+#@region proxy_image
+#@off
+    image: caddy:2.8-alpine
+#@on
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+#@end
+    container_name: hybrid-ai-proxy
+    restart: unless-stopped
+    depends_on:
+      - open-webui
+      - status
+    mem_limit: 128m
+    cpus: "0.5"
+    ports:
+      - "80:80"
+#@region proxy_ports
+#@off
+#@on
+      - "443:443"
+      - "443:443/udp"   # HTTP/3; harmless if the network drops it
+#@end
+    volumes:
+      - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy validates its config at boot; a syntax error here stops the
+      # proxy only, leaving Open WebUI reachable on :3000.
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data/caddy:/data
+#@region proxy_secrets
+#@dns
+    secrets:
+      - %TLS_SECRET_NAME%
+#@end
+    environment:
+      LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
+#@region proxy_env
+#@off
+#@on
+      TLS_DOMAIN: ${TLS_DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      ACME_CA: ${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
+      ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-off}
+#@end
+      DO_NOT_TRACK: "true"
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/status/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+#@region top_secrets
+#@dns
+# Compose file secrets are file-backed, so no Swarm is needed. The value never
+# enters the environment, an argument or an image layer: only the path is here.
+secrets:
+  %TLS_SECRET_NAME%:
+    file: ${HYBRID_AI_TLS_TOKEN_FILE:?HYBRID_AI_TLS_TOKEN_FILE must be set when TLS is enabled}
+
+#@end
+# There is deliberately NO top-level "volumes:" block here. See the persistence
+# contract note at the top of this file for why.
+
+networks:
+  # The shared stack network. Every service in this file (and the OpenHands
+  # overlay) joins it implicitly, so containers can reach each other by service
+  # name. It is NOT isolated from the host.
+  default:
+    name: hybrid-ai
+
+  # coder-net :: the private path between the two code-aware services.
+  #
+  # `internal: true` means Docker gives this network no route off the host: a
+  # container on it can reach the other containers on it, and nothing else --
+  # no LAN, no internet, no published host ports. Only `openhands` (in the
+  # overlay) and `hermes` (in the Hermes overlay) attach to it. Hermes uses it
+  # to reach the OpenHands API at http://openhands:3000 by service name.
+  #
+  # This adds no host port binds. The existing OpenHands binds on 127.0.0.1 and
+  # 172.17.0.1 are unchanged and unrelated to this network.
+  coder-net:
+    name: coder-net
+    internal: true

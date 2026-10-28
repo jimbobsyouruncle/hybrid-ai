@@ -1,0 +1,214 @@
+#@region global
+#@off
+{
+	auto_https off
+	admin off
+}
+#@on
+{
+	# DNS-01 does not need Caddy's automatic HTTP challenge listener or its
+	# automatic redirects: both are explicit below, so the behaviour is
+	# visible in this file. HTTP-01 mode is the one exception; see
+	# docs/tls-acme-design.md section 4.5.
+	auto_https {$ACME_AUTO_HTTPS:off}
+	# Loopback INSIDE the container only, never published. This is what lets
+	# `caddy reload` apply a config change without a restart, which would
+	# drop in-flight WebSocket streams. The non-TLS build keeps `admin off`.
+	admin localhost:2019
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA}
+	# Keep logs where the container's log collector already looks.
+	log {
+		output stdout
+		format json
+	}
+}
+#@end
+
+(trusted_only) {
+	@untrusted not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fd7a:115c:a1e0::/48
+	abort @untrusted
+}
+
+(secure_headers) {
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+}
+
+http://status.{$LOCAL_DOMAIN} {
+	import trusted_only
+	import secure_headers
+
+	redir / /status 302
+	reverse_proxy status:8088
+}
+
+http://hermes.{$LOCAL_DOMAIN} {
+	import trusted_only
+	import secure_headers
+
+	reverse_proxy hermes:8501
+}
+
+http://{$LOCAL_DOMAIN} {
+	# Both snippets must be imported inside each handle: Caddy runs a matching
+	# handle before the site-level directives, so a site-level import alone
+	# would be bypassed and would leave these routes unprotected and unstamped.
+	# trusted_only guards the sensitive routes; secure_headers applies the
+	# uniform response headers (and removes Server) on every route, including
+	# the open aliases and the catch-all.
+	handle /status* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy status:8088
+	}
+
+	handle /hub* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy status:8088
+	}
+
+	handle /health {
+		import secure_headers
+		rewrite * /status/health-summary
+		reverse_proxy status:8088
+	}
+
+	handle_path /ollama/* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy ollama:11434
+	}
+
+	# Friendly aliases restored after the Caddyfile refactor. The target is the
+	# site root because Open WebUI is served at the root (there is no /app/
+	# prefix). Deep links and query strings are preserved. These handles do not
+	# import trusted_only: their only target is the open catch-all below, which
+	# has its own login. See status/README.md.
+	#
+	# secure_headers is imported inside each route block so the header handler
+	# runs before the redirect, and so it cannot be reordered out of the block.
+	handle /openwebui* {
+		route {
+			import secure_headers
+			uri strip_prefix /openwebui
+			redir * {uri} 302
+		}
+	}
+
+	handle /chat* {
+		route {
+			import secure_headers
+			uri strip_prefix /chat
+			redir * {uri} 302
+		}
+	}
+
+	handle {
+		import secure_headers
+		reverse_proxy open-webui:8080
+	}
+}
+#@region https
+#@off
+#@on
+
+(hsts) {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}
+
+(tls_dns) {
+%TLS_SOLVER_BLOCK%
+}
+
+# --- HTTPS: {$TLS_DOMAIN} ------------------------------------------------
+https://{$TLS_DOMAIN} {
+	# Same route map as the http:// site, with the snippets imported inside each
+	# protected handle exactly as today. Adding TLS changes no route and no
+	# allowlist; it only changes the scheme and adds HSTS.
+	import trusted_only
+	import secure_headers
+	import hsts
+	import tls_dns
+
+	handle /status* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy status:8088
+	}
+	handle /hub* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy status:8088
+	}
+	handle /health {
+		import secure_headers
+		rewrite * /status/health-summary
+		reverse_proxy status:8088
+	}
+	handle_path /ollama/* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy ollama:11434
+	}
+	handle /openwebui* {
+		route {
+			import secure_headers
+			uri strip_prefix /openwebui
+			redir * {uri} 302
+		}
+	}
+	handle /chat* {
+		route {
+			import secure_headers
+			uri strip_prefix /chat
+			redir * {uri} 302
+		}
+	}
+	handle {
+		import secure_headers
+		reverse_proxy open-webui:8080
+	}
+}
+
+https://hermes.{$TLS_DOMAIN} {
+	import trusted_only
+	import secure_headers
+	import hsts
+	import tls_dns
+
+	reverse_proxy hermes:8501
+}
+
+https://status.{$TLS_DOMAIN} {
+	import trusted_only
+	import secure_headers
+	import hsts
+	import tls_dns
+
+	redir / /status 302
+	reverse_proxy status:8088
+}
+
+https://*.{$TLS_DOMAIN} {
+	# Wildcard catch-all. Unknown subdomain gets a bare 404, so a probe
+	# cannot enumerate services. No (hsts): HSTS is only for the three
+	# named hosts above.
+	import trusted_only
+	import secure_headers
+	import tls_dns
+
+	respond 404
+}
+
+# --- HTTP -> HTTPS redirect (port 80 stays open for redirect + HTTP-01) ---
+http://{$TLS_DOMAIN}, http://*.{$TLS_DOMAIN} {
+	import trusted_only
+	redir https://{host}{uri} 308
+}
+#@end

@@ -38,6 +38,32 @@
 #                                    offline, even if RUNPOD_AUTO_WAKE=0
 #                                    (RUNPOD_AUTO_WAKE=1 in .env does it every run)
 #   ./install.sh --help              show this usage summary
+#
+# OPT-IN TLS / ACME (docs/tls-acme-design.md). Off by default. With TLS off,
+# nothing about this installer changes: same files, same URLs, no prompt under
+# --non-interactive. Each flag has an .env equivalent, and a flag wins over it.
+#
+#   --tls                     TLS_ENABLED=1          enable HTTPS
+#   --no-tls                  TLS_ENABLED=0          render the TLS-less variant
+#   --tls-domain <name>       TLS_DOMAIN             base domain (default daemonhub.dev)
+#   --tls-email <addr>        ACME_EMAIL             ACME account email (required)
+#   --tls-validation <m>      TLS_VALIDATION         dns | http | tlsalpn (default dns)
+#   --tls-dns-provider <p>    ACME_DNS_PROVIDER      cloudflare | rfc2136 (default cloudflare)
+#   --tls-acme-ca <ca>        ACME_CA                staging | production | https:// URL
+#                                                    (default staging)
+#   --tls-token-file <path>   HYBRID_AI_TLS_TOKEN_FILE
+#                                                    PATH to the operator-owned 0600 root
+#                                                    credential file. NEVER the token.
+#   --dry-run                 HYBRID_AI_DRY_RUN=1    print the files it would write, a
+#                                                    unified diff of status/Caddyfile and
+#                                                    docker-compose.yml, and validate both.
+#                                                    Changes nothing; exits 0.
+#
+#   Example, preview first:
+#     ./install.sh --dry-run --tls --tls-domain daemonhub.dev \
+#       --tls-email you@example.org --tls-validation dns \
+#       --tls-dns-provider cloudflare \
+#       --tls-token-file /etc/hybrid-ai/acme/cloudflare_dns_token
 # ---------------------------------------------------------------------------
 
 # "set -Eeuo pipefail" makes bash strict and safe:
@@ -75,19 +101,63 @@ PEER_HOSTNAME="${PEER_HOSTNAME:-${PEER_HOSTNAMES%% *}}"
 NON_INTERACTIVE=0
 NO_START=0
 WAKE_RUNPOD_FLAG=0
+DRY_RUN="${HYBRID_AI_DRY_RUN:-0}"
+[[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]] && DRY_RUN=1 || DRY_RUN=0
 
+# --- Opt-in TLS / ACME flags (docs/tls-acme-design.md section 8.2) ---------
+# Flags are recorded here and applied AFTER .env is loaded, so a flag wins over
+# the value in .env, and .env wins over a prompt. Nothing here holds a secret:
+# --tls-token-file takes a PATH, never the token.
+TLS_ARG_ENABLED=""
+TLS_ARG_DOMAIN=""
+TLS_ARG_EMAIL=""
+TLS_ARG_VALIDATION=""
+TLS_ARG_DNS_PROVIDER=""
+TLS_ARG_CA=""
+TLS_ARG_TOKEN_FILE=""
+
+tls_flag_value() {  # FLAG VALUE
+  case "$1" in
+    --tls-domain)       TLS_ARG_DOMAIN="$2" ;;
+    --tls-email)        TLS_ARG_EMAIL="$2" ;;
+    --tls-validation)   TLS_ARG_VALIDATION="$2" ;;
+    --tls-dns-provider) TLS_ARG_DNS_PROVIDER="$2" ;;
+    --tls-acme-ca)      TLS_ARG_CA="$2" ;;
+    --tls-token-file)   TLS_ARG_TOKEN_FILE="$2" ;;
+  esac
+}
+
+_TLS_PENDING=""
 for arg in "$@"; do
+  if [[ -n "$_TLS_PENDING" ]]; then
+    tls_flag_value "$_TLS_PENDING" "$arg"
+    _TLS_PENDING=""
+    continue
+  fi
   case "$arg" in
     --non-interactive) NON_INTERACTIVE=1 ;;
     --no-start)         NO_START=1 ;;
     --wake-runpod)      WAKE_RUNPOD_FLAG=1 ;;
+    --tls)              TLS_ARG_ENABLED="yes" ;;
+    --no-tls)           TLS_ARG_ENABLED="no" ;;
+    --tls-domain=*)       tls_flag_value --tls-domain       "${arg#*=}" ;;
+    --tls-email=*)        tls_flag_value --tls-email        "${arg#*=}" ;;
+    --tls-validation=*)   tls_flag_value --tls-validation   "${arg#*=}" ;;
+    --tls-dns-provider=*) tls_flag_value --tls-dns-provider "${arg#*=}" ;;
+    --tls-acme-ca=*)      tls_flag_value --tls-acme-ca      "${arg#*=}" ;;
+    --tls-token-file=*)   tls_flag_value --tls-token-file   "${arg#*=}" ;;
+    --tls-domain|--tls-email|--tls-validation|--tls-dns-provider|--tls-acme-ca|--tls-token-file)
+      _TLS_PENDING="$arg" ;;
+    --dry-run)          DRY_RUN=1 ;;
     -h|--help)
-      sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,66p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+[[ -z "$_TLS_PENDING" ]] || { echo "Missing value for ${_TLS_PENDING}" >&2; exit 2; }
+unset _TLS_PENDING
 
 # --- Output helpers --------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -118,6 +188,31 @@ trap 'hybrid_progress_stop' EXIT
 hr
 printf '  hybrid-ai :: local control plane bootstrap\n'
 hr
+
+# ---------------------------------------------------------------------------
+# Opt-in TLS / ACME helper. Sourced, never executed. It owns the section 1.4
+# tradeoff text, the prompts (8.1), the validation (8.5), the managed-region
+# renderer (8.3/8.4) and the --dry-run report. It never reads or writes a token
+# value, only the path.
+# ---------------------------------------------------------------------------
+# shellcheck source=scripts/lib/tls.sh
+source "${SCRIPT_DIR}/scripts/lib/tls.sh"
+
+# --dry-run runs BEFORE the dependency probe and the Docker daemon check: it
+# must work on a host that is not yet provisioned. It changes nothing.
+if (( DRY_RUN )); then
+  tls_load_env_file_values "$ENV_FILE"
+  tls_apply_flags
+  if tls_is_on; then
+    tls_validate_settings
+  else
+    tls__ok "TLS_ENABLED is not yes: the dry run renders the TLS-less variant."
+  fi
+  hr
+  tls_dry_run
+  hr
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # STEP 1. Dependency probe
@@ -514,6 +609,17 @@ prompt_secret RUNPOD_POD_ID      "RunPod pod ID"  0
 prompt_secret RUNPOD_HOST        "RunPod MagicDNS (e.g., runpod-worker.tailXXXX.ts.net)" 0
 prompt_secret PI_HOST            "Raspberry Pi MagicDNS (e.g., jarvis.tailXXXX.ts.net)" 0
 
+# --- Opt-in TLS / ACME (docs/tls-acme-design.md section 8.1) ---------------
+# Flags win over .env, .env wins over a prompt, and each question is skipped
+# when its value already exists -- exactly how prompt_secret behaves. With
+# TLS_ENABLED not yes, this block asks one question and stops.
+tls_apply_flags
+tls_prompt_flow
+if tls_is_on; then
+  event "tls_enabled" "domain=${TLS_DOMAIN}" "validation=${TLS_VALIDATION}" \
+    "ca=$(tls_ca_label "${TLS_CA_URL}")"
+fi
+
 # ---------------------------------------------------------------------------
 # STEP 6. Find the GPU pod on the Tailscale network
 # ---------------------------------------------------------------------------
@@ -884,6 +990,20 @@ HYBRID_AI_BUILD_CACHE_CAP=${HYBRID_AI_BUILD_CACHE_CAP:-15GB}
 HYBRID_AI_PRUNE_ALLOW_LEASE_LESS=${HYBRID_AI_PRUNE_ALLOW_LEASE_LESS:-}
 HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS=${HYBRID_AI_PRUNE_QUARANTINE_RETENTION_DAYS-90}
 
+# --- Opt-in TLS / ACME (docs/tls-acme-design.md section 8.3) ---------------
+# Paths, names and public values only. The DNS token itself is NOT here and
+# never will be: only the path to the operator-owned 0600 root file.
+TLS_ENABLED=${TLS_ENABLED:-no}
+TLS_DOMAIN=${TLS_DOMAIN:-}
+ACME_EMAIL=${ACME_EMAIL:-}
+ACME_CA=${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
+TLS_VALIDATION=${TLS_VALIDATION:-dns}
+ACME_DNS_PROVIDER=${ACME_DNS_PROVIDER:-cloudflare}
+HYBRID_AI_TLS_TOKEN_FILE=${HYBRID_AI_TLS_TOKEN_FILE:-}
+TLS_HOSTS=${TLS_HOSTS:-}
+ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-off}
+CADDY_IMAGE=${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true
 DO_NOT_TRACK=true
@@ -893,6 +1013,16 @@ EOF
 mv -f "$TMP_ENV" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 ok ".env written (0600)."
+
+# ---------------------------------------------------------------------------
+# STEP 8b. Render the TLS / non-TLS variants of the two managed files
+# ---------------------------------------------------------------------------
+# Both files are rendered from their .tmpl siblings, one managed region each,
+# and the previous file is replaced rather than appended to, so a re-run is a
+# no-op and a TLS-off run converges back to today's bytes. Validation gates the
+# move: a bad render leaves the previous file in place. Certificates and the
+# operator's token file are never read, moved or deleted here.
+tls_render_and_install
 
 # Keep an owner's legacy TAILSCALE_IP value byte-for-byte. STEP 2b refused to
 # migrate it because it did not match the address RUNPOD_HOST resolves to, so
@@ -1793,6 +1923,9 @@ for domain in "${DOMAINS_TO_CHECK[@]}"; do
   fi
 done
 
+# Section 8.5: the certificate name is checked too, and a miss only warns.
+tls_check_dns
+
 # ---------------------------------------------------------------------------
 # STEP 11. Encrypted offsite backups (Cloudflare R2 via restic)
 # ---------------------------------------------------------------------------
@@ -2315,6 +2448,8 @@ ok "Control plane stack is up."
 
 run_prune_catch_up || true
 
+# Section 7.4: during the dual-name period both names are printed, https first.
+tls_print_urls
 printf '\n    Service Hub  : http://%s/hub\n' "${LOCAL_DOMAIN}"
 printf '    Open WebUI   : http://%s\n' "${LOCAL_DOMAIN}"
 printf '    OpenHands    : SSH tunnel to http://127.0.0.1:%s\n' "${OPENHANDS_PORT:-3001}"

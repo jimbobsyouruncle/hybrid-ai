@@ -84,6 +84,13 @@ cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$APP/scripts/lib/"
 if [[ -f "$REPO/scripts/lib/build-gate.sh" ]]; then
   cp "$REPO/scripts/lib/build-gate.sh" "$APP/scripts/lib/"
 fi
+
+# install.sh sources scripts/lib/tls.sh and its TLS render step reads the
+# tracked templates, so the scratch app tree must carry them too.
+mkdir -p "$APP/status"
+cp "$REPO/scripts/lib/tls.sh" "$APP/scripts/lib/"
+cp "$REPO/status/Caddyfile.tmpl" "$APP/status/Caddyfile.tmpl"
+cp "$REPO/docker-compose.yml.tmpl" "$APP/docker-compose.yml.tmpl"
 cp "$UNIT_SRC" "$RULE_SRC" "$APP/deploy/"
 [[ -f "$REPO/deploy/hybrid-ai-firewall.service" ]] && \
   cp "$REPO/deploy/hybrid-ai-firewall.service" "$APP/deploy/"
