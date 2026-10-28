@@ -16,17 +16,23 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
+if ! hybrid_ai_env_load; then
+  printf 'FATAL: hybrid_ai_env_load failed; cannot resolve the repository directory.\n' >&2
+  exit 2
+fi
 # shellcheck source=scripts/lib/tls.sh
-source "${REPO_DIR}/scripts/lib/tls.sh"
+source "${HYBRID_AI_APP_DIR}/scripts/lib/tls.sh"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
 
 APP_DIR="$WORK/app"
 mkdir -p "$APP_DIR/status"
-cp "${REPO_DIR}/status/Caddyfile.tmpl" "$APP_DIR/status/Caddyfile.tmpl"
-cp "${REPO_DIR}/docker-compose.yml.tmpl" "$APP_DIR/docker-compose.yml.tmpl"
+cp "${HYBRID_AI_APP_DIR}/status/Caddyfile.tmpl" "$APP_DIR/status/Caddyfile.tmpl"
+cp "${HYBRID_AI_APP_DIR}/docker-compose.yml.tmpl" "$APP_DIR/docker-compose.yml.tmpl"
 
 FAILED=0
 pass() { printf '[ OK ] %s\n' "$*"; }
@@ -46,18 +52,18 @@ TLS_ENABLED="no"
 render off "$WORK/off1"
 render off "$WORK/off2"
 
-if cmp -s -- "${REPO_DIR}/status/Caddyfile" "$WORK/off1/Caddyfile"; then
+if cmp -s -- "${HYBRID_AI_APP_DIR}/status/Caddyfile" "$WORK/off1/Caddyfile"; then
   pass "TLS-off Caddyfile render is byte-identical to the tracked file"
 else
   fail "TLS-off Caddyfile render differs from the tracked file"
-  diff -u "${REPO_DIR}/status/Caddyfile" "$WORK/off1/Caddyfile" >&2 || true
+  diff -u "${HYBRID_AI_APP_DIR}/status/Caddyfile" "$WORK/off1/Caddyfile" >&2 || true
 fi
 
-if cmp -s -- "${REPO_DIR}/docker-compose.yml" "$WORK/off1/docker-compose.yml"; then
+if cmp -s -- "${HYBRID_AI_APP_DIR}/docker-compose.yml" "$WORK/off1/docker-compose.yml"; then
   pass "TLS-off compose render is byte-identical to the tracked file"
 else
   fail "TLS-off compose render differs from the tracked file"
-  diff -u "${REPO_DIR}/docker-compose.yml" "$WORK/off1/docker-compose.yml" >&2 || true
+  diff -u "${HYBRID_AI_APP_DIR}/docker-compose.yml" "$WORK/off1/docker-compose.yml" >&2 || true
 fi
 
 if cmp -s -- "$WORK/off1/Caddyfile" "$WORK/off2/Caddyfile" \
@@ -93,7 +99,7 @@ else
 fi
 
 for snippet in '(trusted_only)' '(secure_headers)'; do
-  if diff -q <(awk -v s="$snippet" 'index($0,s)==1{f=1} f{print} f&&/^}/{exit}' "${REPO_DIR}/status/Caddyfile") \
+  if diff -q <(awk -v s="$snippet" 'index($0,s)==1{f=1} f{print} f&&/^}/{exit}' "${HYBRID_AI_APP_DIR}/status/Caddyfile") \
              <(awk -v s="$snippet" 'index($0,s)==1{f=1} f{print} f&&/^}/{exit}' "$WORK/on1/Caddyfile") >/dev/null; then
     pass "${snippet} is byte-for-byte unchanged in the TLS-on render"
   else

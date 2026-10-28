@@ -17,6 +17,7 @@
 - SECURITY_SUMMARY.md - Security summary
 - collect-diagnostics.sh - FILE: collect-diagnostics.sh
 - docker-compose.yml - FILE: docker-compose.yml
+- docker-compose.yml.tmpl
 - doctor.sh - FILE: doctor.sh
 - install.sh - FILE: install.sh
 ## .github
@@ -159,6 +160,7 @@
 - scripts/test-status-backup-log-env.sh - FILE: scripts/test-status-backup-log-env.sh
 - scripts/test-status-backup-probe.sh - FILE: scripts/test-status-backup-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
+- scripts/test-tls-installer-render.sh - FILE: scripts/test-tls-installer-render.sh
 - scripts/test-uninstall.sh - FILE: scripts/test-uninstall.sh
 - scripts/uninstall.sh - FILE: scripts/uninstall.sh
 ## scripts/lib
@@ -167,9 +169,11 @@
 - scripts/lib/hybrid-ai-env.sh - FILE: scripts/lib/hybrid-ai-env.sh
 - scripts/lib/read-probe.sh - FILE: scripts/lib/read-probe.sh
 - scripts/lib/tailscale-resolve.sh - FILE: scripts/lib/tailscale-resolve.sh
+- scripts/lib/tls.sh - FILE: scripts/lib/tls.sh
 ## status
 
 - status/Caddyfile
+- status/Caddyfile.tmpl
 - status/README.md - status/ — Status Page
 - status/app.py - FILE: status/app.py
 - status/test_backup_probe.py - FILE: status/test_backup_probe.py

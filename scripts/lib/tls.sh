@@ -460,7 +460,10 @@ tls__docker_ready() {
 }
 
 tls_validate_compose_file() {  # FILE [ENVFILE]
-  local file="$1" envfile="${2:-${ENV_FILE:-}}"
+  # Default to the RESOLVED STACK env file when no explicit file was given:
+  # an --env-file consumer must hand compose the 0600 secrets file, never the
+  # 0644 layout file.
+  local file="$1" envfile="${2:-${HYBRID_AI_STACK_ENV_FILE:-${ENV_FILE:-}}}"
   if ! command -v docker >/dev/null 2>&1; then
     printf '[skip] compose validation of %s (docker unavailable)\n' "$file"
     return 3
