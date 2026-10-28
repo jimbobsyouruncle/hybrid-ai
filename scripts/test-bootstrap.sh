@@ -987,13 +987,18 @@ echo "== install.sh writes ONLY the stack file, never the layout file (AC2) =="
 INST="$WORK/install-fixture"
 INST_APP="$INST/app"
 INST_BIN="$INST/bin"
-mkdir -p "$INST_APP/scripts/lib" "$INST_BIN" \
+mkdir -p "$INST_APP/scripts/lib" "$INST_APP/status" "$INST_BIN" \
          "$INST/etc/hybrid-ai" "$INST/data" "$INST/log" "$INST/work" \
          "$INST/ws" "$INST/repos" "$INST/ohstate" "$INST/conf" "$INST/restic"
 cp "$REPO/install.sh" "$INST_APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$INST_APP/scripts/lib/"
 [ -f "$REPO/scripts/lib/build-gate.sh" ] || { echo "FATAL: scripts/lib/build-gate.sh is missing; the build gate does not exist in this tree." >&2; exit 2; }
 cp "$REPO/scripts/lib/build-gate.sh" "$INST_APP/scripts/lib/"
+# The real install.sh sources scripts/lib/tls.sh at startup and its TLS render
+# step reads the tracked templates, so this scratch app tree must carry them.
+cp "$REPO/scripts/lib/tls.sh" "$INST_APP/scripts/lib/"
+cp "$REPO/status/Caddyfile.tmpl" "$INST_APP/status/Caddyfile.tmpl"
+cp "$REPO/docker-compose.yml.tmpl" "$INST_APP/docker-compose.yml.tmpl"
 cp "$REPO/scripts/setup-agent-workspace.sh" "$REPO/scripts/sync-agent-repos.sh" "$INST_APP/scripts/"
 
 for d in docker git jq curl openssl sqlite3 rsync tailscale; do

@@ -66,6 +66,13 @@ cp "$REPO/install.sh" "$APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$APP/scripts/lib/"
 [ -f "$REPO/scripts/lib/build-gate.sh" ] || { echo "FATAL: scripts/lib/build-gate.sh is missing; the build gate does not exist in this tree." >&2; exit 2; }
 cp "$REPO/scripts/lib/build-gate.sh" "$APP/scripts/lib/"
+
+# install.sh sources scripts/lib/tls.sh and its TLS render step reads the
+# tracked templates, so the scratch app tree must carry them too.
+mkdir -p "$APP/status"
+cp "$REPO/scripts/lib/tls.sh" "$APP/scripts/lib/"
+cp "$REPO/status/Caddyfile.tmpl" "$APP/status/Caddyfile.tmpl"
+cp "$REPO/docker-compose.yml.tmpl" "$APP/docker-compose.yml.tmpl"
 # The agent scripts are not under test here; stub them so the run is quiet.
 printf '#!/usr/bin/env bash\nexit 0\n' > "$APP/scripts/setup-agent-workspace.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$APP/scripts/sync-agent-repos.sh"

@@ -62,6 +62,13 @@ cp "$REPO/install.sh" "$APP/install.sh"
 cp "$REPO/scripts/lib/hybrid-ai-env.sh" "$APP/scripts/lib/"
 [ -f "$REPO/scripts/lib/build-gate.sh" ] || { echo "FATAL: scripts/lib/build-gate.sh is missing; the build gate does not exist in this tree." >&2; exit 2; }
 cp "$REPO/scripts/lib/build-gate.sh" "$APP/scripts/lib/"
+
+# install.sh sources scripts/lib/tls.sh and its TLS render step reads the
+# tracked templates, so the scratch app tree must carry them too.
+mkdir -p "$APP/status"
+cp "$REPO/scripts/lib/tls.sh" "$APP/scripts/lib/"
+cp "$REPO/status/Caddyfile.tmpl" "$APP/status/Caddyfile.tmpl"
+cp "$REPO/docker-compose.yml.tmpl" "$APP/docker-compose.yml.tmpl"
 cp "$REPO/deploy/hybrid-ai-firewall.service" "$APP/deploy/"
 # The sandbox git config is shipped by install.sh; copy it so the install path
 # can run, and give the scratch workspace a git dir so install writes the exclude.
