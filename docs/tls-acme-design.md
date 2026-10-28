@@ -425,7 +425,6 @@ address=/daemonhub.dev/192.168.1.50
 # Explicit per-service entries. They are redundant with the wildcard above but
 # are kept so a single service can be pointed somewhere else (for example a
 # test host) without touching the wildcard line.
-# wildcard line.
 address=/hermes.daemonhub.dev/192.168.1.50
 address=/status.daemonhub.dev/192.168.1.50
 
@@ -485,7 +484,7 @@ getent hosts hermes.daemonhub.dev                   # -> 192.168.1.50
 ```
 
 `getent hosts` is what `install.sh` already uses for its subdomain check at line
-1176, so the same code path validates the new names.
+1791, so the same code path validates the new names.
 
 ### 3.4 A client that uses public DNS
 
@@ -1705,10 +1704,25 @@ fall back to the stock image.
 
 ```bash
 sudo tee /etc/dnsmasq.d/05-hybrid-ai.conf >/dev/null <<'EOF'
+# hybrid-ai :: split-horizon rewrite for daemonhub.dev.
+# LAN clients get the Pi's LAN address; public clients get whatever the
+# authoritative zone says. Managed by hand; not part of the hybrid-ai repo.
+
+# Internal address of this Pi as seen from the LAN.
 address=/daemonhub.dev/192.168.1.50
+
+# Explicit per-service entries. They are redundant with the wildcard above but
+# are kept so a single service can be pointed somewhere else (for example a
+# test host) without touching the wildcard line.
 address=/hermes.daemonhub.dev/192.168.1.50
 address=/status.daemonhub.dev/192.168.1.50
+
+# The Pi's loopback name, unchanged from today.
+address=/jarvis.lan/192.168.1.50
+
+# Local domain search, so `ping hermes` works on the LAN.
 local=/daemonhub.dev/
+domain=daemonhub.dev
 EOF
 sudo pihole restartdns
 # expected: "Restarting pihole-FTL..." and it comes back within a few seconds
