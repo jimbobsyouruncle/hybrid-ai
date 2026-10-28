@@ -81,7 +81,7 @@ Marked so a later reader can challenge them, not left open:
 | Wildcard (`*.daemonhub.dev`) | **Yes** | No (CA forbids it) | No (CA forbids it) |
 | Host must be internet-reachable | **No** | Yes, on port 80 | Yes, on port 443 |
 | Works behind NAT / CGNAT / closed ports | **Yes** | No | No |
-| Rate-limit exposure | Low. Failures are DNS propagation problems, which do not count against the failed-validation limit in the same way as repeated HTTP probes. | High. Each failed probe counts toward the 5 failures per account per hostname per hour. | High, same as HTTP-01. |
+| Rate-limit exposure | Same limit as every other type: 5 failed authorizations per account per hostname per hour, DNS-01 included. Less exposed in practice only because propagation failures retry inside Caddy's own window instead of firing a fresh probe; test with the staging CA. | High. Each failed probe counts toward the 5 failures per account per hostname per hour. | High, same as HTTP-01. |
 | Propagation wait | Yes. Caddy polls the authoritative nameservers until the TXT is visible. Typical 5-60 s on Cloudflare; up to several minutes on slow providers. Caddy's default bound is generous and the challenge is retried. | None; the CA fetches immediately. | None. |
 | Blast radius of the credential | A DNS API token: can mint certificates for **any** name in the zone it can write. It cannot read data or touch the host. | No stored credential at all. | No stored credential at all. |
 | Failure modes | Token expired or under-scoped; provider API outage; zone not yet delegated; TXT collisions when two challenges for the same name are in flight (Caddy serialises these). | Port 80 closed by the ISP or the router; CGNAT; captive portal intercepting the probe; a firewall rule blocking the CA's probe ranges; `trusted_only` aborting the probe. | Port 443 closed; an existing proxy answering 443 with the wrong cert; ALPN stripped by a middlebox. |
@@ -101,7 +101,7 @@ Justification, in the order that matters for this host:
    service subdomain, so adding `status.`, `hermes.`, or a later `chat.` costs
    no new issuance or installer prompt.
 4. The credential is the only cost, and it is a file on the Pi that cannot read
-   application data and cannot run anything (section 2.4 quantifies it).
+   application data and cannot run anything (section 2.7 quantifies it).
 
 ### 1.3 When HTTP-01 or TLS-ALPN-01 is the right choice instead
 
@@ -300,38 +300,56 @@ challenge name in a separate small zone, and scope the token to that second zone
 only. That path is not built here because it doubles the DNS surface for a risk
 already bounded by the dedicated zone.
 
-Verification that the scoping is what was intended:
+Verification that the scoping is what was intended. **The token must never
+appear in argv or in shell history** (section 8.7 is the governing rule). Read
+it into a variable in a root shell with history off, and hand the header to
+`curl` on stdin with `-K -`:
 
 ```bash
-# 1. The token's own permissions, printed by Cloudflare (must list exactly
-#    Zone:DNS:Edit and Zone:Zone:Read for one zone resource).
-curl -s -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
-  https://api.cloudflare.com/client/v4/user/tokens/verify | jq '.result.status'
+sudo -i
+HISTFILE=/dev/null
+
+CF_TOKEN="$(cat /etc/hybrid-ai/acme/cloudflare_dns_token)"
+
+# 1. The token itself is live.
+printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" \
+  | curl -sS -K - https://api.cloudflare.com/client/v4/user/tokens/verify \
+  | jq '.result.status'
 # expected: "active"
 
-# 2. Reading a zone we own must succeed...
-curl -s -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
-  "https://api.cloudflare.com/client/v4/zones?name=daemonhub.dev" | jq '.result | length'
+# 2. Reading the zone we own must succeed.
+printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" \
+  | curl -sS -K - 'https://api.cloudflare.com/client/v4/zones?name=daemonhub.dev' \
+  | jq '.result | length'
 # expected: 1
 
-# 3. ...and any other zone must be refused.
-curl -s -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
-  "https://api.cloudflare.com/client/v4/zones?name=example.com" | jq '.result | length'
+# 3. Any other zone must be refused.
+printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" \
+  | curl -sS -K - 'https://api.cloudflare.com/client/v4/zones?name=example.com' \
+  | jq '.result | length'
 # expected: 0
 
 # 4. A write outside the DNS record scope (creating a second zone) must 403.
-curl -s -o /dev/null -w '%{http_code}\n' -X POST \
-  -H "Authorization: Bearer $(sudo cat /etc/hybrid-ai/acme/cloudflare_dns_token)" \
-  -H 'Content-Type: application/json' \
-  --data '{"name":"scope-probe.example.com","account":{"id":"unknown"}}' \
-  https://api.cloudflare.com/client/v4/zones
+printf 'header = "Authorization: Bearer %s"\nContent-Type: application/json\n' \
+  "$CF_TOKEN" \
+  | curl -sS -K - -o /dev/null -w '%{http_code}\n' -X POST \
+      --data '{"name":"scope-probe.example.com","account":{"id":"unknown"}}' \
+      https://api.cloudflare.com/client/v4/zones
 # expected: 403 (or 401)
+
+unset CF_TOKEN
+exit
 ```
 
-Note the `$(sudo cat …)` pattern above reads the token into an argument. That is
-acceptable only in this one-off verification and it will appear in shell history.
-Prefer `curl -H @<(printf 'Authorization: Bearer %s\n' "$(sudo cat …)")` or, for
-repeated use, `export CF_TOKEN="$(sudo cat …)"` in a shell with `HISTFILE=/dev/null`.
+Why this form is safe:
+
+- The token is passed to `curl` through a config file on **stdin** (`-K -`), so
+  `ps auxww` shows only `curl -sS -K - …` and never the header value.
+- `HISTFILE=/dev/null` means no command you type in that shell is written to
+  history. The assignment line still expands at run time, not at write time.
+- `printf` is a shell builtin here, so the token is not an argument to an
+  external `/usr/bin/printf` process either.
+- `unset CF_TOKEN` before you exit removes it from the shell's environment.
 
 ### 2.7 What an attacker holding the token could and could not do
 
@@ -395,13 +413,12 @@ sudo tee /etc/dnsmasq.d/05-hybrid-ai.conf >/dev/null <<'EOF'
 # Internal address of this Pi as seen from the LAN.
 address=/daemonhub.dev/192.168.1.50
 
-# Explicit per-service entries. dnsmasq matches the longest suffix first, so
-# these are redundant with the wildcard above but are kept so a single service
-# can be pointed somewhere else (for example a test host) without touching the
+# Explicit per-service entries. They are redundant with the wildcard above but
+# are kept so a single service can be pointed somewhere else (for example a
+# test host) without touching the wildcard line.
 # wildcard line.
 address=/hermes.daemonhub.dev/192.168.1.50
 address=/status.daemonhub.dev/192.168.1.50
-address=/daemonhub.dev/192.168.1.50
 
 # The Pi's loopback name, unchanged from today.
 address=/jarvis.lan/192.168.1.50
@@ -417,18 +434,24 @@ sudo pihole restartdns
 Notes on the exact semantics:
 
 - `address=/daemonhub.dev/<ip>` is dnsmasq's wildcard form: it answers the apex
-  **and every subdomain** under `daemonhub.dev` with `<ip>`, at any depth.
-  Repeating it per service is documentation, not necessity, and the duplicate
-  apex line above is intentionally harmless.
+  **and every subdomain** under `daemonhub.dev` with `<ip>`, at any depth. There
+  is exactly one such line in the drop-in; the per-service lines are
+  documentation, not necessity.
 - dnsmasq has no `*.` glob syntax in `address=`; the `/<domain>/` form is the
   wildcard. Do not write `address=/*.daemonhub.dev/…`; that matches a literal
   `*`.
 - `local=/daemonhub.dev/` makes dnsmasq authoritative for the suffix so
   upstream servers are never asked.
-- Do not add `server=/daemonhub.dev/1.1.1.1` alongside `address=`; the last
-  matching directive in load order wins and the split horizon silently breaks.
-  File names sort lexically, so `05-hybrid-ai.conf` loads before Pi-hole's own
-  `01-pihole.conf`.
+- Do not add `server=/daemonhub.dev/[IP_ADDRESS]` alongside `address=`, because
+  a `server=` for the same suffix would answer those queries and the split
+  horizon silently breaks.
+- Load order does not matter here. Files are read in lexical order, so Pi-hole's
+  own `01-pihole.conf` loads **before** `05-hybrid-ai.conf`, but the `address=`
+  entries in this drop-in name distinct domains and conflict with nothing
+  Pi-hole writes.
+- Verify the drop-in before restarting: `sudo dnsmasq --test` passes, and
+  `grep -c '^address=/daemonhub.dev/' /etc/dnsmasq.d/05-hybrid-ai.conf`
+  returns `1`.
 - Replace `192.168.1.50` with the Pi's real LAN address
   (`hostname -I | awk '{print $1}'`, the same value `install.sh` derives at
   line 1169).
@@ -478,110 +501,131 @@ Documented consequences:
 
 ### 4.1 Proposed diff to `status/Caddyfile`
 
-One global concern changes and new site blocks are added. The `(trusted_only)`
-and `(secure_headers)` snippets are **unchanged**, and every HTTPS site imports
-`trusted_only` exactly as the HTTP sites do today.
+Neither existing snippet changes. `(trusted_only)` and `(secure_headers)` appear
+below as unchanged context lines with the same tabs and the same text they carry
+in `status/Caddyfile` -- `X-Frame-Options DENY`, `Referrer-Policy no-referrer`
+and the `-Server` strip included. HSTS is **additive**: it goes in a new
+`(hsts)` snippet and is never folded into `(secure_headers)`. Every HTTPS site
+imports `trusted_only` exactly as the HTTP sites do today.
+
+(Assumption) The build task starts from a tree that carries `(secure_headers)`,
+as the reviewed baseline does. Its exact text is the snippet restored by commit
+`5ea8f0c` ("Restore secure_headers on every Caddy site and handle"). If that
+snippet is absent from the tree the build task works in, the build task adds it
+from that commit verbatim -- never a relaxed variant.
 
 ```diff
  {
--        auto_https off
-+        # DNS-01 does not need Caddy's automatic HTTP challenge listener or its
-+        # automatic redirects: both are explicit below, so the behaviour is
-+        # visible in this file. HTTP-01 mode is the one exception; see
-+        # docs/tls-acme-design.md section 4.5.
-+        auto_https {$ACME_AUTO_HTTPS:off}
-         admin off
-+        email {$ACME_EMAIL}
-+        acme_ca {$ACME_CA}
-+        # Keep logs where the container's log collector already looks.
-+        log {
-+                output stdout
-+                format json
-+        }
+-	auto_https off
++	# DNS-01 does not need Caddy's automatic HTTP challenge listener or its
++	# automatic redirects: both are explicit below, so the behaviour is
++	# visible in this file. HTTP-01 mode is the one exception; see
++	# docs/tls-acme-design.md section 4.5.
++	auto_https {$ACME_AUTO_HTTPS:off}
+-	admin off
++	# Loopback INSIDE the container only, never published. This is what lets
++	# `caddy reload` apply a config change without a restart, which would
++	# drop in-flight WebSocket streams. The non-TLS build keeps `admin off`.
++	admin localhost:2019
++	email {$ACME_EMAIL}
++	acme_ca {$ACME_CA}
++	# Keep logs where the container's log collector already looks.
++	log {
++		output stdout
++		format json
++	}
  }
 
  (trusted_only) {
-         @untrusted not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fd7a:115c:a1e0::/48
-         abort @untrusted
+	@untrusted not remote_ip 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fd7a:115c:a1e0::/48
+	abort @untrusted
  }
 
  (secure_headers) {
-         header {
-                 Strict-Transport-Security "max-age=31536000; includeSubDomains"
-                 X-Content-Type-Options "nosniff"
-                 X-Frame-Options "SAMEORIGIN"
-                 Referrer-Policy "strict-origin-when-cross-origin"
-         }
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
  }
 
++(hsts) {
++	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
++}
++
 +(tls_dns) {
-+        # One DNS-01 challenge solves both the apex and the wildcard.
-+        tls {
-+                dns cloudflare {file./run/secrets/cloudflare_dns_token}
-+                propagation_timeout 120s
-+                propagation_delay 10s
-+                resolvers 1.1.1.1 8.8.8.8
-+        }
++	# One DNS-01 challenge solves both the apex and the wildcard.
++	tls {
++		dns cloudflare {file./run/secrets/cloudflare_dns_token}
++		propagation_timeout 120s
++		propagation_delay 10s
++		resolvers 1.1.1.1 8.8.8.8
++	}
 +}
 +
 +# --- HTTPS: daemonhub.dev ------------------------------------------------
 +https://{$TLS_DOMAIN} {
-+        import trusted_only
-+        import secure_headers
-+        import tls_dns
++	import trusted_only
++	import secure_headers
++	import hsts
++	import tls_dns
 +
-+        handle /status* {
-+                import trusted_only
-+                reverse_proxy status:8088
-+        }
-+        handle /hub* {
-+                import trusted_only
-+                reverse_proxy status:8088
-+        }
-+        handle /health {
-+                rewrite * /status/health-summary
-+                reverse_proxy status:8088
-+        }
-+        handle_path /ollama/* {
-+                import trusted_only
-+                reverse_proxy ollama:11434
-+        }
-+        handle {
-+                reverse_proxy open-webui:8080
-+        }
++	handle /status* {
++		import trusted_only
++		reverse_proxy status:8088
++	}
++	handle /hub* {
++		import trusted_only
++		reverse_proxy status:8088
++	}
++	handle /health {
++		rewrite * /status/health-summary
++		reverse_proxy status:8088
++	}
++	handle_path /ollama/* {
++		import trusted_only
++		reverse_proxy ollama:11434
++	}
++	handle {
++		reverse_proxy open-webui:8080
++	}
 +}
 +
 +https://hermes.{$TLS_DOMAIN} {
-+        import trusted_only
-+        import secure_headers
-+        import tls_dns
++	import trusted_only
++	import secure_headers
++	import hsts
++	import tls_dns
 +
-+        reverse_proxy hermes:8501
++	reverse_proxy hermes:8501
 +}
 +
 +https://status.{$TLS_DOMAIN} {
-+        import trusted_only
-+        import secure_headers
-+        import tls_dns
++	import trusted_only
++	import secure_headers
++	import hsts
++	import tls_dns
 +
-+        redir / /status 302
-+        reverse_proxy status:8088
++	redir / /status 302
++	reverse_proxy status:8088
 +}
 +
 +https://*.{$TLS_DOMAIN} {
-+        # Wildcard catch-all. Unknown subdomain gets a bare 404, so a probe
-+        # cannot enumerate services.
-+        import trusted_only
-+        import secure_headers
-+        import tls_dns
++	# Wildcard catch-all. Unknown subdomain gets a bare 404, so a probe
++	# cannot enumerate services. No (hsts): HSTS is only for the three
++	# named hosts above.
++	import trusted_only
++	import secure_headers
++	import tls_dns
 +
-+        respond 404
++	respond 404
 +}
 +
 +# --- HTTP -> HTTPS redirect (port 80 stays open for redirect + HTTP-01) ---
 +http://{$TLS_DOMAIN}, http://*.{$TLS_DOMAIN} {
-+        import trusted_only
-+        redir https://{host}{uri} 308
++	import trusted_only
++	redir https://{host}{uri} 308
 +}
 ```
 
@@ -596,9 +640,15 @@ Notes on the diff, all deliberate:
   HTTPS is not authentication. A certificate proves the *server's* identity to
   the browser; it says nothing about the *client*. Removing the allowlist would
   turn a private host into a public one.
-- **`(secure_headers)` is imported on HTTPS sites only.** Sending HSTS on plain
-  HTTP would be ignored at best and confusing at worst; `(secure_headers)` is
-  defined but its use is new.
+- **`(trusted_only)` and `(secure_headers)` are untouched.** Both appear in the
+  diff as context only: no line inside either snippet is added, removed or
+  modified. `(secure_headers)` keeps `X-Frame-Options DENY`,
+  `Referrer-Policy no-referrer` and the `-Server` strip.
+- **HSTS is additive, in a new `(hsts)` snippet.** It is imported by the three
+  named `daemonhub.dev` HTTPS sites only -- never on `jarvis.lan`, never on the
+  wildcard catch-all, and never merged into `(secure_headers)`. Sending HSTS on
+  plain HTTP would be ignored at best and confusing at worst, and a wildcard
+  site is exactly where a broad HSTS pin is least wanted.
 - **One `tls` block per site** means Caddy obtains one certificate per site
   block: the apex certificate and the wildcard. Both are DNS-01, both use the
   same challenge name, so Caddy serialises them.
@@ -716,12 +766,30 @@ and `cpus`, the same read-only Caddyfile mount, the same 128 MB ceiling. The
   explicit `http://` block still provides the 308.
 - **TLS-ALPN-01:** same as DNS-01, `auto_https off`. The challenge is solved on
   the 443 listener, which the `https://` sites already own.
-- **Admin API:** stays `admin off` globally. Nothing in this design needs the
-  admin API, so it is not re-enabled and not bound to any interface. Where a
-  later task needs it (for example `caddy reload`), the binding is
-  `admin localhost:2019` -- loopback inside the container, never published, and
-  reached with `docker compose exec`. `caddy reload` works over the loopback
-  admin endpoint in that mode.
+- **Admin API: TLS builds set `admin localhost:2019`; the non-TLS build keeps
+  `admin off`.** This is the **one deliberate departure from `admin off`**, and
+  it is deliberate because `caddy reload` needs an admin endpoint: without one,
+  applying an edited Caddyfile means `docker compose restart proxy`, which drops
+  every in-flight WebSocket stream, including an active Open WebUI chat.
+  Reloading over the loopback admin endpoint applies the change with zero
+  downtime instead.
+
+  The binding is loopback **inside the container only**. Port 2019 is never
+  published: there is no `2019:2019` mapping in `docker-compose.yml`, no
+  `expose:`, and the container still runs `no-new-privileges:true`. The only way
+  to reach it is `docker compose exec proxy …`, which runs a process in the
+  container's own network namespace.
+
+  Verify both halves:
+
+```bash
+# Inside the container: 2019 bound to loopback, nothing else new.
+docker compose exec proxy ss -ltn
+# expected: 127.0.0.1:2019, plus :80 and :443 listeners
+
+# On the host: no 2019 listener at all.
+ss -ltn | grep 2019 || echo "no host listener on 2019 (expected)"
+```
 
 ### 4.6 Secrets at runtime
 
@@ -798,9 +866,11 @@ docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml \
   is not required**, and is actively discouraged: `docker compose restart proxy`
   drops every in-flight WebSocket, which includes an active Open WebUI chat
   stream.
-- If the admin endpoint is off (the DNS-01 default), `caddy reload` fails with
+- The non-TLS build keeps `admin off`, so there `caddy reload` fails with
   `connect: connection refused`. In that mode the apply path is
-  `docker compose up -d proxy` after `caddy validate` in a throwaway container:
+  `docker compose up -d proxy` after `caddy validate` in a throwaway container.
+  This path is not used for TLS builds, which always have the loopback admin
+  endpoint:
 
 ```bash
 docker run --rm -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
@@ -808,13 +878,15 @@ docker run --rm -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
 docker compose up -d proxy
 ```
 
-**Decision on which of the two applies: TLS builds set `admin localhost:2019`
-so `caddy reload` works and restarts are avoidable.** The admin listener is
-loopback-only inside the container, the port is not published, and the container
-still runs with `no-new-privileges:true`. This is the one deliberate departure
-from `admin off`, and it is required to honour "reload without restart". For
-deployments that will not accept an admin listener at all, the
-`docker compose up -d proxy` path above is the documented alternative.
+**Decision: every TLS build sets `admin localhost:2019`, so `caddy reload`
+works and a restart is never needed.** This is the one deliberate departure from
+`admin off`, and it is required to honour "reload without restart": without an
+admin endpoint, applying an edited Caddyfile means restarting the proxy, which
+drops in-flight WebSocket streams. The listener is loopback-only **inside the
+container**, published on no host port, and the container still runs with
+`no-new-privileges:true`. Verify it as in section 4.5: `ss -ltn` inside the
+container shows `[IP_ADDRESS]:2019` and nothing else new, and `ss -ltn` on the
+host shows no 2019 listener. The non-TLS build keeps `admin off`.
 
 ### 5.4 Proving renewal works
 
@@ -926,7 +998,8 @@ for a staging cert would send an operator down the wrong path.
 | All hostnames fine, more than 14 days left | OK | `0` |
 | Any hostname with fewer than **14** days left, but at least 7 | WARN | `1` |
 | Any hostname with fewer than **7** days left, but not expired | CRITICAL | `2` |
-| Any hostname expired, no certificate served, chain invalid, or SAN mismatch | CRITICAL | `2` for expired/SAN; `3` for missing/invalid |
+| Any hostname expired | CRITICAL | `2` |
+| No certificate served, chain invalid, or SAN mismatch | MISSING/INVALID | `3` |
 | Could not connect to `proxy:443` at all, or TLS disabled | MISSING/INVALID | `3` |
 
 Exact rule set, so an implementation has nothing to interpret:
@@ -1359,8 +1432,9 @@ Restated explicitly, because every later task will be judged against this list.
 2. **Loopback-only binds stay loopback-only.** `ollama` publishes
    `127.0.0.1:11434`, `status` publishes nothing, `openhands` stays on
    `127.0.0.1:3001`. The Caddy admin endpoint, if enabled, binds
-   `localhost:2019` inside the container and is never published. Port 443 is the
-   only new listener, and it is behind the same allowlist as port 80.
+   `localhost:2019` **inside the container**; it is never published on a host
+   port, and the non-TLS build keeps `admin off`. Port 443 is the only new
+   *published* listener, and it is behind the same allowlist as port 80.
 3. **No secrets in git.** See 8.7. The token never enters the repo, the image,
    `.env`, an argument, or a log.
 4. **The OpenHands credential stays read-only.** The agent's repo clone remains
@@ -1392,7 +1466,7 @@ Everything this design creates or changes. "Repo" means this git repository;
 | # | Path | Repo / host | Action | Purpose | Permissions / owner |
 |---|---|---|---|---|---|
 | 1 | `docs/tls-acme-design.md` | repo | **create** | This document | `0644`, tracked |
-| 2 | `status/Caddyfile` | repo | modify | Add `https://` site blocks, `(tls_dns)` snippet, `http://` 308 redirect site, global `email`/`acme_ca`/`auto_https` vars, `admin localhost:2019`, `(secure_headers)` imports on HTTPS only. Keep `(trusted_only)` unchanged everywhere. | `0644` |
+| 2 | `status/Caddyfile` | repo | modify | Add `https://` site blocks, new `(hsts)` and `(tls_dns)` snippets, `http://` 308 redirect site, global `email`/`acme_ca`/`auto_https` vars, and `admin off` -> `admin localhost:2019` (loopback in-container only, never published; the non-TLS build keeps `admin off`). `(trusted_only)` and `(secure_headers)` stay byte-for-byte unchanged -- no line inside either may be added, removed or modified. | `0644` |
 | 3 | `status/Caddyfile.tmpl` | repo | **create** | Managed-region template so the installer can render TLS/non-TLS variants idempotently (8.4) | `0644` |
 | 4 | `docker-compose.yml` | repo | modify | Proxy `build:`/`image:`, `443:443` + `443:443/udp` publishes, `secrets:` entry and top-level `secrets:` block, `TLS_*`/`ACME_*` env; `status` service gains `TLS_ENABLED`/`TLS_HOSTS`/`TLS_PROBE_ADDR` | `0644` |
 | 5 | `docker-compose.yml.tmpl` | repo | **create** | Same managed-region pattern for the TLS / non-TLS compose variants | `0644` |
@@ -1653,11 +1727,14 @@ than with the whole document.
    outside the repo, with the wildcard form explained and the apex plus
    per-service entries written out.
 7. **Explicit `https://` site blocks, explicit `http://` 308 redirects, and
-   `auto_https off` retained** for DNS-01. `(trusted_only)` and
-   `(secure_headers)` preserved; the allowlist is not widened.
+   `auto_https off` retained** for DNS-01. Neither existing snippet changes:
+   `(trusted_only)` and `(secure_headers)` are preserved byte-for-byte, and HSTS
+   is additive in a new `(hsts)` snippet imported only by the three named
+   `daemonhub.dev` sites. The allowlist is not widened.
 8. **Caddy's own renewal, plus a read-only daily watchdog.** No second issuer.
-   Reload in place, never restart, with a loopback-only admin endpoint to make
-   reload possible.
+   Reload in place, never restart, with the admin endpoint enabled on TLS builds
+   as `admin localhost:2019` -- loopback inside the container, never published;
+   the non-TLS build keeps `admin off`.
 9. **Certificate health by live handshake**, with 14-day WARN and 7-day
    CRITICAL thresholds, exit codes 0/1/2/3, and a new `GET /status/tls`
    endpoint that never reads keys.
@@ -1665,3 +1742,16 @@ than with the whole document.
     with a concrete five-condition trigger.
 11. **`TLS_ENABLED` defaults to `no`,** and a disabled install stays
     byte-for-byte as it is today.
+
+### Reviewer checklist
+
+- **A later `git diff status/Caddyfile` must show no removed or modified line
+  inside `(trusted_only)` or `(secure_headers)`.** Both snippets must be byte-
+  identical to the snippet as restored by commit `5ea8f0c`, `(secure_headers)`
+  still carrying
+  `X-Frame-Options DENY`, `Referrer-Policy no-referrer` and `-Server`, and HSTS
+  must arrive only through the new `(hsts)` snippet.
+- The allowlist ranges are untouched: loopback, the RFC 1918 ranges, the mesh
+  `[IP_ADDRESS]/10` (rendered `[IP_ADDRESS]/10`) and `fd7a:115c:a1e0::/48`.
+- `docker compose exec proxy ss -ltn` shows `[IP_ADDRESS]:2019` and nothing else
+  new, and `ss -ltn` on the host shows no 2019 listener.
