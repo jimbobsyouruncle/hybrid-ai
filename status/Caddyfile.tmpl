@@ -10,7 +10,7 @@
 	# automatic redirects: both are explicit below, so the behaviour is
 	# visible in this file. HTTP-01 mode is the one exception; see
 	# docs/tls-acme-design.md section 4.5.
-	auto_https {$ACME_AUTO_HTTPS:off}
+	auto_https {$ACME_AUTO_HTTPS:disable_redirects}
 	# Loopback INSIDE the container only, never published. This is what lets
 	# `caddy reload` apply a config change without a restart, which would
 	# drop in-flight WebSocket streams. The non-TLS build keeps `admin off`.

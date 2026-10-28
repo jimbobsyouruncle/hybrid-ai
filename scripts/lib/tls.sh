@@ -227,12 +227,14 @@ tls_validate_settings() {
     tls_validate_token_file "${HYBRID_AI_TLS_TOKEN_FILE:-}"
   fi
   if [[ "${TLS_VALIDATION}" == http ]]; then
-    # Section 4.5: HTTP-01 needs Caddy's challenge listener on port 80.
-    export ACME_AUTO_HTTPS="disable_redirects"
     tls__warn "HTTP-01 cannot issue a wildcard certificate: this install gets three per-host certificates and no wildcard for *.${TLS_DOMAIN}."
-  else
-    export ACME_AUTO_HTTPS="off"
   fi
+  # Section 4.5: `auto_https off` disables Caddy's certificate management
+  # entirely, so a DNS-01 install would report success and issue no
+  # certificate. Both modes keep issuance with `disable_redirects`; the explicit
+  # `http://` block below is the one 308 redirect, and HTTP-01 additionally
+  # needs Caddy's challenge listener on port 80.
+  export ACME_AUTO_HTTPS="disable_redirects"
   # Written to .env by install.sh; exported so it survives this function.
   export TLS_HOSTS="${TLS_DOMAIN},hermes.${TLS_DOMAIN},status.${TLS_DOMAIN}"
 }
@@ -391,7 +393,8 @@ tls_variants() {
 # Replaces the allowlisted placeholders. Values are built only from validated
 # input, never from free text handed in by the operator.
 tls_substitute() {  # stdin -> stdout
-  awk -v secret="${TLS_RENDER_SECRET_NAME:-}" -v solver="${TLS_RENDER_SOLVER:-}" '
+  awk -v secret="${TLS_RENDER_SECRET_NAME:-}" -v solver="${TLS_RENDER_SOLVER:-}" \
+      -v auto_https="${ACME_AUTO_HTTPS:-disable_redirects}" '
     function swap(line, token, value,   out, i, len) {
       out = ""; len = length(token)
       while ((i = index(line, token)) > 0) {
@@ -400,8 +403,24 @@ tls_substitute() {  # stdin -> stdout
       }
       return out line
     }
-    { print swap(swap($0, "%TLS_SECRET_NAME%", secret), "%TLS_SOLVER_BLOCK%", solver) }
+    { print swap(swap(swap($0, "%TLS_SECRET_NAME%", secret), "%TLS_SOLVER_BLOCK%", solver), "{$ACME_AUTO_HTTPS:disable_redirects}", auto_https) }
   '
+}
+
+# RFC2136 values are interpolated into the rendered Caddyfile, so a newline plus
+# `}` would inject an arbitrary directive (for example `admin`). Both inputs are
+# validated BEFORE any interpolation, and no message echoes the secret value.
+tls_validate_rfc2136_key_name() {  # VALUE
+  local v="$1"
+  [[ $v =~ ^[A-Za-z0-9._-]+$ ]] || tls__die "RFC2136_KEY_NAME must contain only letters, digits, '.', '_' or '-' (an RFC2136 TSIG key name). Remove whitespace, braces and control characters from RFC2136_KEY_NAME in ${ENV_FILE} and re-run."
+}
+
+tls_validate_rfc2136_server() {  # VALUE
+  local v="$1"
+  if [[ $v =~ [[:space:][:cntrl:]] || $v == *"{"* || $v == *"}"* ]]; then
+    tls__die "RFC2136_SERVER must not contain whitespace, braces or control characters. Set RFC2136_SERVER in ${ENV_FILE} to the authoritative nameserver as host or host:port and re-run."
+  fi
+  [[ $v =~ ^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?$ ]] || tls__die "RFC2136_SERVER must be a hostname or IP address with an optional :port (for example ns1.example.com:53). Fix RFC2136_SERVER in ${ENV_FILE} and re-run."
 }
 
 tls_solver_block() {
@@ -429,10 +448,16 @@ tls_prepare_render_values() {  # VARIANTS
   TLS_RENDER_SECRET_NAME=""
   TLS_RENDER_SOLVER=""
   [[ " $variants " == *" on "* ]] || return 0
+  # The renderer owns this value too, so a render that did not go through
+  # tls_validate_settings (the test harness, --dry-run) still emits a Caddyfile
+  # that keeps certificate management.
+  export ACME_AUTO_HTTPS="disable_redirects"
   if [[ "${TLS_VALIDATION:-dns}" == dns ]]; then
     if [[ "${ACME_DNS_PROVIDER:-cloudflare}" == rfc2136 ]]; then
       [[ -n "${RFC2136_KEY_NAME:-}" ]] || tls__die "ACME_DNS_PROVIDER=rfc2136 needs RFC2136_KEY_NAME (the TSIG key name) in ${ENV_FILE}."
       [[ -n "${RFC2136_SERVER:-}" ]] || tls__die "ACME_DNS_PROVIDER=rfc2136 needs RFC2136_SERVER (the authoritative nameserver, host:port) in ${ENV_FILE}."
+      tls_validate_rfc2136_key_name "${RFC2136_KEY_NAME}"
+      tls_validate_rfc2136_server "${RFC2136_SERVER}"
     fi
     TLS_RENDER_SECRET_NAME="$(tls_secret_name "${ACME_DNS_PROVIDER:-cloudflare}")"
   fi
@@ -543,6 +568,7 @@ tls_render_and_install() {
   mv -f -- "$compose_tmp" "$compose_dest"
   tls__ok "status/Caddyfile rendered (TLS ${variant})."
   tls__ok "docker-compose.yml rendered (TLS ${variant})."
+  tls_print_ca_caution
 }
 
 # ---------------------------------------------------------------------------
@@ -628,6 +654,19 @@ tls_print_urls() {
   printf '    Hermes Agent : https://hermes.%s\n' "${TLS_DOMAIN}"
   printf '    Status Page  : https://status.%s\n' "${TLS_DOMAIN}"
   printf '    Ollama API   : https://%s/ollama/\n' "${TLS_DOMAIN}"
+  tls_print_ca_caution
+}
+
+# B3: a staging certificate is not trusted by any browser. Silence here looked
+# like a broken install, so the completion output names the issuer and the fix.
+tls_print_ca_caution() {
+  tls_is_on || return 0
+  local label
+  label="$(tls_ca_label "${TLS_CA_URL:-${ACME_CA:-}}")"
+  [[ $label == staging ]] || return 0
+  printf '\n'
+  tls__warn "The certificate is issued by the Let's Encrypt STAGING CA: browsers and clients will report it as untrusted, and it is not valid for public use."
+  tls__warn "To switch to production, re-run: ./install.sh --tls-acme-ca production  (or set ACME_CA=production in the stack .env), then re-render with ./install.sh --dry-run --tls-acme-ca production to preview the change."
 }
 
 # ---------------------------------------------------------------------------

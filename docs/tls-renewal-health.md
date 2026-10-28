@@ -21,6 +21,7 @@ thresholds are flags.
 | connect fails / no certificate             | missing    | 3    |
 | chain does not verify                      | missing    | 3    |
 | SAN does not contain the hostname          | missing    | 3    |
+| staging issuer while `ACME_CA=production`   | missing    | 3    |
 | `days <= 0` (expired)                      | critical   | 2    |
 | `days < 7`                                 | critical   | 2    |
 | `days < 14`                                | warn       | 1    |
@@ -36,6 +37,14 @@ thresholds are flags.
 - When a certificate is present but the chain does not verify, the script still
   reports the SAN and the days left. A staging certificate therefore stays
   diagnosable instead of being reported as unreachable.
+- The staging-issuer row is a distinct case. When `ACME_CA` resolves to
+  production but the served certificate issuer is a Let's Encrypt staging CA
+  (issuer `CN`/`O` carrying `(STAGING)` or `Fake LE`), the script exits 3 with
+  `staging issuer while ACME_CA is production`. That means the re-render never
+  took effect or a stale certificate is deployed. When `ACME_CA` is staging, or
+  not set at all, this case never fires: there is no new failure for a staging
+  install. Expiry is still tested first, so an expired staging certificate
+  reports `expired` (exit 2).
 
 ## Why there is no second renewer
 
@@ -249,7 +258,9 @@ against staging.
 - A staging CA makes `chain_valid=false` by design, so `tls-check.sh` reports
   exit 3 for those hosts. That is correct behaviour, not a bug: an untrusted
   chain is untrusted. The days and SAN are still printed so the certificate
-  remains diagnosable.
+  remains diagnosable. A staging issuer served while `ACME_CA=production` is
+  reported as its own named case, so the operator can tell a forgotten staging
+  certificate from an ordinary trust failure.
 - The webhook transport proves delivery to that URL, not that a human read the
   alert. Pair it with the journald line and with `doctor.sh` exit codes.
 - A host that is off when the timer would fire catches up on boot
