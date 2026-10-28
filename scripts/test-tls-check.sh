@@ -449,7 +449,7 @@ fi
 if [[ -x "${AUDIT}" || -f "${AUDIT}" ]]; then
   data_dir="$WORK/deploy-data"
   log_dir="$WORK/deploy-logs"
-  host_dir="${data_dir}/webui_data/caddy/caddy/certificates/acme-staging/tls-test.example"
+  host_dir="${data_dir}/caddy/caddy/certificates/acme-staging/tls-test.example"
   mkdir -p "$host_dir"
   cp "${LEAF[good]}.crt" "${host_dir}/tls-test.example.crt"
 

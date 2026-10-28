@@ -361,7 +361,7 @@ services:
       - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
       # Caddy validates its config at boot; a syntax error here stops the
       # proxy only, leaving Open WebUI reachable on :3000.
-      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data/caddy:/data
+      - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/caddy:/data
     environment:
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
       DO_NOT_TRACK: "true"

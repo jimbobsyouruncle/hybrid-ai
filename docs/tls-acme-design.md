@@ -20,7 +20,7 @@ Everything below is grounded in the current repository:
   `hybrid-ai-proxy`, `restart: unless-stopped`, `depends_on` open-webui and
   status, `mem_limit: 128m`, `cpus: "0.5"`, publishes `"80:80"` only, mounts
   `./status/Caddyfile:/etc/caddy/Caddyfile:ro` and
-  `${HYBRID_AI_DATA_DIR}/webui_data/caddy:/data`, sets `LOCAL_DOMAIN` and
+  `${HYBRID_AI_DATA_DIR}/caddy:/data`, sets `LOCAL_DOMAIN` and
   `DO_NOT_TRACK`, `security_opt: no-new-privileges:true`, healthcheck probing
   `http://[IP_ADDRESS]:80/status/healthz`, json-file logging with rotation), and
   the `status` service, whose own healthcheck probes
@@ -775,21 +775,21 @@ Notes on the diff, all deliberate:
 | Item | Value |
 |---|---|
 | Inside the container | `/data/caddy/certificates/` (Caddy's `$XDG_DATA_HOME` under `/data`) |
-| On the host | `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/` -- the `proxy` mount is `…/webui_data/caddy:/data`, so `/data/caddy` lands one level deeper |
+| On the host | `${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates/` -- the `proxy` mount is `…/caddy:/data`, so `/data/caddy` lands one level deeper (outside the `status` container's read-only `webui_data` mount) |
 | Production CA directory | `acme-v02.api.letsencrypt.org-directory/<hostname>/` |
 | Staging CA directory | `acme-staging-v02.api.letsencrypt.org-directory/<hostname>/` |
 | Files per host | `<host>.crt`, `<host>.key`, `<host>.json` (metadata: `sans`, `not_after`, `renewal_info`) |
 | Owner | `root:root` inside the container (the caddy image runs as root by default and must, to bind 80/443 and write `/data`) |
 | Modes | Caddy creates `0700` directories and `0600` files on first write. Do not relax them. |
-| Parent directory owner | The installing user owns `${HYBRID_AI_DATA_DIR}/webui_data/caddy`; Caddy's earlier writes may have created it as the container's root user. The installer ensures the directory exists and is `0700` before the first start, and never makes it group- or world-readable. |
+| Parent directory owner | The installing user owns `${HYBRID_AI_DATA_DIR}/caddy`; Caddy's earlier writes may have created it as the container's root user. The installer ensures the directory exists and is `0700` before the first start, and never makes it group- or world-readable. |
 | Read by | The `proxy` container only. **The `status` container must not mount it**, because it contains private keys; `status` never needs key material (section 6). |
 
 Verified after issuance:
 
 ```bash
-sudo ls -l "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/daemonhub.dev/"
+sudo ls -l "${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/daemonhub.dev/"
 # expected: -rw------- root root  <host>.crt/.key/.json
-sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates"
+sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates"
 # expected: 700 root:root
 ```
 
@@ -836,7 +836,7 @@ inside the container, not a client request.
        - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
        # Caddy validates its config at boot; a syntax error here stops the
        # proxy only, leaving Open WebUI reachable on :3000.
-       - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data/caddy:/data
+       - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/caddy:/data
 +    secrets:
 +      - cloudflare_dns_token
      environment:
@@ -1055,8 +1055,8 @@ openssl s_client -connect 127.0.0.1:443 -servername daemonhub.dev </dev/null 2>/
 # 4. Force a renewal without waiting 60 days: move the certificate aside and
 #    restart the proxy. Caddy sees no managed certificate and reissues.
 docker compose stop proxy
-sudo mv "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/daemonhub.dev" \
-        "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/staging-hold/daemonhub.dev.$(date +%s)"
+sudo mv "${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/daemonhub.dev" \
+        "${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates/staging-hold/daemonhub.dev.$(date +%s)"
 docker compose start proxy
 docker compose logs --since 2m proxy | grep -iE 'obtaining|renew|certificate' | head
 # expected: "obtaining certificate" then "certificate obtained successfully"
@@ -1400,7 +1400,7 @@ curl -sS http://hermes.jarvis.lan/            # -> 200
 curl -sS http://status.jarvis.lan/status/healthz  # -> ok
 ```
 
-The certificate storage under `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates`
+The certificate storage under `${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates`
 is deliberately **left in place** by a rollback: it holds no state that hurts,
 and re-enabling TLS then resumes with the existing certificate instead of
 issuing a duplicate and burning rate limit. Delete it only when the rollback is
@@ -1479,7 +1479,7 @@ Re-running the installer must be a no-op when nothing changed:
    renderer strips any existing managed region and writes exactly one. Running
    twice produces a byte-identical file (`sha256sum` comparison is the test).
 2. **Certificates are never clobbered.** The install never deletes
-   `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates`. Reissuing is
+   `${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates`. Reissuing is
    Caddy's decision, not the installer's. The only file the installer *moves* is
    under an explicit `--force-reissue`, and it moves rather than deletes.
 3. **.env is rewritten, not appended** (existing behaviour: `mv -f` then
@@ -1589,6 +1589,19 @@ Restated explicitly, because every later task will be judged against this list.
    Storage is `0700` directories and `0600` files, owned by container root.
    Health checks use a TLS handshake, not the key files.
 
+   Caddy's `/data` bind source is `${HYBRID_AI_DATA_DIR}/caddy`, a sibling of
+   `webui_data`, so the ACME key tree is **outside** the `webui_data` directory
+   the `status` container mounts read-only at `/data/webui_data`. The parent
+   directory is created by the installer as `0700`, owned by the installing
+   user, and is never group- or world-readable.
+
+   The old `${HYBRID_AI_DATA_DIR}/webui_data/caddy` directory is **not**
+   removed or migrated: it is left in place as a harmless orphan and may be
+   deleted after upgrade. A host that ever enabled TLS must inspect it for key
+   material (`sudo ls -la "${HYBRID_AI_DATA_DIR}/webui_data/caddy"`) before
+   deleting it, because an earlier Caddy run may have written private keys
+   there.
+
 ---
 
 ## 10. Consolidated file list
@@ -1617,7 +1630,7 @@ Everything this design creates or changes. "Repo" means this git repository;
 | 17 | `/etc/hybrid-ai/acme/cloudflare_dns_token` | host | **create (operator)** | Cloudflare API token, `Zone:DNS:Edit` + `Zone:Zone:Read` on `daemonhub.dev` only | `0600`, `root:root`; parent dir `0700 root:root` |
 | 18 | `/etc/hybrid-ai/acme/rfc2136_key_secret` | host | create (operator, only for the RFC 2136 provider) | TSIG secret for dynamic DNS updates | `0600`, `root:root` |
 | 19 | `/etc/dnsmasq.d/05-hybrid-ai.conf` | host (Pi-hole) | **create** | Split-horizon rewrite for `daemonhub.dev` (3.2). Host state, not a repo file. | `0644`, `root:root`; read by `pihole-FTL` |
-| 20 | `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/` | host | created by Caddy | Certificate and key storage; `acme-v02…` and `acme-staging-v02…` subdirectories per CA | `0700` dirs, `0600` files, `root:root` (container root) |
+| 20 | `${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates/` | host | created by Caddy | Certificate and key storage; `acme-v02…` and `acme-staging-v02…` subdirectories per CA | `0700` dirs, `0600` files, `root:root` (container root) |
 | 21 | `${HYBRID_AI_LOG_DIR}/tls-check.log` | host | created by `tls-check.sh` | Append-only audit record of every issuance and renewal observation | `0600`, installing user |
 | 22 | `${HYBRID_AI_LOG_DIR}/install.log` | host | appended by `install.sh` | Existing event log; gains `tls_enabled` / `tls_cert_issued` events, never a token | `0600` |
 
@@ -1640,7 +1653,7 @@ design touches.
 | `OPENROUTER_API_KEY` (existing) | Inference API key | `$ENV_FILE` | `0600` | `open-webui`, `openhands`, `hermes` | Existing risk, unchanged. Not used by TLS. |
 | `RUNPOD_API_KEY` (existing) | RunPod control-plane key | `$ENV_FILE` | `0600` | `install.sh`, `openwebui` pipe | Existing risk, unchanged. Not used by TLS. |
 | `ACME_EMAIL` | **Not a secret.** Account contact address | `$ENV_FILE`, rendered into the Caddyfile | `0600` file, `0644` config | `caddy` | Public metadata in the issued certificate's CA account and in CT logs. No access granted. |
-| Certificate private keys | Per-host private keys | `${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates/` | `0600`, `0700` dirs | `caddy` only; **not** mounted into `status` | Attacker can impersonate the site to clients that do not check the chain and can decrypt recorded traffic to that site if they also control the network path. Cannot reach any service credential. Rotate: delete the host directory and let Caddy reissue (section 5.4 step 4). |
+| Certificate private keys | Per-host private keys | `${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates/` | `0600`, `0700` dirs | `caddy` only; **not** mounted into `status` | Attacker can impersonate the site to clients that do not check the chain and can decrypt recorded traffic to that site if they also control the network path. Cannot reach any service credential. Rotate: delete the host directory and let Caddy reissue (section 5.4 step 4). |
 | `TLS_HOSTS`, `TLS_DOMAIN`, `ACME_CA`, `TLS_VALIDATION`, `ACME_DNS_PROVIDER` | **Not secrets.** Configuration | `$ENV_FILE`, compose env | `0600` file | `caddy`, `status` | Reveal hostnames and the CA in use. No access granted. |
 
 ---
@@ -1783,7 +1796,7 @@ docker compose exec proxy sh -c \
   'ls /data/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/'
 # expected: daemonhub.dev  hermes.daemonhub.dev  status.daemonhub.dev  wildcard_.daemonhub.dev
 
-sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificates"
+sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates"
 # expected: 700 root:root
 
 openssl s_client -connect 127.0.0.1:443 -servername daemonhub.dev </dev/null 2>/dev/null \

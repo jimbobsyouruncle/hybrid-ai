@@ -819,7 +819,8 @@ for f in "$HYBRID_AI_INSTALL_LOG" "$BACKUP_LOG"; do
   fi
 done
 
-mkdir -p "$HYBRID_AI_WEBUI_DATA_DIR/caddy"
+mkdir -p "$HYBRID_AI_CADDY_DATA_DIR"
+chmod 700 "$HYBRID_AI_CADDY_DATA_DIR"
 mkdir -p "$HYBRID_AI_HERMES_DATA_DIR"
 
 mkdir -p "$OPENHANDS_STATE_DIR"
