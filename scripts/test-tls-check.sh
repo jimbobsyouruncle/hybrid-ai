@@ -339,6 +339,52 @@ fi
 
 stop_server
 
+# --- case 6b: staging issuer while production is configured -> exit 3 ------
+# A staging-signed leaf served after ACME_CA was switched to production means
+# the re-render never took effect. The watchdog must say so and exit 3.
+STAGING_CA_DIR="$WORK/ca-staging"
+mkdir -p "$STAGING_CA_DIR"
+if make_ca "$STAGING_CA_DIR" "Fake LE Intermediate X1 (STAGING)" \
+   && build_leaf staging_cert "$STAGING_CA_DIR" "DNS:${HOSTNAME_TEST}" 90; then
+  PROD_ENV="$WORK/env-production"
+  printf 'TLS_ENABLED=yes\nLOCAL_DOMAIN=%s\nACME_CA=production\n' "$HOSTNAME_TEST" > "$PROD_ENV"
+  STAGING_ENV="$WORK/env-staging"
+  printf 'TLS_ENABLED=yes\nLOCAL_DOMAIN=%s\nACME_CA=staging\n' "$HOSTNAME_TEST" > "$STAGING_ENV"
+
+  port="$(start_server "${LEAF[staging_cert]}")"
+  if [[ -z "$port" ]]; then
+    skipped "could not serve the staging-issuer fixture"
+  else
+    out="$(bash "$CHECK" --host "$HOSTNAME_TEST" --probe-addr "${LOOPBACK}:${port}" \
+             --env-file "$PROD_ENV" --ca-file "$STAGING_CA_DIR/ca.crt" 2>&1)"; rc=$?
+    assert_exit "staging issuer with ACME_CA=production" 3 "$rc"
+    if printf '%s\n' "$out" | grep -q 'staging issuer while ACME_CA is production'; then
+      ok "staging issuer with a production CA names the mismatch"
+    else
+      bad "staging issuer with a production CA did not name the mismatch"
+    fi
+
+    # Same certificate, staging configured: no new failure. The chain is
+    # trusted here through --ca-file, so the documented 0 path is unchanged.
+    out="$(bash "$CHECK" --host "$HOSTNAME_TEST" --probe-addr "${LOOPBACK}:${port}" \
+             --env-file "$STAGING_ENV" --ca-file "$STAGING_CA_DIR/ca.crt" 2>&1)"; rc=$?
+    assert_exit "staging issuer with ACME_CA=staging" 0 "$rc"
+    if printf '%s\n' "$out" | grep -q 'staging issuer while ACME_CA is production'; then
+      bad "staging issuer with a staging CA still reported a production mismatch"
+    else
+      ok "staging issuer with a staging CA adds no failure"
+    fi
+
+    # No ACME_CA at all must never add a failure either.
+    out="$(bash "$CHECK" --host "$HOSTNAME_TEST" --probe-addr "${LOOPBACK}:${port}" \
+             --env-file "$ENV_FILE" --ca-file "$STAGING_CA_DIR/ca.crt" 2>&1)"; rc=$?
+    assert_exit "staging issuer with no ACME_CA configured" 0 "$rc"
+    stop_server
+  fi
+else
+  skipped "staging-issuer fixtures (could not generate the certificate)"
+fi
+
 # --- case 7: alert self-test -------------------------------------------
 if [[ -f "$ALERT" ]]; then
   sink="$WORK/sink-selftest"

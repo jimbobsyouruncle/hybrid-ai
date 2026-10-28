@@ -121,6 +121,14 @@ expect "$WORK/on1/Caddyfile" $'^\tadmin localhost:2019$' \
   "TLS-on Caddyfile binds admin on in-container loopback"
 expect "$WORK/off1/Caddyfile" 'admin off' "TLS-off Caddyfile keeps admin off"
 
+# B1: `auto_https off` disables Caddy's certificate management, so a DNS-01
+# install would "succeed" and issue no certificate. The explicit http:// block
+# is the 308 redirect, so disable_redirects is the correct value.
+expect "$WORK/on1/Caddyfile" '^[[:space:]]*auto_https disable_redirects$' \
+  "TLS-on DNS-01 Caddyfile keeps certificate management (auto_https disable_redirects)"
+reject "$WORK/on1/Caddyfile" 'auto_https off' \
+  "TLS-on DNS-01 Caddyfile does not disable certificate management (no auto_https off)"
+
 expect "$WORK/on1/docker-compose.yml" '^      - "443:443"$' "TLS-on compose publishes 443"
 reject "$WORK/off1/docker-compose.yml" '"443:443"' "TLS-off compose does not publish 443"
 expect "$WORK/on1/docker-compose.yml" '^secrets:' "TLS-on compose declares a file-backed secret"
@@ -146,6 +154,90 @@ TLS_VALIDATION="http"
 render "on dns" "$WORK/http01"
 expect "$WORK/http01/Caddyfile" 'redir https://{host}{uri} 308' \
   "http-01 render keeps the HTTP->HTTPS redirect"
+expect "$WORK/http01/Caddyfile" '^[[:space:]]*auto_https disable_redirects$' \
+  "http-01 render keeps certificate management (auto_https disable_redirects)"
+reject "$WORK/http01/Caddyfile" 'auto_https off' \
+  "http-01 render does not disable certificate management"
+
+# --- TLS-ALPN-01: the other non-http mode keeps certificate management ------
+TLS_VALIDATION="tlsalpn"
+ACME_DNS_PROVIDER="cloudflare"
+render "on" "$WORK/tlsalpn"
+expect "$WORK/tlsalpn/Caddyfile" '^[[:space:]]*auto_https disable_redirects$' \
+  "tls-alpn-01 render keeps certificate management (auto_https disable_redirects)"
+reject "$WORK/tlsalpn/Caddyfile" 'auto_https off' \
+  "tls-alpn-01 render does not disable certificate management"
+
+# --- B3: the completion output names a staging issuer and the fix ----------
+TLS_VALIDATION="dns"
+ACME_DNS_PROVIDER="cloudflare"
+ACME_CA="$TLS_CA_STAGING_URL"
+TLS_CA_URL="$(tls_validate_ca "$ACME_CA")"
+staging_banner="$(tls_print_ca_caution 2>&1 || true)"
+if [[ "$staging_banner" == *STAGING* ]] \
+   && [[ "$staging_banner" == *"--tls-acme-ca production"* ]] \
+   && [[ "$staging_banner" == *"ACME_CA=production"* ]]; then
+  pass "staging CA completion output warns about untrusted certificates and names the fix"
+else
+  fail "staging CA completion output did not warn about untrusted certificates and the fix"
+fi
+
+ACME_CA="$TLS_CA_PRODUCTION_URL"
+TLS_CA_URL="$(tls_validate_ca "$ACME_CA")"
+production_banner="$(tls_print_ca_caution 2>&1 || true)"
+if [[ -z "$production_banner" ]]; then
+  pass "production CA completion output carries no staging warning"
+else
+  fail "production CA completion output printed a staging warning"
+fi
+
+# --- M1: RFC 2136 values are validated BEFORE interpolation ----------------
+# tls__die exits the current shell, so every probe runs in a subshell.
+# The payload is the audit finding: a newline plus `}` closes the dns block and
+# injects an arbitrary directive. It must be refused, not rendered.
+try_prepare() {  # -> 0 accepted, non-zero refused; stderr kept in $WORK/inject.err
+  ( tls_prepare_render_values "on dns" ) >/dev/null 2>"$WORK/inject.err"
+}
+
+ACME_DNS_PROVIDER="rfc2136"
+TLS_VALIDATION="dns"
+ENV_FILE="fixture.env"
+RFC2136_KEY_NAME="acme-daemonhub"
+RFC2136_SERVER=$'ns1.daemonhub.dev:53\n\t}\n\tadmin off\n\tx {'
+if try_prepare; then
+  fail "RFC2136_SERVER newline-injection payload was accepted"
+else
+  pass "RFC2136_SERVER newline-injection payload is rejected"
+fi
+if grep -q 'RFC2136_SERVER' "$WORK/inject.err"; then
+  pass "the injection refusal names RFC2136_SERVER"
+else
+  fail "the injection refusal does not name RFC2136_SERVER"
+fi
+
+RFC2136_SERVER="ns1.daemonhub.dev:53"
+RFC2136_KEY_NAME=$'acme\n\t} admin off\nx {'
+if try_prepare; then
+  fail "RFC2136_KEY_NAME newline-injection payload was accepted"
+else
+  pass "RFC2136_KEY_NAME newline-injection payload is rejected"
+fi
+
+RFC2136_KEY_NAME="acme-daemonhub"
+RFC2136_SERVER="ns1.daemonhub.dev;rm -rf /"
+if try_prepare; then
+  fail "RFC2136_SERVER with a shell metacharacter was accepted"
+else
+  pass "RFC2136_SERVER with a shell metacharacter is rejected"
+fi
+
+RFC2136_SERVER="[::1]:53"
+if try_prepare; then
+  pass "RFC2136_SERVER accepts an IP literal with a port"
+else
+  fail "RFC2136_SERVER refused a valid IP literal with a port"
+fi
+
 
 if (( FAILED )); then
   printf '\nsome checks failed\n' >&2

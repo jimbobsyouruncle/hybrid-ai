@@ -381,6 +381,8 @@
 - tls_render_template()
 - tls_variants()
 - tls_substitute()
+- tls_validate_rfc2136_key_name()
+- tls_validate_rfc2136_server()
 - tls_solver_block()
 - tls_prepare_render_values()
 - tls_render_to_file()
@@ -391,6 +393,7 @@
 - tls_dry_run()
 - tls__diff()
 - tls_print_urls()
+- tls_print_ca_caution()
 - tls_check_dns()
 - tls_load_env_file_values()
 
@@ -849,6 +852,7 @@
 - render()
 - expect()
 - reject()
+- try_prepare()
 
 ## scripts/test-uninstall.sh
 - ok()
@@ -890,6 +894,7 @@
 - san_match()
 - severity_for_exit()
 - pick()
+- is_staging_issuer()
 
 ## scripts/tls-dry-run-renewal.sh
 - usage()

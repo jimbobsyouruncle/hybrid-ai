@@ -209,6 +209,31 @@ TLS_ENABLED_RAW="$(pick TLS_ENABLED TLS_ENABLED)"
 TLS_HOSTS_RAW="$(pick TLS_HOSTS TLS_HOSTS)"
 LOCAL_DOMAIN_RAW="$(pick LOCAL_DOMAIN LOCAL_DOMAIN)"
 TLS_PROBE_RAW="$(pick TLS_PROBE_ADDR TLS_PROBE_ADDR)"
+ACME_CA_RAW="$(pick ACME_CA ACME_CA)"
+
+# B3(ii): a staging certificate served while production was configured means the
+# re-render never took effect (or a stale cert is deployed). Compare the issuer
+# against the configured CA, read only. An unknown or unset CA never adds a
+# failure: an absent setting must not turn into an alert.
+CA_PRODUCTION_EXPECTED=0
+case "$(printf '%s' "$ACME_CA_RAW" | tr '[:upper:]' '[:lower:]')" in
+  production) ca_norm="production" ;;
+  https://acme-v02.api.letsencrypt.org/directory) ca_norm="production" ;;
+  *) ca_norm="" ;;
+esac
+[[ "$ca_norm" == production ]] && CA_PRODUCTION_EXPECTED=1
+
+# is_staging_issuer ISSUER -> 0 when the RFC2253 issuer is a Let's Encrypt
+# staging CA. Staging issuers carry "(STAGING)" in the CN/O and are signed by
+# "Fake LE Intermediate X1"; production never carries either marker.
+is_staging_issuer() {
+  local issuer="$1"
+  [[ -n "$issuer" ]] || return 1
+  case "$issuer" in
+    *STAGING*|*"Fake LE"*) return 0 ;;
+  esac
+  return 1
+}
 
 case "$(printf '%s' "$TLS_ENABLED_RAW" | tr '[:upper:]' '[:lower:]')" in
   yes|true|1|on) TLS_ENABLED=1 ;;
@@ -321,12 +346,17 @@ for host in "${HOSTS[@]}"; do
   # Expiry is tested BEFORE chain validity on purpose: an expired certificate
   # always fails chain verification, so testing the chain first would mask the
   # actionable "expired" verdict (exit 2) behind a generic "chain not valid".
+  # A staging issuer while production was configured is tested BEFORE chain
+  # validity for the same reason: the issuer is the actionable fact, and its
+  # chain can never validate against the public trust store.
   if (( ! cert_present )); then
     host_exit=3; note="no certificate served"
   elif [[ ! "$days" =~ ^-?[0-9]+$ ]]; then
     host_exit=3; note="unparseable expiry"
   elif (( days <= 0 )); then
     host_exit=2; note="expired"
+  elif (( CA_PRODUCTION_EXPECTED )) && is_staging_issuer "$issuer"; then
+    host_exit=3; note="staging issuer while ACME_CA is production"
   elif (( ! chain_valid )); then
     host_exit=3; note="chain not valid"
   elif (( ! san_ok )); then

@@ -1001,7 +1001,7 @@ TLS_VALIDATION=${TLS_VALIDATION:-dns}
 ACME_DNS_PROVIDER=${ACME_DNS_PROVIDER:-cloudflare}
 HYBRID_AI_TLS_TOKEN_FILE=${HYBRID_AI_TLS_TOKEN_FILE:-}
 TLS_HOSTS=${TLS_HOSTS:-}
-ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-off}
+ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-disable_redirects}
 CADDY_IMAGE=${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
 
 # --- Zero-trace ------------------------------------------------------------

@@ -389,7 +389,7 @@ services:
       TLS_DOMAIN: ${TLS_DOMAIN:-}
       ACME_EMAIL: ${ACME_EMAIL:-}
       ACME_CA: ${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
-      ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-off}
+      ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-disable_redirects}
 #@end
       DO_NOT_TRACK: "true"
     security_opt:

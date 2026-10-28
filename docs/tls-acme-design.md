@@ -10,7 +10,7 @@ certificate is healthy, and how the live host migrates from plain HTTP on
 
 Everything below is grounded in the current repository:
 
-- `status/Caddyfile` -- global `auto_https off` (line 2), global `admin off`
+- `status/Caddyfile` -- global `auto_https off` (line 4, TLS-off build only), global `admin off`
   (line 3), the `(trusted_only)` snippet at line 6 and `(secure_headers)` at
   line 11, then exactly three site blocks: `http://status.{$LOCAL_DOMAIN}` (line
   20), `http://hermes.{$LOCAL_DOMAIN}` (line 28) and `http://{$LOCAL_DOMAIN}`
@@ -50,7 +50,7 @@ Everything below is grounded in the current repository:
 | D3 | The Caddy image is built locally from `caddy/Dockerfile` with `xcaddy`, pinned to `caddy:2.8` base plus pinned plugin versions. A stock `caddy:2.8-alpine` image is never used for TLS. |
 | D4 | The DNS API credential is a file, mounted with compose `secrets:` at `/run/secrets/cloudflare_dns_token`, never an env var, never an argument, never in git. |
 | D5 | Certificates are issued for the apex and for a wildcard, one certificate per site block, via DNS-01. |
-| D6 | `auto_https off` stays for DNS-01. It becomes `auto_https disable_redirects` only when `TLS_VALIDATION=http-01`. |
+| D6 | `auto_https off` disables Caddy's certificate management, so it is never rendered. Every TLS-on mode renders `auto_https disable_redirects`, and the explicit `http://` block is the one 308. |
 | D7 | HTTP->HTTPS redirects are explicit `http://` site blocks returning 308, keeping `(trusted_only)` on them. |
 | D8 | Renewal is Caddy's own. No second issuer, no issuing systemd timer. One systemd timer runs a read-only watchdog. |
 | D9 | Certificate health is proven by a live TLS handshake (SNI per hostname), never by reading private keys. |
@@ -528,7 +528,7 @@ alone.
 +	# automatic redirects: both are explicit below, so the behaviour is
 +	# visible in this file. HTTP-01 mode is the one exception; see
 +	# docs/tls-acme-design.md section 4.5.
-+	auto_https {$ACME_AUTO_HTTPS:off}
++	auto_https {$ACME_AUTO_HTTPS:disable_redirects}
 -	admin off
 +	# Loopback INSIDE the container only, never published. This is what lets
 +	# `caddy reload` apply a config change without a restart, which would
@@ -844,7 +844,7 @@ inside the container, not a client request.
 +      TLS_DOMAIN: ${TLS_DOMAIN:-}
 +      ACME_EMAIL: ${ACME_EMAIL:-}
 +      ACME_CA: ${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
-+      ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-off}
++      ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-disable_redirects}
        DO_NOT_TRACK: "true"
      security_opt:
        - no-new-privileges:true
@@ -885,16 +885,20 @@ and `cpus`, the same read-only Caddyfile mount, the same 128 MB ceiling. The
 
 ### 4.5 `auto_https`, `admin`, and the HTTP-01 exception
 
-- **DNS-01 (default):** global `auto_https off`. Challenges are solved through
-  DNS, so Caddy needs no HTTP listener of its own, and every listener in the
-  file is explicit. `ACME_AUTO_HTTPS=off` in `.env`.
-- **HTTP-01:** `ACME_AUTO_HTTPS=disable_redirects`. With `off`, Caddy refuses to
-  serve `/.well-known/acme-challenge/*` and issuance fails with
+- **DNS-01 (default):** global `auto_https disable_redirects`. Challenges are
+  solved through DNS, and the explicit `http://` block in the same file is the
+  only redirect (308). Certificate management stays ENABLED. `auto_https off`
+  is a bug, not a mode: it disables Caddy's certificate management entirely, so
+  the install "succeeds" and issues no certificate. The installer therefore
+  never writes `off`; `ACME_AUTO_HTTPS=disable_redirects` in `.env`.
+- **HTTP-01:** also `ACME_AUTO_HTTPS=disable_redirects`. With `off`, Caddy
+  refuses to serve `/.well-known/acme-challenge/*` and issuance fails with
   `no solvers available for remaining challenges`. With `disable_redirects`,
   Caddy serves the challenge on port 80 and does not add its own redirect; the
   explicit `http://` block still provides the 308.
-- **TLS-ALPN-01:** same as DNS-01, `auto_https off`. The challenge is solved on
-  the 443 listener, which the `https://` sites already own.
+- **TLS-ALPN-01:** same as DNS-01, `auto_https disable_redirects`. The
+  challenge is solved on the 443 listener, which the `https://` sites already
+  own.
 - **Admin API: TLS builds set `admin localhost:2019`; the non-TLS build keeps
   `admin off`.** This is the **one deliberate departure from `admin off`**, and
   it is deliberate because `caddy reload` needs an admin endpoint: without one,
@@ -1871,7 +1875,8 @@ than with the whole document.
    outside the repo, with the wildcard form explained and the apex plus
    per-service entries written out.
 7. **Explicit `https://` site blocks, explicit `http://` 308 redirects, and
-   `auto_https off` retained** for DNS-01. Neither existing snippet changes:
+   `auto_https disable_redirects`** for every TLS-on mode (never `off`, which
+   would disable certificate management). Neither existing snippet changes:
    `(trusted_only)` and `(secure_headers)` are preserved byte-for-byte, and HSTS
    is additive in a new `(hsts)` snippet imported only by the three named
    `daemonhub.dev` sites. The allowlist is not widened.
