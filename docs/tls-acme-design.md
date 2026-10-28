@@ -10,20 +10,29 @@ certificate is healthy, and how the live host migrates from plain HTTP on
 
 Everything below is grounded in the current repository:
 
-- `status/Caddyfile` -- global `auto_https off`, global `admin off`, sites
-  `http://status.{$LOCAL_DOMAIN}`, `http://hermes.{$LOCAL_DOMAIN}`,
-  `http://{$LOCAL_DOMAIN}`, plus the `(trusted_only)` and `(secure_headers)`
-  snippets.
-- `docker-compose.yml` -- `proxy` service (`caddy:2.8-alpine`,
-  `hybrid-ai-proxy`, publishes `"80:80"` only, mounts `./status/Caddyfile:ro`
-  and `${HYBRID_AI_DATA_DIR}/webui_data/caddy:/data`, sets `LOCAL_DOMAIN`), and
-  the `status` service with its `http://127.0.0.1:80/status/healthz`
-  healthcheck.
-- `install.sh` -- `prompt_secret` prompts (including `LOCAL_DOMAIN`) near
-  line 457, stack env file written near line 760 with `chmod 600`, DNS
-  validation for `$LOCAL_DOMAIN`, `hermes.$LOCAL_DOMAIN`,
-  `status.$LOCAL_DOMAIN` near line 1170, service URLs printed near line 1606,
-  `-h|--help` usage block at the top of the file.
+- `status/Caddyfile` -- global `auto_https off` (line 2), global `admin off`
+  (line 3), the `(trusted_only)` snippet at line 6 and `(secure_headers)` at
+  line 11, then exactly three site blocks: `http://status.{$LOCAL_DOMAIN}` (line
+  20), `http://hermes.{$LOCAL_DOMAIN}` (line 28) and `http://{$LOCAL_DOMAIN}`
+  (line 35). The apex block carries `handle /status*`, `/hub*`, `/health`,
+  `handle_path /ollama/*`, `/openwebui*`, `/chat*` and a catch-all.
+- `docker-compose.yml` -- `proxy` service at line 349 (`caddy:2.8-alpine`,
+  `hybrid-ai-proxy`, `restart: unless-stopped`, `depends_on` open-webui and
+  status, `mem_limit: 128m`, `cpus: "0.5"`, publishes `"80:80"` only, mounts
+  `./status/Caddyfile:/etc/caddy/Caddyfile:ro` and
+  `${HYBRID_AI_DATA_DIR}/webui_data/caddy:/data`, sets `LOCAL_DOMAIN` and
+  `DO_NOT_TRACK`, `security_opt: no-new-privileges:true`, healthcheck probing
+  `http://[IP_ADDRESS]:80/status/healthz`, json-file logging with rotation), and
+  the `status` service, whose own healthcheck probes
+  `http://[IP_ADDRESS]:8088/status/healthz` at line 326.
+- `install.sh` -- `prompt_secret LOCAL_DOMAIN` at line 510, the stack env file
+  written and `chmod 600` at line 894, the DNS-validation check for
+  `$LOCAL_DOMAIN`, `hermes.$LOCAL_DOMAIN` and `status.$LOCAL_DOMAIN` at lines
+  1787-1792 (log line 1789, `getent hosts` at 1791), the service-URL block at
+  lines 2284-2289, `PI_LAN_IP="$(hostname -I ...)"` at line 1781, and the
+  `-h|--help` usage block at the top of the file. Every line number here was
+  re-checked with `grep -n` against the tree at `origin/main` after this branch
+  was rebased onto it.
 - `.env.example` -- `LOCAL_DOMAIN=yourhostname.com`, `HYBRID_AI_DATA_DIR`
   layout settings.
 - `status/app.py` -- `GET /status/healthz`, `GET /status/health-summary`,
@@ -454,7 +463,7 @@ Notes on the exact semantics:
   returns `1`.
 - Replace `192.168.1.50` with the Pi's real LAN address
   (`hostname -I | awk '{print $1}'`, the same value `install.sh` derives at
-  line 1169).
+  line 1781).
 
 ### 3.3 Verification
 
@@ -508,11 +517,10 @@ and the `-Server` strip included. HSTS is **additive**: it goes in a new
 `(hsts)` snippet and is never folded into `(secure_headers)`. Every HTTPS site
 imports `trusted_only` exactly as the HTTP sites do today.
 
-(Assumption) The build task starts from a tree that carries `(secure_headers)`,
-as the reviewed baseline does. Its exact text is the snippet restored by commit
-`5ea8f0c` ("Restore secure_headers on every Caddy site and handle"). If that
-snippet is absent from the tree the build task works in, the build task adds it
-from that commit verbatim -- never a relaxed variant.
+No assumption is needed here any more: `origin/main` carries `(secure_headers)`
+at `status/Caddyfile:11` with exactly the text shown below, so the snippet is
+context in this diff and not a proposed addition. The build task must leave it
+alone.
 
 ```diff
  {
@@ -550,6 +558,83 @@ from that commit verbatim -- never a relaxed variant.
 	}
  }
 
+ http://status.{$LOCAL_DOMAIN} {
+ 	import trusted_only
+ 	import secure_headers
+ 
+ 	redir / /status 302
+ 	reverse_proxy status:8088
+ }
+ 
+ http://hermes.{$LOCAL_DOMAIN} {
+ 	import trusted_only
+ 	import secure_headers
+ 
+ 	reverse_proxy hermes:8501
+ }
+ 
+ http://{$LOCAL_DOMAIN} {
+ 	# Both snippets must be imported inside each handle: Caddy runs a matching
+ 	# handle before the site-level directives, so a site-level import alone
+ 	# would be bypassed and would leave these routes unprotected and unstamped.
+ 	# trusted_only guards the sensitive routes; secure_headers applies the
+ 	# uniform response headers (and removes Server) on every route, including
+ 	# the open aliases and the catch-all.
+ 	handle /status* {
+ 		import trusted_only
+ 		import secure_headers
+ 		reverse_proxy status:8088
+ 	}
+ 
+ 	handle /hub* {
+ 		import trusted_only
+ 		import secure_headers
+ 		reverse_proxy status:8088
+ 	}
+ 
+ 	handle /health {
+ 		import secure_headers
+ 		rewrite * /status/health-summary
+ 		reverse_proxy status:8088
+ 	}
+ 
+ 	handle_path /ollama/* {
+ 		import trusted_only
+ 		import secure_headers
+ 		reverse_proxy ollama:11434
+ 	}
+ 
+ 	# Friendly aliases restored after the Caddyfile refactor. The target is the
+ 	# site root because Open WebUI is served at the root (there is no /app/
+ 	# prefix). Deep links and query strings are preserved. These handles do not
+ 	# import trusted_only: their only target is the open catch-all below, which
+ 	# has its own login. See status/README.md.
+ 	#
+ 	# secure_headers is imported inside each route block so the header handler
+ 	# runs before the redirect, and so it cannot be reordered out of the block.
+ 	handle /openwebui* {
+ 		route {
+ 			import secure_headers
+ 			uri strip_prefix /openwebui
+ 			redir * {uri} 302
+ 		}
+ 	}
+ 
+ 	handle /chat* {
+ 		route {
+ 			import secure_headers
+ 			uri strip_prefix /chat
+ 			redir * {uri} 302
+ 		}
+ 	}
+ 
+ 	handle {
+ 		import secure_headers
+ 		reverse_proxy open-webui:8080
+ 	}
+ }
+ 
+
 +(hsts) {
 +	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 +}
@@ -566,6 +651,9 @@ from that commit verbatim -- never a relaxed variant.
 +
 +# --- HTTPS: daemonhub.dev ------------------------------------------------
 +https://{$TLS_DOMAIN} {
++	# Same route map as the http:// site, with the snippets imported inside each
++	# protected handle exactly as today. Adding TLS changes no route and no
++	# allowlist; it only changes the scheme and adds HSTS.
 +	import trusted_only
 +	import secure_headers
 +	import hsts
@@ -573,21 +661,40 @@ from that commit verbatim -- never a relaxed variant.
 +
 +	handle /status* {
 +		import trusted_only
++		import secure_headers
 +		reverse_proxy status:8088
 +	}
 +	handle /hub* {
 +		import trusted_only
++		import secure_headers
 +		reverse_proxy status:8088
 +	}
 +	handle /health {
++		import secure_headers
 +		rewrite * /status/health-summary
 +		reverse_proxy status:8088
 +	}
 +	handle_path /ollama/* {
 +		import trusted_only
++		import secure_headers
 +		reverse_proxy ollama:11434
 +	}
++	handle /openwebui* {
++		route {
++			import secure_headers
++			uri strip_prefix /openwebui
++			redir * {uri} 302
++		}
++	}
++	handle /chat* {
++		route {
++			import secure_headers
++			uri strip_prefix /chat
++			redir * {uri} 302
++		}
++	}
 +	handle {
++		import secure_headers
 +		reverse_proxy open-webui:8080
 +	}
 +}
@@ -631,10 +738,18 @@ from that commit verbatim -- never a relaxed variant.
 
 Notes on the diff, all deliberate:
 
-- **`(trusted_only)` is imported at site level and again inside each protected
-  `handle`.** The existing comment explains why: a matching `handle` runs before
-  site-level `abort`/`respond`, so a site-level import alone would be bypassed.
-  The HTTPS blocks copy that structure exactly.
+- **The HTTPS blocks mirror the current `http://` route map exactly.** Same
+  handles, same order, same snippet placement; only the scheme changes and
+  `(hsts)` is added. `(trusted_only)` is imported at site level and again inside
+  each protected `handle`, as the existing comment requires: a matching `handle`
+  runs before site-level `abort`/`respond`, so a site-level import alone would be
+  bypassed.
+- **Two handles deliberately do not import `(trusted_only)`, and the HTTPS
+  blocks keep that.** `handle /health` carries only `(secure_headers)` and
+  `handle /openwebui*` / `handle /chat*` carry only `(secure_headers)` inside a
+  `route` block. That is the state of `status/Caddyfile` today; this design does
+  not tighten or loosen them, because changing them would be a behaviour change
+  unrelated to TLS. Their target is the open catch-all, which has its own login.
 - **The allowlist is neither removed nor widened.** `100.64.0.0/10` (rendered
   `[IP_ADDRESS]/10` in the checked-in file) and `fd7a:115c:a1e0::/48` remain.
   HTTPS is not authentication. A certificate proves the *server's* identity to
@@ -683,10 +798,9 @@ sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/webui_data/caddy/caddy/certificat
 
 ```diff
      ports:
--      - "80:80"
 +      # 80 stays published: it carries the HTTP->HTTPS redirect, and in
 +      # HTTP-01 mode it carries the challenge. 443 carries all HTTPS.
-+      - "80:80"
+       - "80:80"
 +      - "443:443"
 +      - "443:443/udp"   # HTTP/3; harmless if the network drops it
 ```
@@ -721,7 +835,9 @@ inside the container, not a client request.
 +      - "443:443/udp"
      volumes:
        - ./status/Caddyfile:/etc/caddy/Caddyfile:ro
-       - ${HYBRID_AI_DATA_DIR:?…}/webui_data/caddy:/data
+       # Caddy validates its config at boot; a syntax error here stops the
+       # proxy only, leaving Open WebUI reachable on :3000.
+       - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/webui_data/caddy:/data
 +    secrets:
 +      - cloudflare_dns_token
      environment:
@@ -733,7 +849,21 @@ inside the container, not a client request.
        DO_NOT_TRACK: "true"
      security_opt:
        - no-new-privileges:true
+     healthcheck:
+       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/status/healthz >/dev/null 2>&1 || exit 1"]
+     logging:
+       driver: "json-file"
+       options:
+         max-size: "5m"
+         max-file: "2"
 ```
+
+The context above is the `proxy` service as it stands at `origin/main`: image,
+`container_name`, `restart`, `depends_on`, `mem_limit`, `cpus`, `ports`,
+`volumes`, `environment`, `security_opt`, `healthcheck` (a plain HTTP liveness
+probe on port 80, which therefore keeps passing with TLS enabled) and `logging`.
+No context line changes; the diff only adds the `build:`/`image:` pair, the two
+443 publishes, the `secrets:` entry and five environment keys.
 
 plus, at the top level (compose file secrets are file-backed, no Swarm needed):
 
@@ -1187,7 +1317,7 @@ quickly. Do this at least an hour before the cutover window, not during it.
 
 | Surface | Before | After | Action |
 |---|---|---|---|
-| `install.sh` printed URLs (line ~1606) | `http://daemonhub.dev` etc. on `LOCAL_DOMAIN` | `https://daemonhub.dev`, `https://hermes.…`, `https://status.…` | Print **both** during the dual-name period; `https` first, `http://jarvis.lan` second |
+| `install.sh` printed URLs (lines 2284-2289) | `http://daemonhub.dev` etc. on `LOCAL_DOMAIN` | `https://daemonhub.dev`, `https://hermes.…`, `https://status.…` | Print **both** during the dual-name period; `https` first, `http://jarvis.lan` second |
 | `OPENHANDS_SANDBOX_HOST` | the LAN hostname | unchanged | OpenHands stays loopback-only; do not point it at the public name |
 | `LOCAL_DOMAIN` | `jarvis.lan` | unchanged | New `TLS_DOMAIN` variable carries `daemonhub.dev`; `LOCAL_DOMAIN` keeps its meaning for the HTTP fallback |
 | Status page links | `http://jarvis.lan/status` | add `https://status.daemonhub.dev/status` | Both links shown until the fallback retires |
@@ -1372,7 +1502,7 @@ Re-running the installer must be a no-op when nothing changed:
 | `HYBRID_AI_TLS_TOKEN_FILE` | Absolute path, exists, regular file, not a symlink out of `/etc/hybrid-ai`, mode `0600` or stricter, owner root, not under `HYBRID_AI_APP_DIR` | `die` with the exact fix command |
 | `TLS_DOMAIN` + `TLS_VALIDATION=http` | Warn loudly: HTTP-01 cannot issue a wildcard, so the installation degrades to three per-host certificates and no wildcard | `warn`, continue |
 | `TLS_DOMAIN` + no port forward, `TLS_VALIDATION=dns` | Nothing to check locally; the CA reports it | -- |
-| DNS resolution of `TLS_DOMAIN` | If `getent hosts` fails, warn and print the dnsmasq lines from section 3.2 (same as today's subdomain check at line 1176) | `warn` |
+| DNS resolution of `TLS_DOMAIN` | If `getent hosts` fails, warn and print the dnsmasq lines from section 3.2 (same as today's subdomain check at line 1791) | `warn` |
 
 ### 8.6 Behaviour when TLS is disabled
 
