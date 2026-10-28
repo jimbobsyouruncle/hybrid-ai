@@ -28,14 +28,13 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-ENV_FILE="${REPO_DIR}/.env"
+ENV_FILE=""
 CHECK_ONLY=0
 ASSUME_YES=0
 HOST=""
 CERT_ROOT=""
-COMPOSE_FILE="${REPO_DIR}/docker-compose.yml"
+COMPOSE_FILE=""
 PROXY_SERVICE="proxy"
 WAIT_SECONDS=180
 
@@ -80,6 +79,22 @@ while (( $# > 0 )); do
   esac
 done
 
+# --- paths come from the shared resolver -----------------------------------
+# An explicit --env-file is handed to the helper BEFORE it loads, so a fixture
+# still wins over the ambient environment.
+if [[ -n "$ENV_FILE" && -z "${HYBRID_AI_ENV_FILE:-}" ]]; then
+  export HYBRID_AI_ENV_FILE="$ENV_FILE"
+fi
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
+
+# ACME_CA is a stack setting, so it comes from the STACK file the helper
+# resolved. The certificate root is the helper's ONE derivation of Caddy's
+# managed storage, so a future relocation edits one line.
+[[ -n "$ENV_FILE" ]] || ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
+[[ -n "$CERT_ROOT" ]] || CERT_ROOT="$HYBRID_AI_CADDY_CERT_ROOT"
+[[ -n "$COMPOSE_FILE" ]] || COMPOSE_FILE="${HYBRID_AI_APP_DIR}/docker-compose.yml"
+
 # --- staging-only gate (no override, by design) ----------------------------
 ACME_CA_VAL="$(env_read_key "$ENV_FILE" ACME_CA || true)"
 PROD_CA="acme-v02.api.letsencrypt.org"
@@ -99,9 +114,6 @@ case "${ACME_CA_VAL,,}" in
     exit 2 ;;
 esac
 
-if [[ -z "$CERT_ROOT" ]]; then
-  CERT_ROOT="${HYBRID_AI_DATA_DIR:-${REPO_DIR}/data}/webui_data/caddy/caddy/certificates"
-fi
 if [[ -z "$HOST" ]]; then
   HOST="$(env_read_key "$ENV_FILE" LOCAL_DOMAIN || true)"
 fi

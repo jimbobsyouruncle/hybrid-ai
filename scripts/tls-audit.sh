@@ -24,13 +24,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 CERT_ROOT=""
 LOG_DIR=""
 AUDIT_LOG=""
 STATE_FILE=""
-ENV_FILE="${REPO_DIR}/.env"
+ENV_FILE=""
 RENEWAL_WINDOW_DAYS=30
 
 usage() {
@@ -54,15 +53,6 @@ EOF
 die_usage() { printf 'tls-audit: %s\n' "$1" >&2; exit 2; }
 iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# Reads ONE key from a file without sourcing or executing it. The value is
-# never printed. Surrounding single/double quotes are stripped.
-env_read_key() {
-  local file="$1" key="$2" v
-  [[ -f "$file" && -r "$file" ]] || return 1
-  v="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2-)"
-  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
-  printf '%s' "$v"
-}
 
 while (( $# > 0 )); do
   case "$1" in
@@ -80,34 +70,25 @@ done
 [[ "$RENEWAL_WINDOW_DAYS" =~ ^[0-9]+$ ]] || die_usage "--renewal-window must be a number"
 command -v openssl >/dev/null 2>&1 || die_usage "required tool not found: openssl"
 
-# --- settings: exported environment first, then the env file, then defaults --
-# HYBRID_AI_DATA_DIR and HYBRID_AI_LOG_DIR live in the deployment env file, and
-# the unit does not export them, so reading the file is what makes the default
-# paths point at the real deployment. Flags still win over everything.
-pick() {
-  local var="$1" key="$2"
-  if [[ -n "${!var:-}" ]]; then printf '%s' "${!var}"; return 0; fi
-  env_read_key "$ENV_FILE" "$key" || true
-}
-
-DATA_DIR_RESOLVED="$(pick HYBRID_AI_DATA_DIR HYBRID_AI_DATA_DIR)"
-LOG_DIR_RESOLVED="$(pick HYBRID_AI_LOG_DIR HYBRID_AI_LOG_DIR)"
-
-if [[ -z "$CERT_ROOT" ]]; then
-  CERT_ROOT="${DATA_DIR_RESOLVED:-${REPO_DIR}/data}/webui_data/caddy/caddy/certificates"
+# --- paths come from the shared resolver -----------------------------------
+# An explicit --env-file is handed to the helper BEFORE it loads, so a fixture
+# still wins over the ambient environment (the helper reads environment first,
+# then the file). The certificate root is defined ONCE, in the helper, so a
+# future relocation of Caddy's data touches one line.
+if [[ -n "$ENV_FILE" && -z "${HYBRID_AI_ENV_FILE:-}" ]]; then
+  export HYBRID_AI_ENV_FILE="$ENV_FILE"
 fi
-if [[ -z "$LOG_DIR" ]]; then
-  if [[ -n "$LOG_DIR_RESOLVED" ]]; then
-    LOG_DIR="$LOG_DIR_RESOLVED"
-  elif [[ -n "$DATA_DIR_RESOLVED" ]]; then
-    LOG_DIR="${DATA_DIR_RESOLVED}/logs"
-  else
-    LOG_DIR="${REPO_DIR}/logs"
-  fi
-fi
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
+
+# Consumers here read stack settings (ACME_CA and friends), so the env file to
+# read is the STACK file the helper resolved.
+[[ -n "$ENV_FILE" ]] || ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
+
+[[ -n "$CERT_ROOT" ]] || CERT_ROOT="$HYBRID_AI_CADDY_CERT_ROOT"
+[[ -n "$LOG_DIR" ]] || LOG_DIR="$HYBRID_AI_LOG_DIR"
 [[ -n "$AUDIT_LOG" ]] || AUDIT_LOG="${LOG_DIR}/tls-audit.log"
 [[ -n "$STATE_FILE" ]] || STATE_FILE="${LOG_DIR}/tls-audit.state"
-unset DATA_DIR_RESOLVED LOG_DIR_RESOLVED
 
 # Cert root absent means Caddy has not issued anything yet, not that anything
 # is broken.
@@ -145,7 +126,7 @@ days_until() {
   if (( end >= now )); then
     printf '%s' $(( (end - now) / 86400 ))
   else
-    printf '%s' $(( -(( (now - end + 86399) / 86400 )) ))
+    printf '%s' $(( -( (now - end + 86399) / 86400 ) ))
   fi
 }
 

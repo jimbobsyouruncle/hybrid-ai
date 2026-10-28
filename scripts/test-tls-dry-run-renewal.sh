@@ -19,7 +19,6 @@ fail=0
 skip=0
 ok()   { printf 'ok   %s\n' "$1"; pass=$(( pass + 1 )); }
 bad()  { printf 'FAIL %s\n' "$1"; fail=$(( fail + 1 )); }
-skipped() { printf '[skip] %s\n' "$1"; skip=$(( skip + 1 )); }
 
 if [[ ! -f "$DRY_RUN" ]]; then
   printf 'FAIL missing %s\n' "$DRY_RUN"
@@ -27,7 +26,21 @@ if [[ ! -f "$DRY_RUN" ]]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/hybrid-ai-tls-dryrun-test.XXXXXX")" || exit 1
-cleanup() { rm -rf "$WORK"; }
+# Resolve the STACK file the shared resolver names, in a SUBSHELL: sourcing the
+# helper here would export repo-default paths and shadow the fixture env files
+# passed with --env-file below.
+STACK_ENV_FILE="$(bash -c '
+  # shellcheck source=scripts/lib/hybrid-ai-env.sh
+  source "$1/lib/hybrid-ai-env.sh" >/dev/null 2>&1 || exit 1
+  printf "%s" "$HYBRID_AI_STACK_ENV_FILE"
+' _ "$SCRIPT_DIR" 2>/dev/null || true)"
+[[ -n "$STACK_ENV_FILE" ]] || STACK_ENV_FILE=""
+# Idempotent: called on the normal exit path AND from the trap.
+cleanup() {
+  [[ -n "${WORK:-}" ]] || return 0
+  rm -rf "$WORK"
+  WORK=""
+}
 trap cleanup EXIT
 
 # --- fake docker: records calls, never touches a real daemon --------------
@@ -127,6 +140,7 @@ out="$(bash "$DRY_RUN" --env-file "$STAGING_ENV" --compose-file "$COMPOSE" --cer
 assert_exit "staging full run without --yes" 2 "$rc"
 
 printf '\n%d/%d checks pass\n' "$pass" "$(( pass + fail ))"
+cleanup
 if (( fail > 0 )); then
   printf '%d failed, %d skipped\n' "$fail" "$skip"
   exit 1

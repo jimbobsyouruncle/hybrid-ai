@@ -823,6 +823,26 @@
 - run_check()
 - inv_rows()
 
+## scripts/test-tls-check.sh
+- ok()
+- bad()
+- skipped()
+- cleanup()
+- make_ca()
+- make_leaf()
+- build_leaf()
+- free_port()
+- start_server()
+- stop_server()
+- run_check()
+- assert_exit()
+
+## scripts/test-tls-dry-run-renewal.sh
+- ok()
+- bad()
+- cleanup()
+- assert_exit()
+
 ## scripts/test-tls-installer-render.sh
 - pass()
 - fail()
@@ -841,6 +861,45 @@
 - write_full_install()
 - write_data_dirs()
 - write_siblings()
+
+## scripts/tls-alert.sh
+- usage()
+- die_usage()
+- iso_now()
+- env_read_key()
+- json_body()
+
+## scripts/tls-audit.sh
+- usage()
+- die_usage()
+- iso_now()
+- ensure_private_file()
+- to_iso8601()
+- days_until()
+- emit()
+
+## scripts/tls-check.sh
+- usage()
+- die_usage()
+- env_read_key()
+- iso_now()
+- ensure_private_file()
+- leaf_from_pem()
+- to_iso8601()
+- days_until()
+- san_match()
+- severity_for_exit()
+- pick()
+
+## scripts/tls-dry-run-renewal.sh
+- usage()
+- die_usage()
+- note()
+- fail()
+- env_read_key()
+- find_crt()
+- read_serial()
+- restore_hold()
 
 ## scripts/uninstall.sh
 - log()

@@ -38,10 +38,16 @@ if [[ ! -f "$CHECK" ]]; then printf 'FAIL missing %s\n' "$CHECK"; exit 1; fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/hybrid-ai-tls-test.XXXXXX")" || exit 1
 SRV_PID=""
+# Idempotent: called on the normal exit path AND from the trap.
 cleanup() {
-  [[ -n "$SRV_PID" ]] && kill "$SRV_PID" 2>/dev/null
-  [[ -n "$SRV_PID" ]] && wait "$SRV_PID" 2>/dev/null
+  if [[ -n "${SRV_PID:-}" ]]; then
+    kill "$SRV_PID" 2>/dev/null
+    wait "$SRV_PID" 2>/dev/null
+    SRV_PID=""
+  fi
+  [[ -n "${WORK:-}" ]] || return 0
   rm -rf "$WORK"
+  WORK=""
 }
 trap cleanup EXIT
 
@@ -197,6 +203,16 @@ stop_server() {
     SRV_PID=""
   fi
 }
+
+# Resolve the STACK file the shared resolver names, in a SUBSHELL: sourcing the
+# helper here would export repo-default paths and shadow the fixture env files
+# the cases below pass with --env-file.
+STACK_ENV_FILE="$(bash -c '
+  # shellcheck source=scripts/lib/hybrid-ai-env.sh
+  source "$1/lib/hybrid-ai-env.sh" >/dev/null 2>&1 || exit 1
+  printf "%s" "$HYBRID_AI_STACK_ENV_FILE"
+' _ "$SCRIPT_DIR" 2>/dev/null || true)"
+[[ -n "$STACK_ENV_FILE" ]] || STACK_ENV_FILE=""
 
 ENV_FILE="$WORK/env"
 printf 'TLS_ENABLED=yes\nLOCAL_DOMAIN=%s\n' "$HOSTNAME_TEST" > "$ENV_FILE"
@@ -444,6 +460,7 @@ LOGROTATE="${REPO_ROOT}/deploy/logrotate/hybrid-ai-tls"
 if [[ -f "$LOGROTATE" ]]; then
   # logrotate does not expand shell variables, so a "${VAR}" path silently
   # rotates nothing. The shipped file must use the plain placeholder instead.
+  # shellcheck disable=SC2016  # searching for a literal ${ in the file
   if grep -q '\${' "$LOGROTATE"; then
     bad "logrotate file still contains a \${...} literal, which logrotate will not expand"
   else
@@ -463,6 +480,7 @@ else
 fi
 
 printf '\n%d/%d checks pass\n' "$pass" "$(( pass + fail ))"
+cleanup
 if (( fail > 0 )); then
   printf '%d failed, %d skipped\n' "$fail" "$skip"
   exit 1

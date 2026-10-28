@@ -59,11 +59,17 @@
 - deploy/hybrid-ai-firewall.service
 - deploy/hybrid-ai-prune.service
 - deploy/hybrid-ai-prune.timer
+- deploy/hybrid-ai-tls-check.service
+- deploy/hybrid-ai-tls-check.timer
+## deploy/logrotate
+
+- deploy/logrotate/hybrid-ai-tls
 ## docs
 
 - docs/BUILDER_PUBLISH_SMOKE_TEST.md
 - docs/TROUBLESHOOTING.md - Troubleshooting & Operations
 - docs/tls-acme-design.md - TLS termination and ACME design (jarvis.lan -> daemonhub.dev)
+- docs/tls-renewal-health.md - TLS renewal health, audit and alerting
 ## hermes
 
 - hermes/Dockerfile
@@ -160,8 +166,14 @@
 - scripts/test-status-backup-log-env.sh - FILE: scripts/test-status-backup-log-env.sh
 - scripts/test-status-backup-probe.sh - FILE: scripts/test-status-backup-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
+- scripts/test-tls-check.sh - FILE: scripts/test-tls-check.sh
+- scripts/test-tls-dry-run-renewal.sh - FILE: scripts/test-tls-dry-run-renewal.sh
 - scripts/test-tls-installer-render.sh - FILE: scripts/test-tls-installer-render.sh
 - scripts/test-uninstall.sh - FILE: scripts/test-uninstall.sh
+- scripts/tls-alert.sh - FILE: scripts/tls-alert.sh
+- scripts/tls-audit.sh - FILE: scripts/tls-audit.sh
+- scripts/tls-check.sh - FILE: scripts/tls-check.sh
+- scripts/tls-dry-run-renewal.sh - FILE: scripts/tls-dry-run-renewal.sh
 - scripts/uninstall.sh - FILE: scripts/uninstall.sh
 ## scripts/lib
 

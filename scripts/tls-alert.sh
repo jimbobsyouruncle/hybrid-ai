@@ -24,14 +24,13 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 SEVERITY=""
 SUBJECT=""
 BODY=""
 SELF_TEST=0
 SINK_DIR=""
-ENV_FILE="${REPO_DIR}/.env"
+ENV_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -95,6 +94,18 @@ fi
 
 [[ -n "$SEVERITY" ]] || die_usage "--severity is required"
 case "$SEVERITY" in warn|critical|missing|test) ;; *) die_usage "invalid severity: $SEVERITY" ;; esac
+
+# --- paths come from the shared resolver -----------------------------------
+# An explicit --env-file is handed to the helper BEFORE it loads, so a fixture
+# still wins over the ambient environment.
+if [[ -n "$ENV_FILE" && -z "${HYBRID_AI_ENV_FILE:-}" ]]; then
+  export HYBRID_AI_ENV_FILE="$ENV_FILE"
+fi
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
+
+# The webhook is a stack setting, so read the STACK file the helper resolved.
+[[ -n "$ENV_FILE" ]] || ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
 
 if [[ -z "$BODY" && ! -t 0 ]]; then
   BODY="$(cat)"

@@ -37,7 +37,6 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 WARN_DAYS=14
 CRIT_DAYS=7
@@ -45,7 +44,7 @@ QUIET=0
 JSON=0
 DO_AUDIT=0
 DO_ALERT=0
-ENV_FILE="${REPO_DIR}/.env"
+ENV_FILE=""
 CA_FILE=""
 PROBE_ADDR=""
 declare -a HOST_ARGS=()
@@ -120,7 +119,7 @@ days_until() {
     printf '%s' $(( (end - now) / 86400 ))
   else
     # Floor division for negative differences (bash truncates toward zero).
-    printf '%s' $(( -(( (now - end + 86399) / 86400 )) ))
+    printf '%s' $(( -( (now - end + 86399) / 86400 ) ))
   fi
 }
 
@@ -181,6 +180,22 @@ for tool in openssl date; do
   command -v "$tool" >/dev/null 2>&1 || die_usage "required tool not found: ${tool}"
 done
 
+# --- paths come from the shared resolver -----------------------------------
+# An explicit --env-file is handed to the helper BEFORE it loads, so a fixture
+# still wins over the ambient environment (the helper reads environment first,
+# then the file).
+if [[ -n "$ENV_FILE" && -z "${HYBRID_AI_ENV_FILE:-}" ]]; then
+  export HYBRID_AI_ENV_FILE="$ENV_FILE"
+fi
+# shellcheck source=scripts/lib/hybrid-ai-env.sh
+source "${SCRIPT_DIR}/lib/hybrid-ai-env.sh"
+
+# This script reads stack settings (TLS_ENABLED and friends) and passes the same
+# file to the alert hook, so it is the STACK file the helper resolved. A
+# --env-file fixture set above is already the resolved HYBRID_AI_ENV_FILE, and
+# HYBRID_AI_STACK_ENV_FILE defaults to it, so the fixture keeps working.
+[[ -n "$ENV_FILE" ]] || ENV_FILE="$HYBRID_AI_STACK_ENV_FILE"
+
 # --- settings: exported environment first, then the env file ---------------
 # The env file is never sourced and no value is ever printed. An exported
 # variable wins over the file so the caller can override without editing it.
@@ -219,14 +234,9 @@ if [[ -z "$PROBE_ADDR" ]]; then
   PROBE_ADDR="127.0.0.1:443"
 fi
 
-if [[ -z "$AUDIT_LOG" ]]; then
-  # The deployment log directory lives in the env file; the unit does not
-  # export it, so read it there before falling back to <repo>/logs. Keeping the
-  # audit log with the other logs is what makes rotation find it.
-  LOG_DIR_RESOLVED="$(pick HYBRID_AI_LOG_DIR HYBRID_AI_LOG_DIR)"
-  AUDIT_LOG="${LOG_DIR_RESOLVED:-${REPO_DIR}/logs}/tls-check.log"
-  unset LOG_DIR_RESOLVED
-fi
+# The log directory is the one the helper resolved, so the watchdog's audit log
+# lands beside the backups and logrotate finds it.
+[[ -n "$AUDIT_LOG" ]] || AUDIT_LOG="${HYBRID_AI_LOG_DIR}/tls-check.log"
 
 # --- TLS disabled: SKIPPED (exit 3, never an error) -------------------------
 if (( ! TLS_ENABLED )); then
