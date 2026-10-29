@@ -347,7 +347,7 @@ services:
   # status/Caddyfile for why.
   # -------------------------------------------------------------------------
   proxy:
-    image: caddy:2.8-alpine
+    image: caddy:2.11-alpine
     container_name: hybrid-ai-proxy
     restart: unless-stopped
     depends_on:

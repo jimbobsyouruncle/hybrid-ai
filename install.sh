@@ -394,6 +394,19 @@ elif [[ -n "${OPENHANDS_AGENT_IMAGE_REPOSITORY:-}" || -n "${OPENHANDS_AGENT_IMAG
   log "Leaving the OpenHands agent-server image pin alone (not a known stale default pair)."
 fi
 
+# The Caddy image pin moves with caddy/Dockerfile. The retired default pinned
+# Caddy 2.8.4, which issues one certificate per site block and so leaks the
+# hermes./status. names to Certificate Transparency logs; 2.11.7 prefers the
+# wildcard. A deployed host carries the retired pin verbatim, and STEP 8 keeps
+# an explicit value as an owner pin, so without this branch the host would build
+# the old image forever. Unset it ONLY on an exact match: any other value (a
+# GHCR reference, a self-built tag, a digest pin) is an owner-chosen pin.
+# Idempotent: after one run the loaded value no longer matches.
+if [[ "${CADDY_IMAGE:-}" == "hybrid-ai-caddy:2.8.4-dns" ]]; then
+  log "Migrating CADDY_IMAGE off the retired Caddy 2.8.4 pin to the current default."
+  unset CADDY_IMAGE
+fi
+
 # The last migration retires the STORED pod mesh address. Older installs wrote
 # the GPU pod's Tailscale address into .env as TAILSCALE_IP, and every consumer
 # read that stored copy. A RunPod worker's address changes whenever the pod is
@@ -1003,7 +1016,7 @@ ACME_DNS_PROVIDER=${ACME_DNS_PROVIDER:-cloudflare}
 HYBRID_AI_TLS_TOKEN_FILE=${HYBRID_AI_TLS_TOKEN_FILE:-}
 TLS_HOSTS=${TLS_HOSTS:-}
 ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-disable_redirects}
-CADDY_IMAGE=${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+CADDY_IMAGE=${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}
 
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true

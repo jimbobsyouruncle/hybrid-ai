@@ -18,7 +18,7 @@ TLS_TOKEN_DIR="/etc/hybrid-ai/acme"
 TLS_CA_STAGING_URL="https://acme-staging-v02.api.letsencrypt.org/directory"
 TLS_CA_PRODUCTION_URL="https://acme-v02.api.letsencrypt.org/directory"
 TLS_DEFAULT_DOMAIN="daemonhub.dev"
-TLS_VALIDATE_IMAGE="${CADDY_VALIDATE_IMAGE:-caddy:2.8-alpine}"
+TLS_VALIDATE_IMAGE="${CADDY_VALIDATE_IMAGE:-caddy:2.11-alpine}"
 
 # --- Output helpers: reuse install.sh's, fall back when sourced alone ------
 tls__warn() {
