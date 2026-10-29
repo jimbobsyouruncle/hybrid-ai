@@ -952,6 +952,68 @@ How each path is closed:
 | Rendered config | `{file./run/secrets/cloudflare_dns_token}` is a placeholder; the value is read at challenge time. |
 | Logs | Caddy's JSON logs record the challenge type and names, not the token. The installer's redaction in `status/app.py` (`REDACTIONS`) already covers key-shaped strings. |
 
+### 4.7 Login gate over the HTTPS sites (`basic_auth`)
+
+Every `*.daemonhub.dev` HTTPS site — the apex, `hermes.`, `status.` and the
+wildcard catch-all — can be gated behind HTTP Basic auth. The feature is
+**off by default**: with `AUTH_ENABLED` unset or anything other than `on`, the
+rendered `status/Caddyfile` is byte-identical to the file without the gate, and
+the tracked `docker-compose.yml` differs only by the two pass-through
+`environment:` lines (`HYBRID_AI_AUTH_USER` and `HYBRID_AI_AUTH_HASH`), both
+defaulting empty.
+
+**Mechanism.** A new managed region, `#@region auth`, wraps a reusable
+`(auth)` snippet:
+
+```
+(auth) {
+	basic_auth { {$HYBRID_AI_AUTH_USER} {$HYBRID_AI_AUTH_HASH} }
+}
+```
+
+The renderer adds the `auth` variant to `tls_variants` only when
+`AUTH_ENABLED=on`, exactly as the existing `dns`/`on`/`off` variants switch
+regions. The two placeholders keep their runtime form; the proxy's compose
+`environment:` block supplies `HYBRID_AI_AUTH_USER` and `HYBRID_AI_AUTH_HASH`
+at container start. `AUTH_ENABLED` is render-time only and never reaches the
+container.
+
+**Placement rule.** `basic_auth` must be imported the same way as the sibling
+`trusted_only` snippet: **inside every `handle`** of the apex block, because
+Caddy runs a matching handle before the site-level directives, so a site-level
+import alone would be bypassed. That is why `import auth` appears inside each
+handled route and not once at site level. The `hermes.`, `status.` and
+wildcard blocks have no handles, so there it imports at site level, next to
+`trusted_only`.
+
+**`/health` is exempt.** `handle /health` is deliberately left open: it is the
+endpoint the external uptime monitor polls (see `status/README.md`, Endpoints
+table). It serves one word with no detail. Gating it would break monitoring,
+and it discloses nothing. Every other handle and the `hermes.`/`status.`/
+wildcard site blocks are gated.
+
+**Auth is additive.** The `basic_auth` gate layers on top of the
+`trusted_only` network allowlist. Neither weakens the other: the allowlist
+still aborts untrusted addresses before the handle runs, and the gate is
+unchanged by it. The `http://*.jarvis.lan` sites and the http→https redirect
+block import neither, so both name families work during the transition.
+
+**Fail-closed.** `tls_validate_caddyfile` already receives the proxy's runtime
+env, so its env list now includes the two auth values. With `AUTH_ENABLED=on`
+and an empty user or hash, the snippet expands to `basic_auth {  }`, which
+`caddy validate` rejects — the install stops before the bad config reaches the
+stack. The validator is never made tolerant of the empty case.
+
+**Known limitation (owner-accepted, 2026-10-29).** Basic auth has no
+server-side expiry. Browsers cache the credentials until closed, so the
+practical session is per browser session, not exactly 24 hours. A `forward_auth`
+session service that could expire credentials was considered and deferred
+(Option B). The gate transmits credentials on every request, which is
+acceptable only because every gated site is HTTPS: the http→https 308 happens
+before any credential is sent, and no `http://` site is gated. The wildcard
+catch-all now answers 401 before 404, a small enumeration-posture change,
+recorded as accepted.
+
 ---
 
 ## 5. Renewal

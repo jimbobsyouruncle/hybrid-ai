@@ -368,6 +368,7 @@
 - tls__die()
 - tls_print_tradeoff()
 - tls_is_on()
+- tls_auth_is_on()
 - tls_default_token_path()
 - tls_secret_name()
 - tls_ca_url()
@@ -486,6 +487,12 @@
 - check()
 - run_install()
 - env_value()
+
+## scripts/test-auth-render.sh
+- pass()
+- fail()
+- render()
+- caddy()
 
 ## scripts/test-backup-containers.sh
 - ok()

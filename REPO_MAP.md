@@ -131,6 +131,7 @@
 - scripts/sync-agent-repos.sh - FILE: scripts/sync-agent-repos.sh
 - scripts/test-agent-image-hybrid-cutover.sh - FILE: scripts/test-agent-image-hybrid-cutover.sh
 - scripts/test-agent-image-repo-migration.sh - FILE: scripts/test-agent-image-repo-migration.sh
+- scripts/test-auth-render.sh - FILE: scripts/test-auth-render.sh
 - scripts/test-backup-containers.sh - FILE: scripts/test-backup-containers.sh
 - scripts/test-backup-mode-timers.sh - FILE: scripts/test-backup-mode-timers.sh
 - scripts/test-backup-system-units.sh - FILE: scripts/test-backup-system-units.sh

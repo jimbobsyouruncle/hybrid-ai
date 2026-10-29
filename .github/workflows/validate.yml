@@ -481,6 +481,19 @@ jobs:
         # Caddy and no Docker.
         run: bash scripts/test-tls-caddy-validation.sh
 
+      - name: Auth render tests
+        # Offline. Renders the managed Caddyfile template in a throwaway tree
+        # with AUTH_ENABLED off and on. Proves the login gate is emitted ONLY
+        # when AUTH_ENABLED=on: the off render is byte-identical to the tracked
+        # status/Caddyfile with zero basic_auth hits; the on render defines the
+        # (auth) snippet once with the two env placeholders and imports it into
+        # exactly the 9 gated blocks (every apex HTTPS handle except
+        # handle /health, plus the hermes./status./wildcard site level), never
+        # into a http:// jarvis.lan site or the redirect block. Also proves the
+        # fail-closed path: AUTH_ENABLED=on with an empty user or hash renders a
+        # basic_auth block the validator rejects. Needs no Docker or Caddy.
+        run: bash scripts/test-auth-render.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. HYBRID_AI_DATA_DIR and

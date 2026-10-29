@@ -765,6 +765,7 @@ The status page at `/status` exposes service state, log excerpts, and a diagnost
 | Network restricted | Caddy permits `/status`, `/hub` and `/ollama` only from loopback, RFC1918, and `100.64.0.0/10`; others are aborted with no response body |
 | Allowlist defined once | The trusted-network rule is a single reusable Caddy snippet imported inside each protected `handle`, so it runs before the handle routes and cannot be bypassed by them |
 | Unauthenticated Ollama API protected | `/ollama/` sits behind the same allowlist; Ollama's own port remains bound to `127.0.0.1` |
+| Optional login gate | Every `*.daemonhub.dev` HTTPS site (apex, `hermes.`, `status.`, wildcard) can require HTTP Basic auth via the env-gated `(auth)` snippet. Off by default; credentials are a bcrypt hash plus user name from the `0600` stack env, never a literal in any tracked file. Additive to the network allowlist, never a replacement. `handle /health` stays open for the uptime monitor |
 | Monitoring endpoint discloses nothing | `/health` returns one word (`ok`/`warn`/`fail`) with no detail, so it is safe to leave unrestricted for uptime checks |
 | Not directly reachable | The status container publishes no ports; the proxy is the only route in |
 | Container hardening | `read_only`, `cap_drop: ALL`, `no-new-privileges`, unprivileged user, tmpfs `/tmp`, all data mounts read-only |
