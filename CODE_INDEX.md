@@ -393,6 +393,9 @@
 - tls_prepare_render_values()
 - tls_render_to_file()
 - tls__docker_ready()
+- tls__caddyfile_uses_dns_solver()
+- tls_validate_image_for()
+- tls_build_validate_image()
 - tls_validate_compose_file()
 - tls_validate_caddyfile()
 - tls_render_and_install()
@@ -844,6 +847,8 @@
 - assert_envs_in_file()
 - docker()
 - caddy()
+- image_for_render()
+- run_order_case()
 - normalized_ca()
 
 ## scripts/test-tls-check.sh

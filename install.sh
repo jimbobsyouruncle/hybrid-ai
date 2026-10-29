@@ -57,7 +57,15 @@
 #   --dry-run                 HYBRID_AI_DRY_RUN=1    print the files it would write, a
 #                                                    unified diff of status/Caddyfile and
 #                                                    docker-compose.yml, and validate both.
-#                                                    Changes nothing; exits 0.
+#                                                    Writes no host file; exits 0.
+#                                                    ONE side effect: on the TLS
+#                                                    DNS-01 path it builds the
+#                                                    DNS-capable validation image
+#                                                    (hybrid-ai-caddy:2.11.7-dns)
+#                                                    from ./caddy, so the render
+#                                                    can be validated at all. A
+#                                                    Docker image is build cache,
+#                                                    not host state.
 #
 #   Example, preview first:
 #     ./install.sh --dry-run --tls --tls-domain daemonhub.dev \
@@ -199,7 +207,9 @@ hr
 source "${SCRIPT_DIR}/scripts/lib/tls.sh"
 
 # --dry-run runs BEFORE the dependency probe and the Docker daemon check: it
-# must work on a host that is not yet provisioned. It changes nothing.
+# must work on a host that is not yet provisioned. It writes no host file. On
+# the TLS DNS-01 path it builds the DNS-capable validation image (see the
+# --dry-run note in the usage text); that is its only side effect.
 if (( DRY_RUN )); then
   tls_load_env_file_values "$ENV_FILE"
   tls_apply_flags
@@ -1042,6 +1052,9 @@ ok ".env written (0600)."
 # no-op and a TLS-off run converges back to today's bytes. Validation gates the
 # move: a bad render leaves the previous file in place. Certificates and the
 # operator's token file are never read, moved or deleted here.
+# A TLS DNS-01 render is validated with the DNS-capable proxy image, which this
+# step therefore builds first (idempotent cache hit on a re-run). The image
+# would otherwise not exist yet: STEP 9 `compose up` builds it.
 tls_render_and_install
 
 # Keep an owner's legacy TAILSCALE_IP value byte-for-byte. STEP 2b refused to

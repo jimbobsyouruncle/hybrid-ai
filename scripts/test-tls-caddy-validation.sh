@@ -90,10 +90,24 @@ assert_envs_in_file() {  # FILE LABEL
 }
 
 # --- Branch 1: docker (no host caddy binary) ------------------------------
-# PATH points at an empty directory so `command -v caddy` fails; the docker
-# stub is a shell function, which `command -v` finds regardless of PATH.
+# PATH hides caddy and docker so `command -v caddy` fails; the docker stub is a
+# shell function, which `command -v` finds regardless of PATH.
+# A PATH that hides caddy and docker but keeps every other tool: the validator
+# still needs grep/awk/sed, and hiding those would silently change its
+# behaviour instead of exercising the branch under test.
 EMPTY_BIN="$WORK/emptybin"
 mkdir -p "$EMPTY_BIN"
+for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+  [[ -d $d ]] || continue
+  for f in "$d"/*; do
+    b="${f##*/}"
+    case "$b" in caddy|docker|docker-compose) continue ;; esac
+    [[ -x $f && ! -e "${EMPTY_BIN}/${b}" ]] && ln -s "$f" "${EMPTY_BIN}/${b}" 2>/dev/null
+  done
+done
+
+EXPECT_STOCK="caddy:2.11-alpine"
+EXPECT_DNS="hybrid-ai-caddy:2.11.7-dns"
 
 docker() {
   if [[ "${1:-}" == info ]]; then return 0; fi
@@ -131,10 +145,18 @@ if [[ -f "$WORK/docker.args" ]]; then
   else
     fail "docker branch lost the read-only Caddyfile mount"
   fi
-  if grep -Fxq -- "$TLS_VALIDATE_IMAGE" "$WORK/docker.args"; then
-    pass "docker branch still uses TLS_VALIDATE_IMAGE (${TLS_VALIDATE_IMAGE})"
+  # This render is the DNS-01 one, so the validator must use the DNS-capable
+  # image: the stock tag has no dns.providers module and rejects the render at
+  # adapt time.
+  if grep -Fxq -- "hybrid-ai-caddy:2.11.7-dns" "$WORK/docker.args"; then
+    pass "docker branch validates the DNS-01 render with the DNS-capable image"
   else
-    fail "docker branch no longer uses TLS_VALIDATE_IMAGE"
+    fail "docker branch did not use the DNS-capable image"
+  fi
+  if grep -Fxq -- "$EXPECT_STOCK" "$WORK/docker.args"; then
+    fail "docker branch used the stock image ($EXPECT_STOCK) for a DNS-01 render"
+  else
+    pass "docker branch never used the stock image for a DNS-01 render"
   fi
 else
   fail "docker branch never invoked docker run"
@@ -176,6 +198,139 @@ if (( skip_rc == 3 )) && [[ "$skip_out" == *"[skip] Caddyfile validation"* ]]; t
   pass "no docker and no caddy: returns 3 with the [skip] line (never a false pass)"
 else
   fail "skip path returned ${skip_rc} (expected 3 with a [skip] line): ${skip_out}"
+fi
+
+# ---------------------------------------------------------------------------
+# Validation-image selection: a DNS-01 render needs the DNS-capable image; every
+# other render keeps the stock tag. CADDY_VALIDATE_IMAGE overrides both.
+# Known limitation: `docker` is stubbed, so this proves which image is SELECTED
+# and in what ORDER the build runs. It cannot prove the real adapter accepts
+# the render -- the true proof is post-merge verification on the host.
+# ---------------------------------------------------------------------------
+image_for_render() {  # CADDYFILE
+  # A missing helper must be a reported FAIL, not a set -e abort that hides
+  # every later case: that is exactly how the unpatched base behaves.
+  ( declare -F tls_validate_image_for >/dev/null 2>&1 && tls_validate_image_for "$1" ) || true
+}
+
+img_dns="$(image_for_render "$CADDYFILE")"
+if [[ "$img_dns" == "$EXPECT_DNS" ]]; then
+  pass "dns render selects the DNS-capable image (${img_dns})"
+else
+  fail "dns render selected '${img_dns}' (expected hybrid-ai-caddy:2.11.7-dns)"
+fi
+
+# CADDY_IMAGE follows the resolver used everywhere else in the stack.
+img_dns_custom="$( ( CADDY_IMAGE=custom-caddy:9.9-dns; image_for_render "$CADDYFILE" ) )"
+if [[ "$img_dns_custom" == "custom-caddy:9.9-dns" ]]; then
+  pass "dns render follows CADDY_IMAGE (${img_dns_custom})"
+else
+  fail "dns render ignored CADDY_IMAGE (got '${img_dns_custom}')"
+fi
+
+# Explicit CADDY_VALIDATE_IMAGE wins over both.
+img_override="$( ( CADDY_VALIDATE_IMAGE=override/caddy:1; image_for_render "$CADDYFILE" ) )"
+if [[ "$img_override" == "override/caddy:1" ]]; then
+  pass "CADDY_VALIDATE_IMAGE overrides the dns image (${img_override})"
+else
+  fail "CADDY_VALIDATE_IMAGE did not override the dns image (got '${img_override}')"
+fi
+
+# http-01 and tls-alpn renders carry no dns solver: stock image, as before.
+TLS_VALIDATION="http"
+ACME_CA="$TLS_CA_STAGING_URL"
+tls_prepare_render_values "on"
+HTTP_CADDYFILE="$WORK/Caddyfile.http"
+tls_render_to_file "$APP_DIR/status/Caddyfile.tmpl" "on" "$HTTP_CADDYFILE"
+img_http="$(image_for_render "$HTTP_CADDYFILE")"
+if [[ "$img_http" == "$EXPECT_STOCK" ]]; then
+  pass "http-01 render keeps the stock validation image (${img_http})"
+else
+  fail "http-01 render selected '${img_http}' (expected caddy:2.11-alpine)"
+fi
+img_http_override="$( ( CADDY_VALIDATE_IMAGE=override/caddy:2; image_for_render "$HTTP_CADDYFILE" ) )"
+if [[ "$img_http_override" == "override/caddy:2" ]]; then
+  pass "CADDY_VALIDATE_IMAGE overrides the http-01 image (${img_http_override})"
+else
+  fail "CADDY_VALIDATE_IMAGE did not override the http-01 image (got '${img_http_override}')"
+fi
+
+# tls-alpn is the same "on" variant as http: no solver, stock image.
+img_alpn="$(image_for_render "$HTTP_CADDYFILE")"
+if [[ "$img_alpn" == "$EXPECT_STOCK" ]]; then
+  pass "tls-alpn render keeps the stock validation image (${img_alpn})"
+else
+  fail "tls-alpn render selected '${img_alpn}' (expected caddy:2.11-alpine)"
+fi
+
+# --- The build runs BEFORE validation, and only on the dns path -----------
+# ORDER is what matters: on first enablement the proxy image does not exist
+# yet (STEP 9 `compose up` builds it), so validating before building would run
+# a missing image. The stub records `build` and `run` in one ordered log.
+TLS_VALIDATION="dns"
+ACME_DNS_PROVIDER="cloudflare"
+tls_prepare_render_values "on dns"
+
+docker() {
+  case "${1:-}" in
+    info)  return 0 ;;
+    build) printf 'build %s\n' "$*" >> "$WORK/docker.order"; return 0 ;;
+    run)   printf 'run %s\n' "$*" >> "$WORK/docker.order"; return 0 ;;
+  esac
+  return 0
+}
+export -f docker
+
+# The build step reads caddy/Dockerfile from the render tree.
+mkdir -p "$APP_DIR/caddy"
+cp "${HYBRID_AI_APP_DIR}/caddy/Dockerfile" "$APP_DIR/caddy/Dockerfile"
+
+run_order_case() {  # TLS_ENABLED TLS_VALIDATION CADDYFILE
+  : > "$WORK/docker.order"
+  # WORK is exported so the exported docker stub can reach the same log file
+  # from inside the child shell.
+  WORK="$WORK" PATH="$EMPTY_BIN" bash -c '
+    source "$1/lib/hybrid-ai-env.sh" >/dev/null 2>&1
+    source "$1/scripts/lib/tls.sh"
+    APP_DIR="$2"
+    TLS_ENABLED="$3"
+    TLS_VALIDATION="$4"
+    if [[ -n "${5:-}" ]]; then tls_build_validate_image "$5"; tls_validate_caddyfile "$5"; fi
+  ' _ "$HYBRID_AI_APP_DIR" "$APP_DIR" "$1" "$2" "${3:-}" >/dev/null 2>&1 || true
+}
+
+run_order_case yes dns "$CADDYFILE"
+if grep -q -- "-t $EXPECT_DNS " "$WORK/docker.order" \
+   && grep -q '^build .*caddy' "$WORK/docker.order"; then
+  pass "dns path builds the DNS-capable image from ./caddy (docker build -t … <context>)"
+else
+  fail "dns path did not run 'docker build -t hybrid-ai-caddy:2.11.7-dns <app>/caddy' (log: $(tr '\n' ';' < "$WORK/docker.order"))"
+fi
+first_build="$(grep -n '^build ' "$WORK/docker.order" | head -1 | cut -d: -f1)"
+first_run="$(grep -n '^run ' "$WORK/docker.order" | head -1 | cut -d: -f1)"
+if [[ -n "$first_build" && -n "$first_run" && "$first_build" -lt "$first_run" ]]; then
+  pass "the image build runs BEFORE validation on the dns path"
+else
+  fail "the dns path did not build the image before validating (log: $(tr '\n' ';' < "$WORK/docker.order"))"
+fi
+
+run_order_case yes http "$HTTP_CADDYFILE"
+if grep -q '^build ' "$WORK/docker.order"; then
+  fail "the http-01 path wrongly built the DNS image"
+else
+  pass "the http-01 path does not build the DNS image"
+fi
+if grep -q "^run .*$EXPECT_STOCK" "$WORK/docker.order"; then
+  pass "the http-01 path validates with the stock image"
+else
+  fail "the http-01 path did not validate with the stock image"
+fi
+
+run_order_case no "" ""
+if grep -q '^build ' "$WORK/docker.order"; then
+  fail "the TLS-off path wrongly built the DNS image"
+else
+  pass "the TLS-off path does not build the DNS image"
 fi
 
 # --- The TLS-off variant still validates (no behaviour change) ------------

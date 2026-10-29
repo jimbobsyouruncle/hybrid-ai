@@ -18,7 +18,16 @@ TLS_TOKEN_DIR="/etc/hybrid-ai/acme"
 TLS_CA_STAGING_URL="https://acme-staging-v02.api.letsencrypt.org/directory"
 TLS_CA_PRODUCTION_URL="https://acme-v02.api.letsencrypt.org/directory"
 TLS_DEFAULT_DOMAIN="daemonhub.dev"
-TLS_VALIDATE_IMAGE="${CADDY_VALIDATE_IMAGE:-caddy:2.11-alpine}"
+# Validation images. The stock tag is right for every render that does not
+# carry the DNS solver: it has the caddyfile adapter. A DNS-01 render names
+# `dns.providers.cloudflare`/`dns.providers.rfc2136`, which the caddyfile
+# adapter resolves AT ADAPT TIME, so the stock image rejects a correct render.
+# tls_validate_image_for() picks the DNS-capable image for those renders;
+# CADDY_VALIDATE_IMAGE overrides both cases. Resolved at CALL time, not here:
+# install.sh sources this file before the stack .env is loaded, so a CADDY_IMAGE
+# from .env does not exist yet at source time.
+TLS_STOCK_VALIDATE_IMAGE="caddy:2.11-alpine"
+TLS_DNS_VALIDATE_IMAGE_DEFAULT="hybrid-ai-caddy:2.11.7-dns"
 
 # --- Output helpers: reuse install.sh's, fall back when sourced alone ------
 tls__warn() {
@@ -504,6 +513,49 @@ tls__docker_ready() {
   return 0
 }
 
+# True when the rendered Caddyfile carries the DNS-01 solver, i.e. a
+# `dns cloudflare ...` / `dns rfc2136 ...` line inside the proxy's tls block.
+# Read from the file, not from TLS_VALIDATION, so a temp or --dry-run render is
+# classified by its own content.
+tls__caddyfile_uses_dns_solver() {  # FILE
+  grep -Eq '^[[:space:]]*dns[[:space:]]+(cloudflare|rfc2136)([[:space:]]|$)' "$1"
+}
+
+# The image the validator must run: the DNS-capable one for a DNS-01 render,
+# the stock tag otherwise.
+tls_validate_image_for() {  # FILE
+  if tls__caddyfile_uses_dns_solver "$1"; then
+    printf '%s\n' "${CADDY_VALIDATE_IMAGE:-${CADDY_IMAGE:-$TLS_DNS_VALIDATE_IMAGE_DEFAULT}}"
+  else
+    printf '%s\n' "${CADDY_VALIDATE_IMAGE:-$TLS_STOCK_VALIDATE_IMAGE}"
+  fi
+}
+
+# Build the DNS-capable Caddy image before it is validated against. The proxy
+# image is otherwise first built by STEP 9 `compose up`, which is AFTER the
+# render+validate gate, so on first enablement the validator would have no
+# image to run. Idempotent: an unchanged caddy/Dockerfile is a cache hit.
+# Returns 3, like the other validation helpers, when docker is unavailable.
+tls_build_validate_image() {  # [RENDERED_FILE]
+  tls_is_on || return 0
+  tls__caddyfile_uses_dns_solver "${1:-${APP_DIR}/status/Caddyfile}" || return 0
+  # An explicit CADDY_VALIDATE_IMAGE is the operator's own image; it is not
+  # ours to build.
+  [[ -z "${CADDY_VALIDATE_IMAGE:-}" ]] || return 0
+  if ! tls__docker_ready; then
+    printf '[skip] Caddy image build for validation (docker unavailable)\n'
+    return 3
+  fi
+  local image
+  image="$(tls_validate_image_for "${1:-${APP_DIR}/status/Caddyfile}")"
+  local context="${APP_DIR}/caddy"
+  [[ -f "${context}/Dockerfile" ]] || tls__die "Missing ${context}/Dockerfile: cannot build ${image} to validate the DNS-01 render."
+  if ! docker build -t "$image" "$context"; then
+    tls__die "Building ${image} from ${context} failed. The previous files are unchanged."
+  fi
+  return 0
+}
+
 tls_validate_compose_file() {  # FILE [ENVFILE]
   # Default to the RESOLVED STACK env file when no explicit file was given:
   # an --env-file consumer must hand compose the 0600 secrets file, never the
@@ -566,7 +618,7 @@ tls_validate_caddyfile() {  # FILE
     for e in "${envs[@]}"; do docker_env+=(-e "$e"); done
     docker run --rm --network none --entrypoint caddy \
       "${docker_env[@]}" \
-      -v "${file}:/etc/caddy/Caddyfile:ro" "$TLS_VALIDATE_IMAGE" \
+      -v "${file}:/etc/caddy/Caddyfile:ro" "$(tls_validate_image_for "$file")" \
       validate --adapter caddyfile --config /etc/caddy/Caddyfile
     return
   fi
@@ -590,6 +642,15 @@ tls_render_and_install() {
 
   tls_render_to_file "${APP_DIR}/status/Caddyfile.tmpl" "$variants" "$caddy_tmp"
   tls_render_to_file "${APP_DIR}/docker-compose.yml.tmpl" "$variants" "$compose_tmp"
+
+  # Build the DNS-capable image BEFORE the render is validated against it: that
+  # image otherwise does not exist until STEP 9 `compose up`. A build failure
+  # dies here, while both files are still untouched.
+  local brc=0
+  tls_build_validate_image "$caddy_tmp" || brc=$?
+  if (( brc == 3 )); then
+    tls__warn "docker is unavailable: the Caddy validation image was NOT built."
+  fi
 
   local rc=0
   tls_validate_compose_file "$compose_tmp" || rc=$?
@@ -620,7 +681,10 @@ tls_render_and_install() {
 
 # ---------------------------------------------------------------------------
 # Section 8.2 -- --dry-run. Prints the files it would write and a unified diff
-# of the two managed files. Changes nothing.
+# of the two managed files. It writes no host file. Its ONE side effect is the
+# `docker build` of the DNS-capable validation image, recorded at approval: a
+# Docker image is build cache, not host state, and validating the render is the
+# dry run's whole value.
 # ---------------------------------------------------------------------------
 tls_dry_run() {
   local variant variants caddy_tmp compose_tmp env_tmp
@@ -663,6 +727,17 @@ tls_dry_run() {
   elif (( rc != 0 )); then
     rm -f -- "$caddy_tmp" "$compose_tmp" "$env_tmp"
     tls__die "The rendered docker-compose.yml failed validation."
+  fi
+  # The dry run's one side effect, and it is deliberate: a DNS-01 render is only
+  # validatable with the DNS-capable image, so the image is built here. A Docker
+  # image is build cache, not host state, and validating the render is the whole
+  # point of the dry run.
+  local brc=0
+  tls_build_validate_image "$caddy_tmp" || brc=$?
+  if (( brc == 0 )); then
+    printf '[dry-run] built the validation image: %s\n' "$(tls_validate_image_for "$caddy_tmp")"
+  elif (( brc == 3 )); then
+    printf '[dry-run] Caddy image build was NOT run (docker unavailable).\n'
   fi
   rc=0
   tls_validate_caddyfile "$caddy_tmp" || rc=$?
