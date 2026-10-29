@@ -364,6 +364,12 @@ services:
       - ${HYBRID_AI_DATA_DIR:?HYBRID_AI_DATA_DIR must be set - run ./install.sh}/caddy:/data
     environment:
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:?LOCAL_DOMAIN must be set}
+      # Login gate for the *.daemonhub.dev HTTPS sites. The `(auth)` snippet
+      # reads these at container start; AUTH_ENABLED is render-time only, so it
+      # does not reach here. Both default empty: with AUTH_ENABLED off the
+      # Caddyfile imports neither the snippet nor the placeholders.
+      HYBRID_AI_AUTH_USER: ${HYBRID_AI_AUTH_USER:-}
+      HYBRID_AI_AUTH_HASH: ${HYBRID_AI_AUTH_HASH:-}
       DO_NOT_TRACK: "true"
     security_opt:
       - no-new-privileges:true

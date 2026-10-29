@@ -72,6 +72,16 @@ tls_is_on() {
   esac
 }
 
+# The login gate is a render-time switch: AUTH_ENABLED=on emits the (auth)
+# snippet and every `import auth`. Any other value (the default, absent, "off")
+# keeps the region out, so the rendered files are byte-identical to today's.
+tls_auth_is_on() {
+  case "${AUTH_ENABLED:-off}" in
+    1|yes|YES|Yes|true|TRUE|True|on|ON|On) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 tls_default_token_path() {
   case "${ACME_DNS_PROVIDER:-cloudflare}" in
     rfc2136) printf '%s\n' "${TLS_TOKEN_DIR}/rfc2136_key_secret" ;;
@@ -384,15 +394,20 @@ tls_render_template() {  # TEMPLATE VARIANTS
 
 # The variant names enabled for this run: one for TLS off, two for TLS on.
 tls_variants() {
+  local variants
   if tls_is_on; then
     if [[ "${TLS_VALIDATION:-dns}" == dns ]]; then
-      printf '%s\n' "on dns"
+      variants="on dns"
     else
-      printf '%s\n' "on"
+      variants="on"
     fi
   else
-    printf '%s\n' "off"
+    variants="off"
   fi
+  if tls_auth_is_on; then
+    variants="${variants} auth"
+  fi
+  printf '%s\n' "$variants"
 }
 
 # Replaces the allowlisted placeholders. Values are built only from validated
@@ -529,6 +544,11 @@ tls_validate_caddyfile() {  # FILE
     "ACME_CA=${TLS_CA_URL:-${ACME_CA:-}}"
     "ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-disable_redirects}"
     "LOCAL_DOMAIN=${LOCAL_DOMAIN:-}"
+    # The auth-gated render keeps these placeholders too. AUTH_ENABLED=on with
+    # an empty user or hash expands to `basic_auth {  }`, which `caddy validate`
+    # rejects: the fail-closed path the installer relies on.
+    "HYBRID_AI_AUTH_USER=${HYBRID_AI_AUTH_USER:-}"
+    "HYBRID_AI_AUTH_HASH=${HYBRID_AI_AUTH_HASH:-}"
   )
   if command -v caddy >/dev/null 2>&1; then
     # Plain shell variables that were never exported: export them for the
@@ -736,7 +756,8 @@ tls_load_env_file_values() {  # FILE
     case "$key" in
       TLS_ENABLED|TLS_DOMAIN|ACME_EMAIL|ACME_CA|TLS_VALIDATION|ACME_DNS_PROVIDER|\
       HYBRID_AI_TLS_TOKEN_FILE|TLS_HOSTS|ACME_AUTO_HTTPS|CADDY_IMAGE|LOCAL_DOMAIN|\
-      RFC2136_KEY_NAME|RFC2136_SERVER) ;;
+      RFC2136_KEY_NAME|RFC2136_SERVER|AUTH_ENABLED|HYBRID_AI_AUTH_USER|\
+      HYBRID_AI_AUTH_HASH) ;;
       *) continue ;;
     esac
     [[ -n "${!key:-}" ]] && continue

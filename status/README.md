@@ -193,21 +193,35 @@ The mitigations are that the app is tiny and auditable, issues only GETs, holds 
 
 ### Adding a password
 
-Network restriction stops the internet. It does not stop a guest on your wifi or another device you own that gets compromised. To add a password, generate a hash:
+Network restriction stops the internet. It does not stop a guest on your wifi or another device you own that gets compromised. The proxy can gate every `*.daemonhub.dev` HTTPS site (the apex, `hermes.`, `status.` and the wildcard catch-all) behind HTTP Basic auth. This is **additive** to the network allowlist: it never replaces it.
 
-```bash
-docker run --rm caddy:2-alpine caddy hash-password --plaintext 'your-password'
-```
+The gate is off by default. With it off, the rendered Caddyfile is byte-identical to the one without the gate, and the `http://*.jarvis.lan` names stay open during the transition.
 
-Then add this inside the `handle /status*` block in `Caddyfile`, above `reverse_proxy`:
+1. Generate a bcrypt hash. The plaintext never enters the repository:
 
-```
-basic_auth {
-    admin <paste-the-hash-here>
-}
-```
+   ```bash
+   docker run --rm caddy:2.11-alpine caddy hash-password
+   ```
 
-Restart with `./install.sh`. The hash is safe to commit; the plaintext never is.
+2. In the stack env file (`.env`, mode `0600`), set:
+
+   ```
+   AUTH_ENABLED=on
+   HYBRID_AI_AUTH_USER=<your-user-name>
+   HYBRID_AI_AUTH_HASH=<the-bcrypt-hash-from-step-1>
+   ```
+
+3. Apply it:
+
+   ```bash
+   ./install.sh
+   ```
+
+The credentials are read from the environment by the `(auth)` snippet — no credential literal is ever written into a tracked file. The username and hash are passed to the Caddy container by the proxy's `environment:` block.
+
+`/health` is deliberately exempt: it is the open endpoint the external uptime monitor polls, so it answers without a prompt. Every other route on the gated sites, and the `hermes.`, `status.` and wildcard site blocks, require the password.
+
+**Known limitation.** Basic auth has no server-side expiry. Browsers hold the credentials until they are closed, so the practical session is per browser session, not a fixed 24 hours. A `forward_auth` session service that could expire credentials was considered and deferred.
 
 ---
 

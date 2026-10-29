@@ -391,6 +391,12 @@ services:
       ACME_CA: ${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
       ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-disable_redirects}
 #@end
+      # Login gate for the *.daemonhub.dev HTTPS sites. The `(auth)` snippet
+      # reads these at container start; AUTH_ENABLED is render-time only, so it
+      # does not reach here. Both default empty: with AUTH_ENABLED off the
+      # Caddyfile imports neither the snippet nor the placeholders.
+      HYBRID_AI_AUTH_USER: ${HYBRID_AI_AUTH_USER:-}
+      HYBRID_AI_AUTH_HASH: ${HYBRID_AI_AUTH_HASH:-}
       DO_NOT_TRACK: "true"
     security_opt:
       - no-new-privileges:true

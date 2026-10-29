@@ -1017,6 +1017,12 @@ HYBRID_AI_TLS_TOKEN_FILE=${HYBRID_AI_TLS_TOKEN_FILE:-}
 TLS_HOSTS=${TLS_HOSTS:-}
 ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-disable_redirects}
 CADDY_IMAGE=${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}
+# Login gate for the *.daemonhub.dev HTTPS sites. off by default: the rendered
+# Caddyfile is then byte-identical to the one without the gate. Turn it on with
+# AUTH_ENABLED=on plus HYBRID_AI_AUTH_USER and a bcrypt HYBRID_AI_AUTH_HASH.
+AUTH_ENABLED=${AUTH_ENABLED:-off}
+HYBRID_AI_AUTH_USER=${HYBRID_AI_AUTH_USER:-}
+HYBRID_AI_AUTH_HASH=${HYBRID_AI_AUTH_HASH:-}
 
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true
