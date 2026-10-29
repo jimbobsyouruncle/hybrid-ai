@@ -1770,8 +1770,9 @@ fi
 
 log "Starting full Hybrid-AI control plane stack..."
 # Build, then start. `compose build` builds every service with a `build:`
-# section -- today only hermes -- which is exactly what `up --build` did, but
-# as its own phase so its time is visible and so a cache hit can skip it.
+# section -- hermes always, and the proxy too once the TLS-on render adds its
+# `build:` stanza -- which is exactly what `up --build` did, but as its own
+# phase so its time is visible and so a cache hit can skip it.
 if [[ "$BUILD_GATE_DECISION" != "cache" ]]; then
   log "Building images..."
   hybrid_progress_start "build"

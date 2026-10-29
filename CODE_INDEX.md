@@ -97,6 +97,11 @@
 - hermes_backup_path()
 - restore_home_dir()
 
+## caddy/Dockerfile
+- FROM caddy:2.8-builder-alpine AS builder
+- stage: builder
+- FROM caddy:2.8-alpine
+
 ## collect-diagnostics.sh
 - redact()
 - sec()
@@ -825,6 +830,14 @@
 - run_sync()
 - run_check()
 - inv_rows()
+
+## scripts/test-tls-caddy-validation.sh
+- pass()
+- fail()
+- assert_envs_in_file()
+- docker()
+- caddy()
+- normalized_ca()
 
 ## scripts/test-tls-check.sh
 - ok()

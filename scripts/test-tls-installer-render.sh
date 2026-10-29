@@ -160,6 +160,23 @@ expect "$WORK/on1/docker-compose.yml" 'no-new-privileges:true' \
 expect "$WORK/on1/docker-compose.yml" 'mem_limit: 128m' \
   "proxy memory cap preserved in the TLS-on compose"
 
+# The TLS-on render points the proxy at a local build context. If that context
+# or its Dockerfile is missing, `docker compose build` fails at install time --
+# after the render, deep in the build phase. Catch it here instead.
+if awk '/^  proxy:/{p=1} p&&/^    build:/{b=1} b&&/context: .\/caddy$/{c=1} b&&/dockerfile: Dockerfile$/{d=1} p&&/^  [a-z]/&&!/^  proxy:/{exit} END{exit !(c&&d)}' \
+     "$WORK/on1/docker-compose.yml"; then
+  pass "TLS-on compose proxy declares build context ./caddy and Dockerfile Dockerfile"
+else
+  fail "TLS-on compose proxy does not declare build context ./caddy with Dockerfile"
+fi
+if [[ -f "${HYBRID_AI_APP_DIR}/caddy/Dockerfile" ]]; then
+  pass "the proxy build context ./caddy/Dockerfile exists in the tree"
+else
+  fail "the proxy build context ./caddy/Dockerfile is MISSING from the tree"
+fi
+reject "$WORK/off1/docker-compose.yml" 'context: ./caddy' \
+  "TLS-off compose proxy has no build stanza (stock image path unchanged)"
+
 # --- TLS on, RFC 2136 + HTTP-01 variants render too ------------------------
 ACME_DNS_PROVIDER="rfc2136"
 RFC2136_KEY_NAME="acme-daemonhub"
