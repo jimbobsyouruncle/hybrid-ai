@@ -49,6 +49,9 @@
 - backup/system/hybrid-ai-backup-check.service
 - backup/system/hybrid-ai-backup-check.timer
 - backup/system/hybrid-ai-backup-upload.service
+## caddy
+
+- caddy/Dockerfile
 ## deploy
 
 - deploy/50-hybrid-ai-deploy.rules
@@ -166,6 +169,7 @@
 - scripts/test-status-backup-log-env.sh - FILE: scripts/test-status-backup-log-env.sh
 - scripts/test-status-backup-probe.sh - FILE: scripts/test-status-backup-probe.sh
 - scripts/test-sync-agent-repos.sh - FILE: scripts/test-sync-agent-repos.sh
+- scripts/test-tls-caddy-validation.sh - FILE: scripts/test-tls-caddy-validation.sh
 - scripts/test-tls-check.sh - FILE: scripts/test-tls-check.sh
 - scripts/test-tls-dry-run-renewal.sh - FILE: scripts/test-tls-dry-run-renewal.sh
 - scripts/test-tls-installer-render.sh - FILE: scripts/test-tls-installer-render.sh

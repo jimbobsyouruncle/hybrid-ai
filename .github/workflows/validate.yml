@@ -460,6 +460,27 @@ jobs:
         # fixture directories under a mktemp tree.
         run: bash scripts/test-secret-guard.sh
 
+      - name: TLS compose render tests
+        # Offline. Renders the TLS-off and TLS-on compose/Caddyfile variants in
+        # a throwaway tree. Beyond the existing byte-identity, allowlist and
+        # hardening checks, it asserts the TLS-on render's proxy `build:`
+        # context (./caddy) exists with its Dockerfile: that context was
+        # specified in docs/tls-acme-design.md but never committed, so
+        # `docker compose build proxy` failed on the first TLS enablement.
+        run: bash scripts/test-tls-installer-render.sh
+
+      - name: TLS Caddyfile validation tests
+        # Offline; docker and caddy are stubbed as shell functions. Proves
+        # tls_validate_caddyfile hands the validator the same runtime values
+        # the proxy's compose `environment:` block supplies (ACME_EMAIL,
+        # TLS_DOMAIN, ACME_CA, ACME_AUTO_HTTPS, LOCAL_DOMAIN) on BOTH the
+        # docker and host-binary branches, keeps --network none and the :ro
+        # mount, keeps the skip contract (exit 3), and that ACME_CA input is
+        # normalized to the resolved URL at the single tls_validate_settings
+        # seam. It does NOT run a real `caddy validate`: the runners have no
+        # Caddy and no Docker.
+        run: bash scripts/test-tls-caddy-validation.sh
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. HYBRID_AI_DATA_DIR and

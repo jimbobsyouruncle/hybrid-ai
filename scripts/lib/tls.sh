@@ -223,6 +223,11 @@ tls_validate_settings() {
     tls_validate_dns_provider "${ACME_DNS_PROVIDER:-}"
   fi
   TLS_CA_URL="$(tls_validate_ca "${ACME_CA:-}")"
+  # Single seam: the resolved URL, not the staging/production label, is what
+  # reaches the stack .env, the proxy's compose environment and the validator.
+  # It runs here because tls_validate_settings precedes both the install.sh
+  # STEP 8 env write and every validation call site.
+  ACME_CA="$TLS_CA_URL"
   if [[ "${TLS_VALIDATION}" == dns ]]; then
     tls_validate_token_file "${HYBRID_AI_TLS_TOKEN_FILE:-}"
   fi
@@ -512,13 +517,35 @@ tls_validate_compose_file() {  # FILE [ENVFILE]
 }
 
 tls_validate_caddyfile() {  # FILE
+  # The rendered TLS Caddyfile keeps its runtime placeholders
+  # ({$ACME_EMAIL}, {$ACME_CA}, {$TLS_DOMAIN}, {$LOCAL_DOMAIN}) because the
+  # proxy's compose `environment:` block supplies them at container start. The
+  # validator must see the same values, or the placeholders expand empty and
+  # Caddy rejects the file before it reaches the stack.
   local file="$1"
+  local -a envs=(
+    "ACME_EMAIL=${ACME_EMAIL:-}"
+    "TLS_DOMAIN=${TLS_DOMAIN:-}"
+    "ACME_CA=${TLS_CA_URL:-${ACME_CA:-}}"
+    "ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-disable_redirects}"
+    "LOCAL_DOMAIN=${LOCAL_DOMAIN:-}"
+  )
   if command -v caddy >/dev/null 2>&1; then
-    caddy validate --adapter caddyfile --config "$file"
+    # Plain shell variables that were never exported: export them for the
+    # validator only, in a subshell, so the caller's environment is untouched.
+    (
+      local e
+      for e in "${envs[@]}"; do export "${e?}"; done
+      caddy validate --adapter caddyfile --config "$file"
+    )
     return
   fi
   if tls__docker_ready; then
+    local -a docker_env=()
+    local e
+    for e in "${envs[@]}"; do docker_env+=(-e "$e"); done
     docker run --rm --network none --entrypoint caddy \
+      "${docker_env[@]}" \
       -v "${file}:/etc/caddy/Caddyfile:ro" "$TLS_VALIDATE_IMAGE" \
       validate --adapter caddyfile --config /etc/caddy/Caddyfile
     return

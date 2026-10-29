@@ -1298,14 +1298,23 @@ quickly. Do this at least an hour before the cutover window, not during it.
 2. Create the Cloudflare API token, scoped as in section 2.6. Verify it with the
    four checks in 2.6.
 3. Write the token to `/etc/hybrid-ai/acme/cloudflare_dns_token` (`0600 root`).
-4. Build the Caddy image (`docker compose build proxy`). Verify
-   `caddy list-modules | grep dns.providers`.
+4. Enablement renders the TLS compose and builds the Caddy image. Run
+   `./install.sh --tls` (step 7): the render adds the proxy `build:` stanza,
+   then install.sh's build phase runs `docker compose build proxy`. Verify the
+   BUILT image carries the DNS providers:
+   `docker run --rm --entrypoint caddy hybrid-ai-caddy:2.8.4-dns list-modules | grep dns.providers`.
+   A `docker compose build proxy` run BEFORE enablement has nothing to build
+   (`WARN No services to build`): the stanza does not exist until the TLS-on
+   render writes it. The stock `caddy:2.8-alpine` image is never used for TLS
+   (section 2.3).
 5. Add the dnsmasq drop-in on the Pi-hole host and `pihole restartdns`. Verify
    `dig @<pihole> daemonhub.dev` from a LAN client.
 6. Create the public records that make sense: `_acme-challenge` TXT is written by
    Caddy; apex/wildcard A only if a port forward exists.
-7. Set `.env` TLS keys with `ACME_CA` = **staging**. Run the installer with
-   `--tls`.
+7. Set `.env` TLS keys with `ACME_CA` = **staging**. The installer accepts the
+   `staging`/`production` label and normalizes it to the resolved CA URL in the
+   stack `.env`, so the proxy container and the render validator both receive
+   the URL. Run the installer with `--tls`.
 8. Validate and apply the Caddyfile. Confirm staging certificates issue for all
    four site blocks (section 5.4 step 1-3).
 9. Verify every service over HTTPS on staging (browsers will warn; use `curl -k`
@@ -1706,16 +1715,28 @@ Then run the four verification checks from section 2.6. Expected: `"active"`,
 
 ### Step 4 -- Build the Caddy image
 
+The proxy's `build:` stanza is part of the TLS-on compose render, so the build
+happens during enablement, not before it. Do steps 7 and 8 first; install.sh
+renders the compose, then its build phase runs `docker compose build proxy`.
+Running `docker compose build proxy` before enablement prints
+`WARN No services to build`, because no service declares a `build:` section yet.
+
+After that build completes, verify the BUILT image:
+
 ```bash
-docker compose build proxy
-# expected: build succeeds, and the build-time gate prints:
+docker run --rm --entrypoint caddy hybrid-ai-caddy:2.8.4-dns list-modules \
+  | grep dns.providers
+# expected:
 #   dns.providers.cloudflare
 #   dns.providers.rfc2136
 docker image inspect hybrid-ai-caddy:2.8.4-dns --format '{{.Id}}'   # expected: sha256:…
 ```
 
-A build failure here means a plugin version pin is wrong. Fix the pin; do not
-fall back to the stock image.
+The `caddy/Dockerfile` build-time gate runs that same `list-modules` check, so
+a missing provider fails the BUILD, not the container at start. A build
+failure means a plugin version pin is wrong. Fix the pin; do not fall back to
+the stock `caddy:2.8-alpine` image, which carries no DNS providers and is never
+used for TLS (section 2.3).
 
 ### Step 5 -- Local split-horizon DNS
 
@@ -1780,6 +1801,8 @@ git status --short          # expected: still clean
 ./install.sh --tls --tls-domain daemonhub.dev --tls-email you@example.com \
              --tls-validation dns --tls-dns-provider cloudflare \
              --tls-acme-ca staging
+# The installer normalizes the `staging` label to the resolved CA URL in the
+# stack .env; the proxy container and the Caddyfile validator both receive it.
 # expected:
 #   [ OK ] .env written (0600).
 #   [ OK ] Caddyfile rendered with the HTTPS site blocks.
