@@ -112,6 +112,12 @@ to that exported value (`--cert-root` still wins). If Caddy's `/data` mount ever
 moves, the helper constant is the only line to edit; no script hardcodes the
 literal path.
 
+Caddy >= 2.10 prefers the wildcard, so that tree holds exactly two certificate
+directories, `daemonhub.dev` and `wildcard_.daemonhub.dev`. `hermes.` and
+`status.` are served from the wildcard and have no directory of their own, so the
+certificate audit does not track them separately; the per-SNI handshake in
+`tls-check.sh` still checks each published hostname.
+
 For each host it reads the leaf with openssl (never the `.key`) and compares the
 serial with the last recorded serial in the state file. One line is appended to
 the audit log only when something changed:

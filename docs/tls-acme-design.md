@@ -16,7 +16,7 @@ Everything below is grounded in the current repository:
   20), `http://hermes.{$LOCAL_DOMAIN}` (line 28) and `http://{$LOCAL_DOMAIN}`
   (line 35). The apex block carries `handle /status*`, `/hub*`, `/health`,
   `handle_path /ollama/*`, `/openwebui*`, `/chat*` and a catch-all.
-- `docker-compose.yml` -- `proxy` service at line 349 (`caddy:2.8-alpine`,
+- `docker-compose.yml` -- `proxy` service at line 349 (`caddy:2.11-alpine`,
   `hybrid-ai-proxy`, `restart: unless-stopped`, `depends_on` open-webui and
   status, `mem_limit: 128m`, `cpus: "0.5"`, publishes `"80:80"` only, mounts
   `./status/Caddyfile:/etc/caddy/Caddyfile:ro` and
@@ -47,9 +47,9 @@ Everything below is grounded in the current repository:
 |---|----------|
 | D1 | DNS-01 is the installer default validation method. HTTP-01 and TLS-ALPN-01 are opt-in. |
 | D2 | First DNS plugin is Cloudflare (`dns.providers.cloudflare`). Second documented provider is RFC 2136 dynamic DNS (`dns.providers.rfc2136`). |
-| D3 | The Caddy image is built locally from `caddy/Dockerfile` with `xcaddy`, pinned to `caddy:2.8` base plus pinned plugin versions. A stock `caddy:2.8-alpine` image is never used for TLS. |
+| D3 | The Caddy image is built locally from `caddy/Dockerfile` with `xcaddy`, pinned to `caddy:2.11` base plus pinned plugin versions. A stock `caddy:2.11-alpine` image is never used for TLS. |
 | D4 | The DNS API credential is a file, mounted with compose `secrets:` at `/run/secrets/cloudflare_dns_token`, never an env var, never an argument, never in git. |
-| D5 | Certificates are issued for the apex and for a wildcard, one certificate per site block, via DNS-01. |
+| D5 | Certificates are issued for the apex and for a wildcard only, via DNS-01. Caddy >= 2.10 prefers the wildcard, so `hermes.` and `status.` reuse it instead of getting their own certificate. |
 | D6 | `auto_https off` disables Caddy's certificate management, so it is never rendered. Every TLS-on mode renders `auto_https disable_redirects`, and the explicit `http://` block is the one 308. |
 | D7 | HTTP->HTTPS redirects are explicit `http://` site blocks returning 308, keeping `(trusted_only)` on them. |
 | D8 | Renewal is Caddy's own. No second issuer, no issuing systemd timer. One systemd timer runs a read-only watchdog. |
@@ -216,7 +216,7 @@ Adding a third provider is a one-line change in the build file plus a new
 
 ### 2.3 Baking the module into the image
 
-**The stock `caddy:2.8-alpine` image contains no DNS provider modules.** This is
+**The stock `caddy:2.11-alpine` image contains no DNS provider modules.** This is
 a hard fact, not a preference: an unbuilt image fails at startup with
 `unrecognized directive: dns` and Caddy exits, taking the proxy down.
 
@@ -228,19 +228,19 @@ New file `caddy/Dockerfile`:
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-# Caddy + the ACME DNS provider modules. The stock caddy:2.8-alpine image has
+# Caddy + the ACME DNS provider modules. The stock caddy:2.11-alpine image has
 # no DNS providers, and the Caddyfile refuses to load without them.
-FROM caddy:2.8-builder-alpine AS builder
+FROM caddy:2.11-builder-alpine AS builder
 
-ARG CADDY_VERSION=2.8.4
-ARG CLOUDFLARE_DNS_VERSION=v0.2.1
-ARG RFC2136_DNS_VERSION=v0.2.0
+ARG CADDY_VERSION=2.11.7
+ARG CLOUDFLARE_DNS_VERSION=v0.2.4
+ARG RFC2136_DNS_VERSION=v1.0.0
 
 RUN xcaddy build "v${CADDY_VERSION}" \
       --with github.com/caddy-dns/cloudflare@${CLOUDFLARE_DNS_VERSION} \
       --with github.com/caddy-dns/rfc2136@${RFC2136_DNS_VERSION}
 
-FROM caddy:2.8-alpine
+FROM caddy:2.11-alpine
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 RUN caddy version && caddy list-modules | grep -E '^dns\.providers\.(cloudflare|rfc2136)$'
 ```
@@ -252,14 +252,14 @@ Compose then uses:
     build:
       context: ./caddy
       dockerfile: Dockerfile
-    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}
 ```
 
 The `RUN ... caddy list-modules | grep` line is the build-time gate: a missing
 module fails the build instead of failing at container start.
 
 Explicit alternative, if a local image build is unacceptable on the Pi: publish
-`hybrid-ai-caddy:2.8.4-dns` from CI (`.github/workflows/validate.yml` already
+`hybrid-ai-caddy:2.11.7-dns` from CI (`.github/workflows/validate.yml` already
 gates the repo) to GHCR and set `CADDY_IMAGE` in `.env` to that digest-pinned
 reference. The installer prefers a local build and only sets `CADDY_IMAGE` when
 the operator asks for it. Either way the stock image is never used for TLS.
@@ -763,9 +763,21 @@ Notes on the diff, all deliberate:
   wildcard catch-all, and never merged into `(secure_headers)`. Sending HSTS on
   plain HTTP would be ignored at best and confusing at worst, and a wildcard
   site is exactly where a broad HSTS pin is least wanted.
-- **One `tls` block per site** means Caddy obtains one certificate per site
-  block: the apex certificate and the wildcard. Both are DNS-01, both use the
-  same challenge name, so Caddy serialises them.
+- **One `tls` block per site, one issuance pair.** Caddy >= 2.10 prefers the
+  wildcard, so a site named with an explicit subdomain is served from the
+  wildcard certificate instead of getting a certificate of its own. Issuance is
+  therefore exactly two certificates: `{$TLS_DOMAIN}` (apex) and
+  `*.{$TLS_DOMAIN}`. `hermes.` and `status.` reuse the wildcard. Both are
+  DNS-01 and share the same challenge name, so Caddy serialises them.
+- **Accepted tradeoff: one wildcard key covers every subdomain.** The names
+  that actually reach Certificate Transparency logs are `{$TLS_DOMAIN}` and
+  `*.{$TLS_DOMAIN}` -- `hermes.` and `status.` are never disclosed there, which
+  is the point of this choice. The cost is that a single private key serves all
+  current and future subdomains: compromise of that key affects every host under
+  the domain, not just the named ones. CT privacy was weighed against that blast
+  radius and won.
+- **No code change was needed to get this.** Caddy >= 2.10 applies wildcard
+  preference on its own; the site blocks and their `tls` imports are unchanged.
 - The wildcard catch-all is a change in behaviour: previously an unknown host
   did not match any site and Caddy answered 404 with its default page. Now it
   reaches a `respond 404` behind `trusted_only`.
@@ -816,11 +828,11 @@ inside the container, not a client request.
 
 ```diff
    proxy:
--    image: caddy:2.8-alpine
+-    image: caddy:2.11-alpine
 +    build:
 +      context: ./caddy
 +      dockerfile: Dockerfile
-+    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
++    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}
      container_name: hybrid-ai-proxy
      restart: unless-stopped
      depends_on:
@@ -1007,7 +1019,7 @@ docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml \
 
 ```bash
 docker run --rm -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
-  hybrid-ai-caddy:2.8.4-dns caddy validate --config /etc/caddy/Caddyfile
+  hybrid-ai-caddy:2.11.7-dns caddy validate --config /etc/caddy/Caddyfile
 docker compose up -d proxy
 ```
 
@@ -1035,7 +1047,9 @@ docker compose logs -f proxy | grep -E '"logger":"tls"'
 # 1. Confirm the certificate exists in staging storage.
 docker compose exec proxy sh -c \
   'ls -l /data/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/'
-# expected: daemonhub.dev/  hermes.daemonhub.dev/  status.daemonhub.dev/  wildcard_.daemonhub.dev/
+# expected: daemonhub.dev/  wildcard_.daemonhub.dev/
+#           Caddy >= 2.10 wildcard preference: hermes. and status. are served by
+#           wildcard_.daemonhub.dev/ and get no certificate directory of their own.
 
 # 2. Confirm the stored metadata carries the expected expiry and renewal window.
 docker compose exec proxy sh -c \
@@ -1302,10 +1316,10 @@ quickly. Do this at least an hour before the cutover window, not during it.
    `./install.sh --tls` (step 7): the render adds the proxy `build:` stanza,
    then install.sh's build phase runs `docker compose build proxy`. Verify the
    BUILT image carries the DNS providers:
-   `docker run --rm --entrypoint caddy hybrid-ai-caddy:2.8.4-dns list-modules | grep dns.providers`.
+   `docker run --rm --entrypoint caddy hybrid-ai-caddy:2.11.7-dns list-modules | grep dns.providers`.
    A `docker compose build proxy` run BEFORE enablement has nothing to build
    (`WARN No services to build`): the stanza does not exist until the TLS-on
-   render writes it. The stock `caddy:2.8-alpine` image is never used for TLS
+   render writes it. The stock `caddy:2.11-alpine` image is never used for TLS
    (section 2.3).
 5. Add the dnsmasq drop-in on the Pi-hole host and `pihole restartdns`. Verify
    `dig @<pihole> daemonhub.dev` from a LAN client.
@@ -1315,8 +1329,9 @@ quickly. Do this at least an hour before the cutover window, not during it.
    `staging`/`production` label and normalizes it to the resolved CA URL in the
    stack `.env`, so the proxy container and the render validator both receive
    the URL. Run the installer with `--tls`.
-8. Validate and apply the Caddyfile. Confirm staging certificates issue for all
-   four site blocks (section 5.4 step 1-3).
+8. Validate and apply the Caddyfile. Confirm staging issuance produces exactly
+   two certificates -- the apex and the wildcard -- and that all four HTTPS site
+   blocks are served from those two (section 5.4 step 1-3).
 9. Verify every service over HTTPS on staging (browsers will warn; use `curl -k`
    or accept the warning).
 10. Switch `ACME_CA` to production, apply, confirm the trusted chain
@@ -1526,7 +1541,7 @@ unchanged.** Concretely:
   `no` without asking).
 - `status/Caddyfile` renders identically to the checked-in file today: same
   global block, same three `http://` sites, same snippets.
-- `docker-compose.yml` renders identically: `caddy:2.8-alpine`, `"80:80"` only,
+- `docker-compose.yml` renders identically: `caddy:2.11-alpine`, `"80:80"` only,
   no `secrets:`, no `build:`.
 - `status/app.py` gains the endpoint but its behaviour with TLS off is inert:
   `/status/tls` returns HTTP `200` with
@@ -1632,7 +1647,7 @@ Everything this design creates or changes. "Repo" means this git repository;
 | 10 | `doctor.sh` | repo | modify | Call `scripts/tls-check.sh`, map exit `1` to warn, `2`/`3` to its own failure/skip handling, so one command still diagnoses everything | `0755` |
 | 11 | `deploy/hybrid-ai-tls-check.service` | repo | **create** | Daily read-only watchdog unit (5.2): `Type=oneshot`, `NoNewPrivileges=yes`, `ProtectSystem=strict`, same `OnFailure=` target as `hybrid-ai-check.service` | `0644` |
 | 12 | `deploy/hybrid-ai-tls-check.timer` | repo | **create** | `OnCalendar=*-*-* 06:10:00`, `Persistent=true` | `0644` |
-| 13 | `caddy/Dockerfile` | repo | **create** | `xcaddy` build of Caddy 2.8.4 with `dns.providers.cloudflare` + `dns.providers.rfc2136`, pinned versions, with a build-time `caddy list-modules` gate (2.3) | `0644` |
+| 13 | `caddy/Dockerfile` | repo | **create** | `xcaddy` build of Caddy 2.11.7 with `dns.providers.cloudflare` + `dns.providers.rfc2136`, pinned versions, with a build-time `caddy list-modules` gate (2.3) | `0644` |
 | 14 | `caddy/.dockerignore` | repo | **create** | Keep the build context to one file; nothing from the repo or any secret can enter a layer | `0644` |
 | 15 | `.env.example` | repo | modify | Document `TLS_ENABLED`, `TLS_DOMAIN`, `ACME_EMAIL`, `ACME_CA`, `TLS_VALIDATION`, `ACME_DNS_PROVIDER`, `HYBRID_AI_TLS_TOKEN_FILE`, `TLS_HOSTS`, `ACME_AUTO_HTTPS`, `CADDY_IMAGE` -- **paths and defaults only, no token** | `0644` |
 | 16 | `REPO_MAP.md`, `CODE_INDEX.md` | repo | regenerate | Produced by the agent-context workflow, not by hand; listed so the build task runs it | generated |
@@ -1724,18 +1739,18 @@ Running `docker compose build proxy` before enablement prints
 After that build completes, verify the BUILT image:
 
 ```bash
-docker run --rm --entrypoint caddy hybrid-ai-caddy:2.8.4-dns list-modules \
+docker run --rm --entrypoint caddy hybrid-ai-caddy:2.11.7-dns list-modules \
   | grep dns.providers
 # expected:
 #   dns.providers.cloudflare
 #   dns.providers.rfc2136
-docker image inspect hybrid-ai-caddy:2.8.4-dns --format '{{.Id}}'   # expected: sha256:…
+docker image inspect hybrid-ai-caddy:2.11.7-dns --format '{{.Id}}'   # expected: sha256:…
 ```
 
 The `caddy/Dockerfile` build-time gate runs that same `list-modules` check, so
 a missing provider fails the BUILD, not the container at start. A build
 failure means a plugin version pin is wrong. Fix the pin; do not fall back to
-the stock `caddy:2.8-alpine` image, which carries no DNS providers and is never
+the stock `caddy:2.11-alpine` image, which carries no DNS providers and is never
 used for TLS (section 2.3).
 
 ### Step 5 -- Local split-horizon DNS
@@ -1817,7 +1832,7 @@ docker compose logs --since 3m proxy | grep -E '"logger":"tls"' | tail -5
 ```bash
 docker compose exec proxy sh -c \
   'ls /data/caddy/certificates/acme-staging-v02.api.letsencrypt.org-directory/'
-# expected: daemonhub.dev  hermes.daemonhub.dev  status.daemonhub.dev  wildcard_.daemonhub.dev
+# expected: daemonhub.dev  wildcard_.daemonhub.dev   (hermes. and status. reuse the wildcard)
 
 sudo stat -c '%a %U:%G' "${HYBRID_AI_DATA_DIR}/caddy/caddy/certificates"
 # expected: 700 root:root
@@ -1899,7 +1914,7 @@ than with the whole document.
    answer only for a directly reachable host that must not hold a DNS token.
 2. **Cloudflare first, RFC 2136 second.** Cloudflare for propagation speed and
    an existing zone; RFC 2136 because a TSIG key is zone-scoped by the server.
-3. **A locally built `xcaddy` image** pinned to Caddy 2.8.4 and plugin
+3. **A locally built `xcaddy` image** pinned to Caddy 2.11.7 and plugin
    versions, with a build-time `list-modules` gate. The stock image is never
    used for TLS.
 4. **Zone-scoped credential, accepted residual risk.** Cloudflare has no

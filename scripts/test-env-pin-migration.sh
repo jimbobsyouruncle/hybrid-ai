@@ -19,6 +19,12 @@
 #   (c) no .env                         -> the NEW defaults are written
 #   (d) a second run over the migrated .env -> no change, no migration logged
 #
+#   The Caddy image pin gets the same four cases, (e) through (h):
+#   (e) legacy CADDY_IMAGE=hybrid-ai-caddy:2.8.4-dns -> migrated to 2.11.7-dns
+#   (f) custom CADDY_IMAGE             -> preserved byte-for-byte
+#   (g) no .env                        -> the new CADDY_IMAGE default is written
+#   (h) a second run                   -> no change, no CADDY_IMAGE migration
+#
 # USAGE:
 #   bash scripts/test-env-pin-migration.sh
 #
@@ -229,6 +235,82 @@ if grep -q 'Migrating OPENHANDS_IMAGE\|Migrating OPENHANDS_AGENT_IMAGE_TAG' "$LO
   bad "the migration re-ran on an already-migrated .env"
 else
   ok "the migration is idempotent (nothing logged on the second run)"
+fi
+
+# ---------------------------------------------------------------------------
+# CADDY_IMAGE: the Caddy 2.8.4 image pin is retired in favour of the 2.11.7
+# build. STEP 8 preserves an explicit CADDY_IMAGE as an owner pin, so a host
+# that already deployed the 2.8.4 image would stay on it forever without an
+# exact-match migration. The migration unsets CADDY_IMAGE ONLY when it equals
+# the old default verbatim; any other value is an owner-chosen pin.
+STALE_CADDY="hybrid-ai-caddy:2.8.4-dns"
+NEW_CADDY="hybrid-ai-caddy:2.11.7-dns"
+
+echo
+echo "== (e) legacy CADDY_IMAGE is migrated to the new pin =="
+: > "$LOG"
+printf 'CADDY_IMAGE=%s\n' "$STALE_CADDY" > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with the legacy CADDY_IMAGE" "0" "$rc"
+check "CADDY_IMAGE is the new pin" "$NEW_CADDY" "$(env_value "$STACK" CADDY_IMAGE)"
+if grep -q 'Migrating CADDY_IMAGE' "$LOG"; then
+  ok "the CADDY_IMAGE migration was logged"
+else
+  bad "the CADDY_IMAGE migration was not logged"
+  sed 's/^/      /' "$LOG" >&2
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (f) a custom CADDY_IMAGE is preserved byte-for-byte =="
+: > "$LOG"
+CUSTOM_CADDY="ghcr.io/example/caddy-dns:9.9.9-custom"
+printf 'CADDY_IMAGE=%s\n' "$CUSTOM_CADDY" > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with a custom CADDY_IMAGE" "0" "$rc"
+check "custom CADDY_IMAGE is preserved verbatim" "$CUSTOM_CADDY" "$(env_value "$STACK" CADDY_IMAGE)"
+if grep -q 'Migrating CADDY_IMAGE' "$LOG"; then
+  bad "a custom CADDY_IMAGE was wrongly migrated"
+else
+  ok "no CADDY_IMAGE migration was logged for a custom value"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (g) with no .env the new CADDY_IMAGE default is written =="
+: > "$LOG"
+rm -f "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with no .env" "0" "$rc"
+check "the new CADDY_IMAGE default was written" "$NEW_CADDY" "$(env_value "$STACK" CADDY_IMAGE)"
+if grep -q 'Migrating CADDY_IMAGE' "$LOG"; then
+  bad "a migration was logged when no value was set"
+else
+  ok "no CADDY_IMAGE migration was logged with nothing to migrate"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== (h) a second run over the migrated .env changes nothing =="
+: > "$LOG"
+printf 'CADDY_IMAGE=%s\n' "$STALE_CADDY" > "$STACK"
+chmod 600 "$STACK"
+run_install "$WORK/first-caddy.log" || true
+CADDY_AFTER_1="$(env_value "$STACK" CADDY_IMAGE)"
+: > "$LOG"
+rc=0
+run_install "$LOG" || rc=$?
+check "a second install.sh run exits 0" "0" "$rc"
+check "CADDY_IMAGE is unchanged on the second run" "$CADDY_AFTER_1" "$(env_value "$STACK" CADDY_IMAGE)"
+if grep -q 'Migrating CADDY_IMAGE' "$LOG"; then
+  bad "the CADDY_IMAGE migration re-ran on an already-migrated .env"
+else
+  ok "the CADDY_IMAGE migration is idempotent (nothing logged on the second run)"
 fi
 
 # ---------------------------------------------------------------------------

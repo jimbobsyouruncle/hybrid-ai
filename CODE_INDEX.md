@@ -98,9 +98,9 @@
 - restore_home_dir()
 
 ## caddy/Dockerfile
-- FROM caddy:2.8-builder-alpine AS builder
+- FROM caddy:2.11-builder-alpine AS builder
 - stage: builder
-- FROM caddy:2.8-alpine
+- FROM caddy:2.11-alpine
 
 ## collect-diagnostics.sh
 - redact()

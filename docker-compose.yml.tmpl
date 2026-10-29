@@ -349,12 +349,12 @@ services:
   proxy:
 #@region proxy_image
 #@off
-    image: caddy:2.8-alpine
+    image: caddy:2.11-alpine
 #@on
     build:
       context: ./caddy
       dockerfile: Dockerfile
-    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.8.4-dns}
+    image: ${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}
 #@end
     container_name: hybrid-ai-proxy
     restart: unless-stopped

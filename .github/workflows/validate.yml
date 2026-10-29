@@ -611,7 +611,7 @@ jobs:
         run: |
           docker run --rm -e LOCAL_DOMAIN=example.test \
             -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile
+            caddy:2.11-alpine caddy validate --config /etc/caddy/Caddyfile
 
       - name: Assert proxy allowlist is intact
         # A future edit could remove `import trusted_only` from a sensitive
