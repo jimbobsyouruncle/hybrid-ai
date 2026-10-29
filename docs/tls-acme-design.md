@@ -1593,6 +1593,32 @@ Re-running the installer must be a no-op when nothing changed:
 | `TLS_DOMAIN` + no port forward, `TLS_VALIDATION=dns` | Nothing to check locally; the CA reports it | -- |
 | DNS resolution of `TLS_DOMAIN` | If `getent hosts` fails, warn and print the dnsmasq lines from section 3.2 (same as today's subdomain check at line 1791) | `warn` |
 
+**Which image validates the render.** The render gate adapts the rendered
+Caddyfile in a throwaway container. A `dns` render names
+`dns.providers.cloudflare` or `dns.providers.rfc2136`, and the caddyfile adapter
+resolves those providers **at adapt time**. The stock `caddy:2.11-alpine` image
+has no such modules, so it rejects a correct render. Therefore:
+
+| Render | Image used to validate |
+|---|---|
+| `TLS_ENABLED=yes`, `TLS_VALIDATION=dns` | `${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}` (section 2.3) |
+| Everything else (`http`, `tlsalpn`, TLS off) | `caddy:2.11-alpine` |
+| Any render, when `CADDY_VALIDATE_IMAGE` is set | `$CADDY_VALIDATE_IMAGE` (explicit override wins) |
+
+**Build before validate.** On first enablement the proxy image does not exist
+yet: STEP 9 `compose up` builds it, which is *after* this gate. The installer
+therefore runs `docker build -t <resolved CADDY_IMAGE> ./caddy` before the
+render is validated. The build is idempotent (an unchanged `caddy/Dockerfile`
+is a cache hit) and comes only from the tracked `caddy/Dockerfile` with its
+pinned tags, so the supply chain is unchanged. A build failure dies
+fail-closed, with the previous files untouched. If docker is unavailable the
+existing `rc=3` skip/warn path applies, as for every other validation step.
+
+**`--dry-run` side effect.** The dry run writes no host file. Its one side
+effect is that same `docker build`: a Docker image is build cache, not host
+state, and validating the render is the dry run's whole value. The usage text
+in `install.sh` states this.
+
 ### 8.6 Behaviour when TLS is disabled
 
 **Requirement: with `TLS_ENABLED=no`, install behaviour is byte-for-byte
@@ -1869,6 +1895,9 @@ dig +short TXT _acme-challenge.daemonhub.dev @1.1.1.1   # expected: empty before
              --tls-acme-ca staging --dry-run
 # expected: a unified diff showing the new https:// blocks and the 443 publish,
 #           "compose config valid", "Caddyfile valid", and exit 0 with NO change
+# The run may build hybrid-ai-caddy:2.11.7-dns first: validation of a DNS-01
+# render needs the DNS-capable image (section 8.5). That image is cache, so the
+# host files are still untouched.
 git status --short          # expected: still clean
 ```
 

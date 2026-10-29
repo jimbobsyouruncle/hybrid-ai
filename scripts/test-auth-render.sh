@@ -110,10 +110,20 @@ if [[ "$n_basic_auth" == "1" ]]; then
 else
   fail "auth-on render has ${n_basic_auth} basic_auth lines (expected 1)"
 fi
-if grep -qF "basic_auth { {\$HYBRID_AI_AUTH_USER} {\$HYBRID_AI_AUTH_HASH} }" "$WORK/on"; then
-  pass "the (auth) snippet uses the two env placeholders"
+# The snippet must be the MULTI-LINE form: Caddy requires a block's `{` to be
+# the last token on its line, so `basic_auth { user hash }` does not adapt.
+auth_body_line="$(printf '\t\t'){\$HYBRID_AI_AUTH_USER} {\$HYBRID_AI_AUTH_HASH}"
+if grep -qE '^[[:space:]]*basic_auth \{[[:space:]]*$' "$WORK/on" \
+   && grep -qxF -- "$auth_body_line" "$WORK/on"; then
+  pass "the (auth) snippet uses the multi-line form with the two env placeholders"
 else
-  fail "the (auth) snippet does not use the expected env placeholders"
+  fail "the (auth) snippet is not the expected multi-line placeholder form"
+fi
+if awk '/^\(auth\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$WORK/on" \
+     | grep -qE 'basic_auth \{.*[^[:space:]]'; then
+  fail "the (auth) snippet puts tokens after '{' on the same line (Caddy rejects this)"
+else
+  pass "the (auth) snippet puts no token after '{' on the same line"
 fi
 
 # `import auth` is the gate; it must appear once per gated site or handle.
@@ -164,23 +174,47 @@ else
 fi
 
 # --- fail-closed: empty credentials render an invalid block -----------------
-# A stub `caddy` that expands {$VAR} from the environment the way the container
-# would, then rejects an empty `basic_auth` body. This exercises the real
-# tls_validate_caddyfile() call path; it never makes the validator tolerant.
+# A stub `caddy` that applies the same two rules the real caddyfile adapter
+# applies, so the fail-closed cases exercise the shape production renders:
+#   1. GRAMMAR: a block's `{` must be the last token on its line. Anything
+#      after it is "Unexpected next token after '{' on same line" (the error
+#      the inline `basic_auth { user hash }` form produced on the host).
+#   2. ARGUMENTS: it expands the two auth placeholders from the exported
+#      environment the way the container would, then requires exactly two
+#      arguments. Real Caddy says "username and password cannot be empty or
+#      missing" when either is blank.
+# It never makes the validator tolerant: a failure is always a failure.
+# Limitation: this is an approximation of the adapter. The true proof is a real
+# `caddy validate` (and, post-merge, the host run).
 caddy() {
   # The validator calls: caddy validate --adapter caddyfile --config FILE.
-  # Expand the two auth placeholders from the exported environment (the same
-  # values the container would receive), then reject an empty basic_auth body.
-  local file="${5:-}" body
-  body="$(sed -n 's/.*basic_auth { \(.*\) }.*/\1/p' "$file")"
+  local file="${5:-}" body bad_line
+  bad_line="$(awk '
+    {
+      sub(/#.*/, "")
+      # A standalone `{` token (a block opener) followed by more tokens on the
+      # same line. `{$VAR}` and `{file./run/secrets/...}` are placeholders, not
+      # block openers, so they need whitespace after the brace to match.
+      if (match($0, /(^|[ \t])\{[ \t]+[^ \t]/)) { print NR; exit }
+    }' "$file")"
+  if [[ -n "$bad_line" ]]; then
+    printf "caddy: adapting config using caddyfile: Unexpected next token after '{' on same line, at %s:%s\n" \
+      "$file" "$bad_line" >&2
+    return 1
+  fi
+  body="$(awk '
+    /^[ \t]*basic_auth[ \t]*\{[ \t]*$/ { f = 1; next }
+    f && /^[ \t]*\}[ \t]*$/ { f = 0; next }
+    f { print }
+  ' "$file")"
   body="${body//\{\$HYBRID_AI_AUTH_USER\}/${HYBRID_AI_AUTH_USER:-}}"
   body="${body//\{\$HYBRID_AI_AUTH_HASH\}/${HYBRID_AI_AUTH_HASH:-}}"
   # basic_auth needs exactly two arguments: a user name and a hash.
-  local -a words=()
-  read -r -a words <<< "${body:-}"
-  if (( ${#words[@]} != 2 )); then
-    printf 'caddy: adapting config using caddyfile: basic_auth: expected 2 arguments, got %d\n' \
-      "${#words[@]}" >&2
+  local -a argv=()
+  read -r -a argv <<< "${body:-}"
+  if (( ${#argv[@]} != 2 )); then
+    printf 'caddy: adapting config using caddyfile: basic_auth: username and password cannot be empty or missing (%d arguments)\n' \
+      "${#argv[@]}" >&2
     return 1
   fi
   return 0

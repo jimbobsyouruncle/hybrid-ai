@@ -47,7 +47,9 @@
 # Auth is ADDITIVE to `trusted_only`: the network allowlist is unchanged, and
 # the http:// sites import neither snippet.
 (auth) {
-	basic_auth { {$HYBRID_AI_AUTH_USER} {$HYBRID_AI_AUTH_HASH} }
+	basic_auth {
+		{$HYBRID_AI_AUTH_USER} {$HYBRID_AI_AUTH_HASH}
+	}
 }
 #@end
 
