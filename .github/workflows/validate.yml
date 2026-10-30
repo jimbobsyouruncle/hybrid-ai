@@ -515,6 +515,15 @@ jobs:
           WORK="$(mktemp -d)"
           trap 'rm -rf -- "$WORK"' EXIT
 
+          # Real Caddy provisions the TLS app during validate, and the rendered
+          # dns-01 config reads its token from /run/secrets/... by design. The
+          # file must exist and be non-empty or provisioning fails before the
+          # config is judged ("API token '' appears invalid"), which would hide
+          # every other problem behind a missing credential. Mount an obviously
+          # fake token -- it is the value of nothing and reaches no network
+          # (--network none).
+          printf '%s\n' 'dummy-cloudflare-token-for-ci-only-not-a-secret' > "$WORK/dummy_dns_token"
+
           docker build -t hybrid-ai-caddy:ci ./caddy
 
           LOCAL_DOMAIN="jarvis.lan"
@@ -558,6 +567,7 @@ jobs:
               -e HYBRID_AI_AUTH_USER="$HYBRID_AI_AUTH_USER" \
               -e HYBRID_AI_AUTH_HASH="$HYBRID_AI_AUTH_HASH" \
               -v "${out}:/etc/caddy/Caddyfile:ro" \
+              -v "$WORK/dummy_dns_token:/run/secrets/cloudflare_dns_token:ro" \
               hybrid-ai-caddy:ci validate --adapter caddyfile --config /etc/caddy/Caddyfile
             echo "case ${name}: accepted by caddy"
           }
@@ -722,6 +732,11 @@ jobs:
           APP_DIR="$(mktemp -d)"
           trap 'rm -rf -- "$APP_DIR"' EXIT
           mkdir -p "$APP_DIR/status"
+          # Real Caddy provisions the TLS app during validate, and the dns-01
+          # config reads its token from this path. Supply an obviously fake
+          # token so a missing credential cannot mask a config defect. The
+          # container has no network.
+          printf '%s\n' 'dummy-cloudflare-token-for-ci-only-not-a-secret' > "$APP_DIR/dummy_dns_token"
           cp status/Caddyfile.tmpl "$APP_DIR/status/Caddyfile.tmpl"
           cp docker-compose.yml.tmpl "$APP_DIR/docker-compose.yml.tmpl"
 
@@ -751,6 +766,7 @@ jobs:
             -e LOCAL_DOMAIN="$LOCAL_DOMAIN" \
             -e ACME_AUTO_HTTPS=disable_redirects \
             -v "$APP_DIR/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -v "$APP_DIR/dummy_dns_token:/run/secrets/cloudflare_dns_token:ro" \
             hybrid-ai-caddy:ci validate --adapter caddyfile --config /etc/caddy/Caddyfile
 
       - name: Assert proxy allowlist is intact
