@@ -708,6 +708,51 @@ jobs:
             -v "$PWD/status/Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.11-alpine caddy validate --config /etc/caddy/Caddyfile
 
+      - name: Validate TLS-on render with real Caddy
+        # The only guard that would have caught the TLS walls that shipped
+        # (walls 1-3): every other suite stubs caddy textually, so a rendered
+        # file that real Caddy rejects still passed CI. This renders the DNS-01
+        # variant offline, then lets the proxy's own image parse it.
+        run: |
+          set -Eeuo pipefail
+          source scripts/lib/hybrid-ai-env.sh
+          hybrid_ai_env_load
+          source scripts/lib/tls.sh
+
+          APP_DIR="$(mktemp -d)"
+          trap 'rm -rf -- "$APP_DIR"' EXIT
+          mkdir -p "$APP_DIR/status"
+          cp status/Caddyfile.tmpl "$APP_DIR/status/Caddyfile.tmpl"
+          cp docker-compose.yml.tmpl "$APP_DIR/docker-compose.yml.tmpl"
+
+          LOCAL_DOMAIN="example.test"
+          TLS_ENABLED="yes"
+          TLS_DOMAIN="example.test"
+          ACME_EMAIL="[EMAIL]"
+          TLS_VALIDATION="dns"
+          ACME_DNS_PROVIDER="cloudflare"
+          ACME_CA="$TLS_CA_STAGING_URL"
+          # Variable NAME only: no token, no token file, no secret.
+          HYBRID_AI_TLS_TOKEN_FILE="/run/secrets/cloudflare_dns_token"
+          export LOCAL_DOMAIN TLS_DOMAIN ACME_EMAIL ACME_CA
+
+          tls_prepare_render_values "on dns"
+          tls_render_to_file "$APP_DIR/status/Caddyfile.tmpl" "on dns" "$APP_DIR/Caddyfile"
+          echo "rendered Caddyfile: $(grep -c 'import trusted_only' "$APP_DIR/Caddyfile") 'import trusted_only' lines"
+
+          docker build -t hybrid-ai-caddy:ci ./caddy
+
+          # Pass the same runtime values the proxy's compose environment: block
+          # supplies, else the placeholders expand empty and a good file fails.
+          docker run --rm --network none --entrypoint caddy \
+            -e TLS_DOMAIN="$TLS_DOMAIN" \
+            -e ACME_EMAIL="$ACME_EMAIL" \
+            -e ACME_CA="$ACME_CA" \
+            -e LOCAL_DOMAIN="$LOCAL_DOMAIN" \
+            -e ACME_AUTO_HTTPS=disable_redirects \
+            -v "$APP_DIR/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            hybrid-ai-caddy:ci validate --adapter caddyfile --config /etc/caddy/Caddyfile
+
       - name: Assert proxy allowlist is intact
         # A future edit could remove `import trusted_only` from a sensitive
         # route and silently expose the status page or the unauthenticated

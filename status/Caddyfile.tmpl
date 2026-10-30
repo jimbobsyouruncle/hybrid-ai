@@ -142,10 +142,13 @@ http://{$LOCAL_DOMAIN} {
 
 # --- HTTPS: {$TLS_DOMAIN} ------------------------------------------------
 https://{$TLS_DOMAIN} {
-	# Same route map as the http:// site, with the snippets imported inside each
-	# protected handle exactly as today. Adding TLS changes no route and no
-	# allowlist; it only changes the scheme and adds HSTS.
-	import trusted_only
+	# Same route map as the http:// site, so the snippets are placed the same way.
+	# trusted_only is imported inside each protected handle only, never at site
+	# level: it defines the named matcher @untrusted, and a named matcher may be
+	# defined once per site. There is also nothing to enforce at site level, since
+	# Caddy runs a matching handle before the site-level directives. This matches
+	# the non-TLS apex block. Adding TLS changes no route and no allowlist; it only
+	# changes the scheme and adds HSTS.
 	import secure_headers
 	import hsts
 	import tls_dns
