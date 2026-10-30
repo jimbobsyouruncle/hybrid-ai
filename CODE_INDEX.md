@@ -875,6 +875,7 @@
 - pass()
 - fail()
 - render()
+- check_named_matcher_placement()
 - expect()
 - reject()
 - try_prepare()
