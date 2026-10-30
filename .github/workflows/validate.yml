@@ -494,6 +494,76 @@ jobs:
         # basic_auth block the validator rejects. Needs no Docker or Caddy.
         run: bash scripts/test-auth-render.sh
 
+      - name: Validate rendered Caddyfiles with real Caddy (TLS x auth matrix)
+        # The only guard that runs a REAL Caddy over the RENDERED file: every
+        # other suite stubs `caddy` textually, so none of them can catch a
+        # snippet that is imported but never defined. It renders each supported
+        # flag combination and lets the proxy's own image adapt the result:
+        #   (a) TLS off                    -> variants `off`
+        #   (b) TLS on, AUTH_ENABLED=off   -> variants `on dns` (the default)
+        #   (c) TLS on, AUTH_ENABLED=on    -> variants `on dns auth`
+        # A dangling `import auth` (case b before the template gated the imports
+        # by the auth variant) fails here with `File to import not found: auth`.
+        # Placeholder credentials only; the DNS credential is passed by PATH
+        # name, never by value.
+        run: |
+          set -Eeuo pipefail
+          source scripts/lib/hybrid-ai-env.sh
+          hybrid_ai_env_load
+          source scripts/lib/tls.sh
+
+          WORK="$(mktemp -d)"
+          trap 'rm -rf -- "$WORK"' EXIT
+
+          docker build -t hybrid-ai-caddy:ci ./caddy
+
+          LOCAL_DOMAIN="jarvis.lan"
+          TLS_DOMAIN="daemonhub.dev"
+          ACME_EMAIL="ci@daemonhub.dev"
+          ACME_CA="$TLS_CA_STAGING_URL"
+          HYBRID_AI_TLS_TOKEN_FILE="/run/secrets/cloudflare_dns_token"
+          TLS_VALIDATION="dns"
+          ACME_DNS_PROVIDER="cloudflare"
+          # Non-secret placeholders: an obviously fake user name and a
+          # bcrypt-shaped string that is not the hash of anything.
+          DUMMY_AUTH_USER='DUMMY_AUTH_USER_NOT_A_SECRET'
+          DUMMY_AUTH_HASH='$2a$14$./ABCDEFGH./ABCDEFGH./ABCDEFGH./ABCDEFGH./ABCDEFGH./A'
+
+          check_case() {  # NAME VARIANTS
+            local name="$1" variants="$2" out="$WORK/$1.Caddyfile"
+            local imports snippets
+            tls_prepare_render_values "$variants"
+            tls_render_to_file "${HYBRID_AI_APP_DIR}/status/Caddyfile.tmpl" "$variants" "$out"
+            imports="$(grep -c 'import auth' "$out" || true)"
+            snippets="$(grep -c '^(auth) {' "$out" || true)"
+            echo "case ${name} (variants: ${variants}): ${imports} 'import auth' lines, ${snippets} '(auth)' definitions"
+            docker run --rm --network none --entrypoint caddy \
+              -e TLS_DOMAIN="$TLS_DOMAIN" \
+              -e ACME_EMAIL="$ACME_EMAIL" \
+              -e ACME_CA="$ACME_CA" \
+              -e LOCAL_DOMAIN="$LOCAL_DOMAIN" \
+              -e ACME_AUTO_HTTPS=disable_redirects \
+              -e HYBRID_AI_AUTH_USER="$HYBRID_AI_AUTH_USER" \
+              -e HYBRID_AI_AUTH_HASH="$HYBRID_AI_AUTH_HASH" \
+              -v "${out}:/etc/caddy/Caddyfile:ro" \
+              hybrid-ai-caddy:ci validate --adapter caddyfile --config /etc/caddy/Caddyfile
+            echo "case ${name}: accepted by caddy"
+          }
+
+          TLS_ENABLED="no"
+          AUTH_ENABLED="off"
+          HYBRID_AI_AUTH_USER=""
+          HYBRID_AI_AUTH_HASH=""
+          check_case tls_off "off"
+
+          TLS_ENABLED="yes"
+          check_case tls_on_auth_off "on dns"
+
+          AUTH_ENABLED="on"
+          HYBRID_AI_AUTH_USER="$DUMMY_AUTH_USER"
+          HYBRID_AI_AUTH_HASH="$DUMMY_AUTH_HASH"
+          check_case tls_on_auth_on "on dns auth"
+
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
         # validates structure without starting anything. HYBRID_AI_DATA_DIR and

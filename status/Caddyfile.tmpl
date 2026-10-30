@@ -152,13 +152,17 @@ https://{$TLS_DOMAIN} {
 
 	handle /status* {
 		import trusted_only
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy status:8088
 	}
 	handle /hub* {
 		import trusted_only
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy status:8088
 	}
@@ -169,13 +173,17 @@ https://{$TLS_DOMAIN} {
 	}
 	handle_path /ollama/* {
 		import trusted_only
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy ollama:11434
 	}
 	handle /openwebui* {
 		route {
+			#@auth
 			import auth
+			#@on
 			import secure_headers
 			uri strip_prefix /openwebui
 			redir * {uri} 302
@@ -183,14 +191,18 @@ https://{$TLS_DOMAIN} {
 	}
 	handle /chat* {
 		route {
+			#@auth
 			import auth
+			#@on
 			import secure_headers
 			uri strip_prefix /chat
 			redir * {uri} 302
 		}
 	}
 	handle {
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy open-webui:8080
 	}
@@ -198,7 +210,9 @@ https://{$TLS_DOMAIN} {
 
 https://hermes.{$TLS_DOMAIN} {
 	import trusted_only
+	#@auth
 	import auth
+	#@on
 	import secure_headers
 	import hsts
 	import tls_dns
@@ -208,7 +222,9 @@ https://hermes.{$TLS_DOMAIN} {
 
 https://status.{$TLS_DOMAIN} {
 	import trusted_only
+	#@auth
 	import auth
+	#@on
 	import secure_headers
 	import hsts
 	import tls_dns
@@ -222,7 +238,9 @@ https://*.{$TLS_DOMAIN} {
 	# cannot enumerate services. No (hsts): HSTS is only for the three
 	# named hosts above.
 	import trusted_only
+	#@auth
 	import auth
+	#@on
 	import secure_headers
 	import tls_dns
 
