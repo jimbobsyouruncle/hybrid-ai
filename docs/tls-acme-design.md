@@ -514,7 +514,9 @@ below as unchanged context lines with the same tabs and the same text they carry
 in `status/Caddyfile` -- `X-Frame-Options DENY`, `Referrer-Policy no-referrer`
 and the `-Server` strip included. HSTS is **additive**: it goes in a new
 `(hsts)` snippet and is never folded into `(secure_headers)`. Every HTTPS site
-imports `trusted_only` exactly as the HTTP sites do today.
+imports `trusted_only` exactly as the HTTP sites do today, from one place per
+site: `@untrusted` is a named matcher and may be defined only once per site, so
+the apex block imports it inside each protected handle and never at site level.
 
 No assumption is needed here any more: `origin/main` carries `(secure_headers)`
 at `status/Caddyfile:11` with exactly the text shown below, so the snippet is
@@ -650,10 +652,13 @@ alone.
 +
 +# --- HTTPS: daemonhub.dev ------------------------------------------------
 +https://{$TLS_DOMAIN} {
-+	# Same route map as the http:// site, with the snippets imported inside each
-+	# protected handle exactly as today. Adding TLS changes no route and no
-+	# allowlist; it only changes the scheme and adds HSTS.
-+	import trusted_only
++	# Same route map as the http:// site, so the snippets are placed the same way.
++	# trusted_only is imported inside each protected handle only, never at site
++	# level: it defines the named matcher @untrusted, and a named matcher may be
++	# defined once per site. There is also nothing to enforce at site level, since
++	# Caddy runs a matching handle before the site-level directives. This matches
++	# the non-TLS apex block. Adding TLS changes no route and no allowlist; it only
++	# changes the scheme and adds HSTS.
 +	import secure_headers
 +	import hsts
 +	import tls_dns
@@ -739,10 +744,15 @@ Notes on the diff, all deliberate:
 
 - **The HTTPS blocks mirror the current `http://` route map exactly.** Same
   handles, same order, same snippet placement; only the scheme changes and
-  `(hsts)` is added. `(trusted_only)` is imported at site level and again inside
-  each protected `handle`, as the existing comment requires: a matching `handle`
-  runs before site-level `abort`/`respond`, so a site-level import alone would be
-  bypassed.
+  `(hsts)` is added. `(trusted_only)` is imported **inside each protected
+  `handle` only**, exactly like the non-TLS apex block: it defines the named
+  matcher `@untrusted`, and Caddy allows a named matcher to be defined once per
+  site, so a site-level import alongside the per-handle imports is rejected
+  outright (`matcher is defined more than once`). Nothing is lost: a matching
+  `handle` runs before site-level directives, so a site-level import never
+  enforced anything. The rule for every named-matcher snippet (`trusted_only`,
+  `auth`): import it once per site -- at site level only when the block has no
+  `handle`/`handle_path` children, otherwise inside each handle.
 - **Two handles deliberately do not import `(trusted_only)`, and the HTTPS
   blocks keep that.** `handle /health` carries only `(secure_headers)` and
   `handle /openwebui*` / `handle /chat*` carry only `(secure_headers)` inside a
@@ -1670,7 +1680,9 @@ Restated explicitly, because every later task will be judged against this list.
    loopback ranges, the RFC 1918 ranges, the `100.64.0.0/10` mesh range
    (rendered `[IP_ADDRESS]/10` in the checked-in file) and
    `fd7a:115c:a1e0::/48` all remain, and every HTTPS site imports
-   `(trusted_only)` at site level *and* inside each protected `handle`.
+   `(trusted_only)` exactly once per site: inside each protected `handle` for
+   the apex block, and at site level for the handle-free `hermes.`/`status.`/
+   wildcard blocks.
    **HTTPS is not authentication.** A certificate proves the server to the
    client; it says nothing about the client. Adding TLS is never a reason to
    remove or widen the allowlist.

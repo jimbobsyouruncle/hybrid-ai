@@ -142,23 +142,30 @@ http://{$LOCAL_DOMAIN} {
 
 # --- HTTPS: {$TLS_DOMAIN} ------------------------------------------------
 https://{$TLS_DOMAIN} {
-	# Same route map as the http:// site, with the snippets imported inside each
-	# protected handle exactly as today. Adding TLS changes no route and no
-	# allowlist; it only changes the scheme and adds HSTS.
-	import trusted_only
+	# Same route map as the http:// site, so the snippets are placed the same way.
+	# trusted_only is imported inside each protected handle only, never at site
+	# level: it defines the named matcher @untrusted, and a named matcher may be
+	# defined once per site. There is also nothing to enforce at site level, since
+	# Caddy runs a matching handle before the site-level directives. This matches
+	# the non-TLS apex block. Adding TLS changes no route and no allowlist; it only
+	# changes the scheme and adds HSTS.
 	import secure_headers
 	import hsts
 	import tls_dns
 
 	handle /status* {
 		import trusted_only
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy status:8088
 	}
 	handle /hub* {
 		import trusted_only
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy status:8088
 	}
@@ -169,13 +176,17 @@ https://{$TLS_DOMAIN} {
 	}
 	handle_path /ollama/* {
 		import trusted_only
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy ollama:11434
 	}
 	handle /openwebui* {
 		route {
+			#@auth
 			import auth
+			#@on
 			import secure_headers
 			uri strip_prefix /openwebui
 			redir * {uri} 302
@@ -183,14 +194,18 @@ https://{$TLS_DOMAIN} {
 	}
 	handle /chat* {
 		route {
+			#@auth
 			import auth
+			#@on
 			import secure_headers
 			uri strip_prefix /chat
 			redir * {uri} 302
 		}
 	}
 	handle {
+		#@auth
 		import auth
+		#@on
 		import secure_headers
 		reverse_proxy open-webui:8080
 	}
@@ -198,7 +213,9 @@ https://{$TLS_DOMAIN} {
 
 https://hermes.{$TLS_DOMAIN} {
 	import trusted_only
+	#@auth
 	import auth
+	#@on
 	import secure_headers
 	import hsts
 	import tls_dns
@@ -208,7 +225,9 @@ https://hermes.{$TLS_DOMAIN} {
 
 https://status.{$TLS_DOMAIN} {
 	import trusted_only
+	#@auth
 	import auth
+	#@on
 	import secure_headers
 	import hsts
 	import tls_dns
@@ -222,7 +241,9 @@ https://*.{$TLS_DOMAIN} {
 	# cannot enumerate services. No (hsts): HSTS is only for the three
 	# named hosts above.
 	import trusted_only
+	#@auth
 	import auth
+	#@on
 	import secure_headers
 	import tls_dns
 

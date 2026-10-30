@@ -126,6 +126,64 @@ for snippet in '(trusted_only)' '(secure_headers)'; do
   fi
 done
 
+# Named-matcher placement invariant. (trusted_only) defines the named matcher
+# @untrusted, and Caddy allows a named matcher to be defined only once per site,
+# so a site that imports the snippet BOTH at site level and inside its handles is
+# rejected outright ("matcher is defined more than once"). The rule: one level
+# per site -- site level only when the block has no handle/handle_path children,
+# per handle otherwise. (auth) follows the same rule for uniformity.
+check_named_matcher_placement() {  # FILE
+  local file="$1" out name handles snippet site nested problems=""
+  out="$(awk '
+    BEGIN { n = split("trusted_only auth", S, " ") }
+    /^https?:\/\// {
+      inblock = 1
+      name = $1
+      handles = 0
+      split("", site)
+      split("", nested)
+      next
+    }
+    inblock {
+      line = $0
+      match(line, /^\t*/)
+      tabs = RLENGTH
+      if (line ~ /(^|[ \t])handle(_path)?[ \t]/) handles++
+      if (line ~ /^[ \t]*import (trusted_only|auth)$/) {
+        if (tabs == 1) site[$NF]++
+        else if (tabs >= 2) nested[$NF]++
+      }
+      if (line ~ /^}/) {
+        for (i = 1; i <= n; i++) {
+          printf "%s|%d|%s|%d|%d\n", name, handles, S[i], site[S[i]] + 0, nested[S[i]] + 0
+        }
+        inblock = 0
+      }
+    }
+  ' "$file")"
+  while IFS='|' read -r name handles snippet site nested; do
+    [[ -z "$name" ]] && continue
+    if (( site > 0 && nested > 0 )); then
+      problems+=" ${name} defines ${snippet} twice (site level and per handle);"
+    elif (( handles > 0 && site > 0 )); then
+      problems+=" ${name} imports ${snippet} at site level but has handles;"
+    elif (( handles == 0 && nested > 0 )); then
+      problems+=" ${name} imports ${snippet} per handle but has no handle;"
+    fi
+  done <<< "$out"
+  if [[ -n "$problems" ]]; then
+    printf '%s\n' "$problems" >&2
+    return 1
+  fi
+  return 0
+}
+
+if check_named_matcher_placement "$WORK/on1/Caddyfile"; then
+  pass "every named-matcher snippet is imported at exactly one level per site (never site level plus handles)"
+else
+  fail "a named-matcher snippet is imported at two levels in one site (Caddy: matcher defined more than once)"
+fi
+
 expect() {  # FILE PATTERN MESSAGE
   if grep -q -- "$2" "$1"; then pass "$3"; else fail "$3"; fi
 }

@@ -10,7 +10,13 @@
 #     2. auth ON: `import auth` appears once per gated site/handle, the (auth)
 #        snippet is defined exactly once with the two env placeholders, and the
 #        gate is absent from `handle /health` and from every http:// site,
-#     3. fail-closed: with AUTH_ENABLED=on and an empty user or hash, the
+#     3. TLS ON, auth OFF (the documented default combination): every
+#        `import auth` is gated by the auth variant too, so the render has zero
+#        imports and zero (auth) definitions and is not byte-identical to the
+#        auth-on render. Without this case a TLS-on render keeps the imports but
+#        drops the snippet, and real Caddy rejects it with
+#        `File to import not found: auth`,
+#     4. fail-closed: with AUTH_ENABLED=on and an empty user or hash, the
 #        rendered block is empty and the validator rejects it (a stub `caddy`
 #        expands the placeholders the way the container would).
 #   It never touches the real files and needs no root, Docker or Caddy.
@@ -171,6 +177,49 @@ if grep -q 'DUMMY_AUTH_USER_NOT_A_SECRET' "$WORK/on" \
   fail "a literal test credential leaked into the rendered file"
 else
   pass "no literal credential or hash is written into the rendered file"
+fi
+
+# --- TLS ON, auth OFF: no gate and no dangling import -----------------------
+# The documented default: TLS_ENABLED=yes with AUTH_ENABLED=off. Every
+# `import auth` must be gated by the auth variant as well as defined by it, so
+# no import survives without its snippet. Real Caddy rejects the opposite with
+# `File to import not found: auth`.
+TLS_ENABLED="yes"
+TLS_DOMAIN="daemonhub.dev"
+ACME_EMAIL="[EMAIL]"
+TLS_VALIDATION="dns"
+ACME_DNS_PROVIDER="cloudflare"
+ACME_CA="$TLS_CA_STAGING_URL"
+AUTH_ENABLED="off"
+HYBRID_AI_AUTH_USER=""
+HYBRID_AI_AUTH_HASH=""
+
+if [[ "$(tls_variants)" == "on dns" ]]; then
+  pass "tls_variants is 'on dns' with TLS on and AUTH_ENABLED=off"
+else
+  fail "tls_variants is not 'on dns' with TLS on and AUTH_ENABLED=off (got '$(tls_variants)')"
+fi
+
+render "on dns" "$WORK/tls_authoff"
+
+n_import_tls_off="$(grep -c 'import auth' "$WORK/tls_authoff" || true)"
+if [[ "$n_import_tls_off" == "0" ]]; then
+  pass "TLS-on/auth-off render contains zero 'import auth' lines"
+else
+  fail "TLS-on/auth-off render contains ${n_import_tls_off} 'import auth' lines (expected 0)"
+fi
+
+n_snippet_tls_off="$(grep -c '^(auth) {' "$WORK/tls_authoff" || true)"
+if [[ "$n_snippet_tls_off" == "0" ]]; then
+  pass "TLS-on/auth-off render defines zero (auth) snippets"
+else
+  fail "TLS-on/auth-off render defines ${n_snippet_tls_off} (auth) snippets (expected 0)"
+fi
+
+if cmp -s -- "$WORK/on" "$WORK/tls_authoff"; then
+  fail "TLS-on/auth-off render is byte-identical to the auth-on render (the gate is not gated)"
+else
+  pass "TLS-on/auth-off render differs from the auth-on render"
 fi
 
 # --- fail-closed: empty credentials render an invalid block -----------------
