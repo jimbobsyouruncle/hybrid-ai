@@ -740,7 +740,11 @@ jobs:
           cp status/Caddyfile.tmpl "$APP_DIR/status/Caddyfile.tmpl"
           cp docker-compose.yml.tmpl "$APP_DIR/docker-compose.yml.tmpl"
 
-          LOCAL_DOMAIN="example.test"
+          # LOCAL_DOMAIN and TLS_DOMAIN must differ: with TLS on, the template
+          # renders both an http://LOCAL_DOMAIN site and an http://TLS_DOMAIN
+          # redirect, and identical names make Caddy reject the file as an
+          # "ambiguous site definition" before it judges anything else.
+          LOCAL_DOMAIN="jarvis.lan"
           TLS_ENABLED="yes"
           TLS_DOMAIN="example.test"
           ACME_EMAIL="[EMAIL]"
