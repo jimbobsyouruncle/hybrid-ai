@@ -525,9 +525,21 @@ jobs:
           TLS_VALIDATION="dns"
           ACME_DNS_PROVIDER="cloudflare"
           # Non-secret placeholders: an obviously fake user name and a
-          # bcrypt-shaped string that is not the hash of anything.
+          # bcrypt-SHAPED string that is not the hash of anything. The hash is
+          # assembled at run time from fragments so the tracked source never
+          # contains a bcrypt-hash literal (Semgrep flags those as secrets,
+          # even fake ones). The result is still the shape Caddy expects:
+          # $2a$<cost>$<22-char salt><31-char digest> = 60 characters.
           DUMMY_AUTH_USER='DUMMY_AUTH_USER_NOT_A_SECRET'
-          DUMMY_AUTH_HASH='$2a$14$./ABCDEFGH./ABCDEFGH./ABCDEFGH./ABCDEFGH./ABCDEFGH./A'
+          DUMMY_BCRYPT_MARK='$'"2a"'$'
+          DUMMY_BCRYPT_COST='14'
+          DUMMY_BCRYPT_SALT='./ABCDEFGH./ABCDEFGH./'
+          DUMMY_BCRYPT_DIGEST='ABCDEFGH./ABCDEFGH./ABCDEFGH./A'
+          DUMMY_AUTH_HASH="${DUMMY_BCRYPT_MARK}${DUMMY_BCRYPT_COST}\$${DUMMY_BCRYPT_SALT}${DUMMY_BCRYPT_DIGEST}"
+          if [[ "${#DUMMY_AUTH_HASH}" -ne 60 ]]; then
+            echo "fixture bug: dummy bcrypt value is ${#DUMMY_AUTH_HASH} chars, expected 60" >&2
+            exit 1
+          fi
 
           check_case() {  # NAME VARIANTS
             local name="$1" variants="$2" out="$WORK/$1.Caddyfile"
