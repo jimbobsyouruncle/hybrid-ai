@@ -60,6 +60,25 @@ tls_prepare_render_values "on dns"
 CADDYFILE="$WORK/Caddyfile"
 tls_render_to_file "$APP_DIR/status/Caddyfile.tmpl" "on dns" "$CADDYFILE"
 
+# The DNS path mounts the operator's token file into the validation container,
+# so every DNS case needs a real, non-empty one. The value is a sentinel: the
+# fail-closed cases prove it never reaches a message.
+DNS_TOKEN_FILE="$WORK/dns_token"
+TOKEN_SENTINEL="SENTINEL-TOKEN-VALUE-DO-NOT-PRINT-9f3c"
+printf '%s\n' "$TOKEN_SENTINEL" > "$DNS_TOKEN_FILE"
+HYBRID_AI_TLS_TOKEN_FILE="$DNS_TOKEN_FILE"
+
+# A non-DNS (http-01) render. It must keep the old invocation byte for byte: no
+# token mount, no token check. Rendered in a subshell so the DNS render values
+# above stay in place. The host-caddy case below uses it, because a DNS render
+# without docker is now the skip path.
+HTTP_CADDYFILE="$WORK/Caddyfile.http"
+(
+  TLS_VALIDATION="http"
+  tls_prepare_render_values "on"
+  tls_render_to_file "$APP_DIR/status/Caddyfile.tmpl" "on" "$HTTP_CADDYFILE"
+)
+
 # The premise of the whole suite: the placeholders really are still there.
 if grep -qF "email {\$ACME_EMAIL}" "$CADDYFILE" \
    && grep -qF "acme_ca {\$ACME_CA}" "$CADDYFILE" \
@@ -145,6 +164,16 @@ if [[ -f "$WORK/docker.args" ]]; then
   else
     fail "docker branch lost the read-only Caddyfile mount"
   fi
+  # `caddy validate` provisions the TLS app, and the rendered solver reads the
+  # token by file path. Without the mount, provisioning fails on a missing
+  # token even when the operator's file is present and correct on the host.
+  token_mounts="$(grep -Fc -- "${DNS_TOKEN_FILE}:/run/secrets/" "$WORK/docker.args" || true)"
+  if [[ "$token_mounts" == "1" ]] \
+     && grep -Fxq -- "${DNS_TOKEN_FILE}:/run/secrets/cloudflare_dns_token:ro" "$WORK/docker.args"; then
+    pass "docker branch mounts the DNS token read-only exactly once (${DNS_TOKEN_FILE}:/run/secrets/cloudflare_dns_token:ro)"
+  else
+    fail "docker branch did not mount '${DNS_TOKEN_FILE}:/run/secrets/cloudflare_dns_token:ro' exactly once (found ${token_mounts})"
+  fi
   # This render is the DNS-01 one, so the validator must use the DNS-capable
   # image: the stock tag has no dns.providers module and rejects the render at
   # adapt time.
@@ -162,9 +191,51 @@ else
   fail "docker branch never invoked docker run"
 fi
 
+# --- Non-DNS renders: NO token mount, invocation unchanged ----------------
+# The token file is present and the env var points at it; only a DNS render may
+# consume it. A http-01 or TLS-off render must be invoked exactly as before.
+for non_dns in http off; do
+  if [[ "$non_dns" == http ]]; then NON_DNS_FILE="$HTTP_CADDYFILE"; else NON_DNS_FILE="$WORK/Caddyfile.off"; fi
+  if [[ "$non_dns" == off ]]; then
+    (
+      TLS_ENABLED="no"; ACME_EMAIL=""; TLS_DOMAIN=""; ACME_CA=""; ACME_AUTO_HTTPS=""
+      tls_prepare_render_values "off"
+      tls_render_to_file "$APP_DIR/status/Caddyfile.tmpl" "off" "$NON_DNS_FILE"
+    )
+  fi
+  rm -f "$WORK/docker.args"
+  docker() {
+    if [[ "${1:-}" == info ]] || [[ "${1:-}" == compose ]]; then return 0; fi
+    printf '%s\n' "$@" > "$WORK/docker.args"
+    return 0
+  }
+  export -f docker
+  nd_rc=0
+  nd_out="$(PATH="$EMPTY_BIN" tls_validate_caddyfile "$NON_DNS_FILE" 2>&1)" || nd_rc=$?
+  unset -f docker
+  if (( nd_rc == 0 )); then
+    pass "${non_dns} render: docker branch still returns 0"
+  else
+    fail "${non_dns} render: docker branch returned ${nd_rc} (output: ${nd_out})"
+  fi
+  if [[ -f "$WORK/docker.args" ]] && ! grep -Fq -- ":/run/secrets/" "$WORK/docker.args"; then
+    pass "${non_dns} render: no DNS token mount in the docker args"
+  else
+    fail "${non_dns} render: the docker args wrongly contain a token mount"
+  fi
+  if [[ -f "$WORK/docker.args" ]] \
+     && grep -Fxq -- "$EXPECT_STOCK" "$WORK/docker.args" \
+     && grep -Fq -- ":/etc/caddy/Caddyfile:ro" "$WORK/docker.args"; then
+    pass "${non_dns} render: keeps the stock image and the Caddyfile-only mount"
+  else
+    fail "${non_dns} render: lost the stock image or the Caddyfile-only mount"
+  fi
+done
+
 # --- Branch 2: host caddy binary ------------------------------------------
-# The variables are plain shell variables, never exported by install.sh, so the
-# validator has to carry them itself. The stub records the environment it got.
+# The stub records the environment it got. This uses the http-01 render: a DNS
+# render without docker is the skip path now, and this case is about env
+# pass-through on the host-binary branch, which only serves non-DNS renders.
 caddy() {
   # `env` shows EXPORTED variables only. Reading the shell variable directly
   # would also see values that were never exported, which is exactly the bug:
@@ -176,7 +247,7 @@ caddy() {
 export -f caddy
 
 host_rc=0
-host_out="$(tls_validate_caddyfile "$CADDYFILE" 2>&1)" || host_rc=$?
+host_out="$(tls_validate_caddyfile "$HTTP_CADDYFILE" 2>&1)" || host_rc=$?
 unset -f caddy
 
 if (( host_rc == 0 )); then
@@ -198,6 +269,94 @@ if (( skip_rc == 3 )) && [[ "$skip_out" == *"[skip] Caddyfile validation"* ]]; t
   pass "no docker and no caddy: returns 3 with the [skip] line (never a false pass)"
 else
   fail "skip path returned ${skip_rc} (expected 3 with a [skip] line): ${skip_out}"
+fi
+
+# --- A DNS render with a host caddy and no docker is a SKIP, never a pass --
+# A bare host caddy cannot be given the DNS-01 token; there is no mount to add.
+# The skip keeps the existing "[skip] Caddyfile validation" prefix and rc 3.
+# shellcheck disable=SC2317,SC2329  # invoked indirectly, through the validator
+caddy() { : > "$WORK/dns_host_caddy.called"; return 0; }
+export -f caddy
+dns_host_rc=0
+dns_host_out="$(PATH="$EMPTY_BIN" tls_validate_caddyfile "$CADDYFILE" 2>&1)" || dns_host_rc=$?
+unset -f caddy
+if (( dns_host_rc == 3 )) && [[ "$dns_host_out" == *"[skip] Caddyfile validation"* ]] \
+   && [[ "$dns_host_out" == *"DNS-01 token"* ]]; then
+  pass "dns render + host caddy + no docker: skip warning naming the token limitation, rc 3"
+else
+  fail "dns render + host caddy + no docker returned ${dns_host_rc} (expected 3 with a skip warning): ${dns_host_out}"
+fi
+if [[ -f "$WORK/dns_host_caddy.called" ]]; then
+  fail "dns render + no docker wrongly invoked the host caddy binary"
+else
+  pass "dns render + no docker never invokes a bare host caddy"
+fi
+
+# --- Fail-closed token checks on the DNS path ------------------------------
+# The token is never printed: every message carries the PATH and the fix, and
+# the assertions prove the sentinel value is absent from the output.
+assert_token_failure() {  # LABEL FILE EXPECT_SUBSTRING
+  local label="$1" token_path="$2" want="$3" rc=0 out
+  # shellcheck disable=SC2030  # scoped to the probed subshell on purpose
+  out="$( (
+    export HYBRID_AI_TLS_TOKEN_FILE="$token_path"
+    docker() {
+      if [[ "${1:-}" == info ]]; then return 0; fi
+      printf '%s\n' "$@" >> "$WORK/docker.token.args"
+      return 0
+    }
+    export -f docker
+    PATH="$EMPTY_BIN" tls_validate_caddyfile "$CADDYFILE"
+  ) 2>&1 )" || rc=$?
+  if (( rc != 0 )) && [[ "$out" == *"$want"* ]]; then
+    pass "dns path, ${label}: fails closed (rc ${rc}) naming the path"
+  else
+    fail "dns path, ${label}: did not fail closed (rc ${rc}, output: ${out})"
+  fi
+  if [[ -n "$token_path" && "$out" != *"$token_path"* ]]; then
+    fail "dns path, ${label}: the message does not name '${token_path}'"
+  fi
+  if [[ "$out" == *"$TOKEN_SENTINEL"* ]]; then
+    fail "dns path, ${label}: the message leaks the token content"
+  else
+    pass "dns path, ${label}: the message does not contain the token content"
+  fi
+}
+
+rm -f "$WORK/docker.token.args"
+: > "$WORK/empty_token"
+assert_token_failure "missing token file" "$WORK/no-such-token" "does not exist"
+assert_token_failure "empty token file" "$WORK/empty_token" "is empty (0 bytes)"
+
+# Unreadable is the same fail-closed path. Root ignores the mode bits, so the
+# case only runs where the mode actually denies a read (never as root).
+printf '%s\n' "$TOKEN_SENTINEL" > "$WORK/unreadable_token"
+chmod 000 "$WORK/unreadable_token"
+if [[ -r "$WORK/unreadable_token" ]]; then
+  printf 'ok   dns path, unreadable token file: skipped (running as a user that bypasses mode bits)\n'
+else
+  assert_token_failure "unreadable token file" "$WORK/unreadable_token" "is not readable"
+fi
+chmod 600 "$WORK/unreadable_token"
+
+# The missing/empty cases must stop BEFORE docker run: no container may be
+# started with an absent or empty credential.
+if [[ -f "$WORK/docker.token.args" ]] && grep -Fq -- ":/run/secrets/" "$WORK/docker.token.args"; then
+  fail "a failed token check still reached docker run"
+else
+  pass "the token checks run before docker run (no container was started)"
+fi
+
+# An unset variable is the same fail-closed path.
+unset_token_rc=0
+unset_token_out="$( ( unset HYBRID_AI_TLS_TOKEN_FILE
+  docker() { [[ "${1:-}" == info ]] && return 0; return 0; }
+  export -f docker
+  PATH="$EMPTY_BIN" tls_validate_caddyfile "$CADDYFILE" ) 2>&1 )" || unset_token_rc=$?
+if (( unset_token_rc != 0 )) && [[ "$unset_token_out" == *"HYBRID_AI_TLS_TOKEN_FILE is empty"* ]]; then
+  pass "dns path, unset token file: fails closed"
+else
+  fail "dns path, unset token file: did not fail closed (rc ${unset_token_rc}: ${unset_token_out})"
 fi
 
 # ---------------------------------------------------------------------------
@@ -288,8 +447,11 @@ cp "${HYBRID_AI_APP_DIR}/caddy/Dockerfile" "$APP_DIR/caddy/Dockerfile"
 run_order_case() {  # TLS_ENABLED TLS_VALIDATION CADDYFILE
   : > "$WORK/docker.order"
   # WORK is exported so the exported docker stub can reach the same log file
-  # from inside the child shell.
-  WORK="$WORK" PATH="$EMPTY_BIN" bash -c '
+  # from inside the child shell; the token path goes with it, because the DNS
+  # path now requires the file to exist before any container starts.
+  # shellcheck disable=SC2031  # the value is re-passed explicitly below
+  WORK="$WORK" HYBRID_AI_TLS_TOKEN_FILE="$HYBRID_AI_TLS_TOKEN_FILE" \
+    PATH="$EMPTY_BIN" bash -c '
     source "$1/lib/hybrid-ai-env.sh" >/dev/null 2>&1
     source "$1/scripts/lib/tls.sh"
     APP_DIR="$2"
@@ -458,7 +620,9 @@ fi
   tls_validate_settings >/dev/null 2>&1
   caddy() { env | grep '^ACME_CA=' > "$WORK/3d.env"; return 0; }
   export -f caddy
-  tls_validate_caddyfile "$CADDYFILE" >/dev/null 2>&1 || true
+  # The http-01 render: a DNS render here would take the container path, and
+  # this case is about the value the host-binary validator receives.
+  tls_validate_caddyfile "$HTTP_CADDYFILE" >/dev/null 2>&1 || true
 ) || true
 if grep -Fxq -- "ACME_CA=$TLS_CA_STAGING_URL" "$WORK/3d.env" 2>/dev/null; then
   pass "fixture 3d: the validator receives the normalized URL, matching the container"

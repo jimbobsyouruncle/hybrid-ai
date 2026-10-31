@@ -612,13 +612,36 @@ tls_validate_compose_file() {  # FILE [ENVFILE]
   fi
 }
 
+# Fail closed unless the token file can be mounted into the validation
+# container. Existence, type, readability and length only: the credential itself
+# is never read into a message, a log line or an argv.
+tls__validate_token_for_mount() {
+  local f="${HYBRID_AI_TLS_TOKEN_FILE:-}" size
+  [[ -n $f ]] || tls__die "HYBRID_AI_TLS_TOKEN_FILE is empty: the DNS-01 render cannot be validated without its token file. Fix: set HYBRID_AI_TLS_TOKEN_FILE in ${ENV_FILE:-the stack .env} to the token path (for example ${TLS_TOKEN_DIR}/cloudflare_dns_token), or pass --tls-token-file <path>."
+  if [[ ! -e $f ]]; then
+    tls__die "HYBRID_AI_TLS_TOKEN_FILE '${f}' does not exist, so the DNS-01 render cannot be validated. Fix: sudo install -d -m 0700 -o root -g root $(dirname -- "$f") && sudo install -m 0600 -o root -g root /dev/null ${f} && then write the token into that file with an editor or a pipe (never as a shell argument)."
+  fi
+  if [[ ! -f $f ]]; then
+    tls__die "HYBRID_AI_TLS_TOKEN_FILE '${f}' is not a regular file, so it cannot be mounted for validation. Fix: sudo install -m 0600 -o root -g root /dev/null ${f} && then write the token into it with an editor or a pipe."
+  fi
+  if [[ ! -r $f ]]; then
+    tls__die "HYBRID_AI_TLS_TOKEN_FILE '${f}' is not readable, so it cannot be mounted for validation. Fix: sudo chmod 600 ${f} && sudo chown root:root ${f}"
+  fi
+  size="$(wc -c < "$f" 2>/dev/null || printf '0')"
+  size="${size//[[:space:]]/}"
+  if [[ -z $size || $size == 0 ]]; then
+    tls__die "HYBRID_AI_TLS_TOKEN_FILE '${f}' is empty (0 bytes), so the DNS-01 solver would be rejected as an invalid token. Fix: write the token into ${f} with an editor or a pipe (never as a shell argument), then re-run."
+  fi
+}
+
 tls_validate_caddyfile() {  # FILE
   # The rendered TLS Caddyfile keeps its runtime placeholders
   # ({$ACME_EMAIL}, {$ACME_CA}, {$TLS_DOMAIN}, {$LOCAL_DOMAIN}) because the
   # proxy's compose `environment:` block supplies them at container start. The
   # validator must see the same values, or the placeholders expand empty and
   # Caddy rejects the file before it reaches the stack.
-  local file="$1"
+  local file="$1" dns=0
+  tls__caddyfile_uses_dns_solver "$file" && dns=1
   local -a envs=(
     "ACME_EMAIL=${ACME_EMAIL:-}"
     "TLS_DOMAIN=${TLS_DOMAIN:-}"
@@ -634,7 +657,20 @@ tls_validate_caddyfile() {  # FILE
     "HYBRID_AI_AUTH_USER=$(tls_compose_unescape "${HYBRID_AI_AUTH_USER:-}")"
     "HYBRID_AI_AUTH_HASH=$(tls_compose_unescape "${HYBRID_AI_AUTH_HASH:-}")"
   )
-  if command -v caddy >/dev/null 2>&1; then
+  # A DNS-01 render must be validated in a container: `caddy validate`
+  # provisions the TLS app and the solver reads its credential from a file, and
+  # a bare host caddy cannot be given that file.
+  local -a token_mount=()
+  if (( dns )); then
+    if ! tls__docker_ready; then
+      printf '[skip] Caddyfile validation of %s: docker is unavailable, and a bare host caddy cannot be given the DNS-01 token (it must be mounted into the container), so the render was NOT validated.\n' "$file"
+      return 3
+    fi
+    tls__validate_token_for_mount
+    token_mount=(
+      -v "${HYBRID_AI_TLS_TOKEN_FILE}:/run/secrets/${TLS_RENDER_SECRET_NAME:-$(tls_secret_name "${ACME_DNS_PROVIDER:-cloudflare}")}:ro"
+    )
+  elif command -v caddy >/dev/null 2>&1; then
     # Plain shell variables that were never exported: export them for the
     # validator only, in a subshell, so the caller's environment is untouched.
     (
@@ -650,7 +686,8 @@ tls_validate_caddyfile() {  # FILE
     for e in "${envs[@]}"; do docker_env+=(-e "$e"); done
     docker run --rm --network none --entrypoint caddy \
       "${docker_env[@]}" \
-      -v "${file}:/etc/caddy/Caddyfile:ro" "$(tls_validate_image_for "$file")" \
+      -v "${file}:/etc/caddy/Caddyfile:ro" ${token_mount[@]+"${token_mount[@]}"} \
+      "$(tls_validate_image_for "$file")" \
       validate --adapter caddyfile --config /etc/caddy/Caddyfile
     return
   fi
