@@ -291,6 +291,23 @@ the operator asks for it. Either way the stock image is never used for TLS.
 For RFC 2136, the same rules apply to `/etc/hybrid-ai/acme/rfc2136_key_secret`,
 mounted at `/run/secrets/rfc2136_key_secret`.
 
+**The same file is mounted into the validation container.** `caddy validate`
+provisions the TLS app, and the rendered solver reads its credential from
+`/run/secrets/<name>` by design, so the credential must be present *inside* the
+throwaway validator too. The installer therefore mounts
+`${HYBRID_AI_TLS_TOKEN_FILE}` read-only at `/run/secrets/<name>` (the same name
+the render reads) for the duration of the validation run, under `--network none`.
+The validation container is short-lived and reaches no network, so the token
+cannot leave the host. It is never copied, printed or passed as a value.
+
+Before that container starts, the validator fails closed when the token file
+cannot be presented: the variable is unset or empty, the path does not exist, it
+is not a regular file, it is unreadable, or it is empty (0 bytes). Each message
+names the path and the fix command and never contains the file's content; only
+existence and length are reported. A non-DNS render (http-01, TLS-ALPN-01, or TLS
+off) gets no extra mount and no token check: its validation invocation is
+unchanged.
+
 ### 2.6 Scoping to the minimum
 
 **Decision: the token is restricted to the single zone `daemonhub.dev`, with
@@ -1596,6 +1613,16 @@ against the rendered compose file, validates the Caddyfile with
 `caddy validate` in a throwaway container, and exits `0` without touching Docker
 or any file. It is the required way to preview the change on the live host.
 
+For a DNS-01 render that container also gets the operator's token file mounted
+read-only at `/run/secrets/<name>`, still under `--network none`, so validation
+provisions the TLS app exactly as the proxy will without needing the network. The
+dry run therefore requires `HYBRID_AI_TLS_TOKEN_FILE` to name a non-empty,
+readable regular file; otherwise it fails closed with the path and the fix and
+writes nothing. A non-DNS render validates without any token mount. Because a
+bare host `caddy` cannot be given that file, a DNS render is only validated when
+docker is available: without it the step is a `[skip]` warning (return 3) and
+the render is reported as not validated.
+
 Parsing goes in the existing `for arg in "$@"` loop at the top of `install.sh`
 and in the same style as `--wake-runpod`; an unknown flag still exits `2`.
 
@@ -1662,6 +1689,38 @@ has no such modules, so it rejects a correct render. Therefore:
 | `TLS_ENABLED=yes`, `TLS_VALIDATION=dns` | `${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}` (section 2.3) |
 | Everything else (`http`, `tlsalpn`, TLS off) | `caddy:2.11-alpine` |
 | Any render, when `CADDY_VALIDATE_IMAGE` is set | `$CADDY_VALIDATE_IMAGE` (explicit override wins) |
+
+**The token is mounted into the validator.** `caddy validate` provisions the TLS
+app, and the rendered DNS solver reads its credential from
+`{file./run/secrets/<name>}`. The throwaway validator therefore gets the
+operator's token file as one extra read-only mount:
+
+```
+-v "${HYBRID_AI_TLS_TOKEN_FILE}:/run/secrets/<resolved secret name>:ro"
+```
+
+`<resolved secret name>` is the same name the render reads
+(`cloudflare_dns_token` or `rfc2136_key_secret`). The mount is the only
+difference in the invocation; `--network none`, `--rm`, the `-e` values and the
+Caddyfile mount are unchanged, and a non-DNS render gets no extra mount at all.
+The CI matrix step (`.github/workflows/validate.yml`) mounts its own dummy token
+for the same reason.
+
+**Fail-closed token checks, before any container starts.** On the DNS path only,
+the validator dies when the token cannot be presented: `HYBRID_AI_TLS_TOKEN_FILE`
+unset or empty, the path absent, not a regular file, unreadable, or empty
+(0 bytes). Every message names the path and the fix command, and reports only
+existence and length: the file's content is never echoed.
+
+**Host-binary limitation.** A DNS render is never validated by a bare host
+`caddy`, even when that binary is installed: it cannot be given the token file
+without a mount, so it would fail provisioning with
+`placeholder: failed to read file /run/secrets/...` and
+`API token '' appears invalid`. The validator prefers the container whenever
+docker is ready. With no docker it prints a `[skip]` warning (return 3, the same
+non-fatal skip as every other validation step) stating that the token cannot be
+presented to a bare host caddy. It does not attempt bind-mount tricks and does
+not pass silently. Non-DNS renders keep the existing host-binary path unchanged.
 
 **Build before validate.** On first enablement the proxy image does not exist
 yet: STEP 9 `compose up` builds it, which is *after* this gate. The installer
@@ -1958,6 +2017,12 @@ dig +short TXT _acme-challenge.daemonhub.dev @1.1.1.1   # expected: empty before
 # The run may build hybrid-ai-caddy:2.11.7-dns first: validation of a DNS-01
 # render needs the DNS-capable image (section 8.5). That image is cache, so the
 # host files are still untouched.
+# Validation provisions the TLS app with the DNS-01 token: the token file named
+# by HYBRID_AI_TLS_TOKEN_FILE (section 2.5) is mounted read-only into the
+# throwaway validator at /run/secrets/cloudflare_dns_token under --network none.
+# A missing, unreadable or empty token file fails the dry run with the path and
+# the fix; a host-only caddy cannot do this, so a DNS render is skipped (rc 3)
+# when docker is unavailable.
 git status --short          # expected: still clean
 ```
 

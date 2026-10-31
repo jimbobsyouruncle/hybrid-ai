@@ -400,6 +400,7 @@
 - tls_validate_image_for()
 - tls_build_validate_image()
 - tls_validate_compose_file()
+- tls__validate_token_for_mount()
 - tls_validate_caddyfile()
 - tls_render_and_install()
 - tls_dry_run()
@@ -499,6 +500,8 @@
 - fail()
 - render()
 - caddy()
+- validate_render()
+- docker()
 
 ## scripts/test-backup-containers.sh
 - ok()
@@ -850,6 +853,7 @@
 - assert_envs_in_file()
 - docker()
 - caddy()
+- assert_token_failure()
 - image_for_render()
 - run_order_case()
 - normalized_ca()

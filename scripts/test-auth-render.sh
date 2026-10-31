@@ -341,12 +341,51 @@ TLS_VALIDATION="dns"
 ACME_DNS_PROVIDER="cloudflare"
 ACME_CA="$TLS_CA_STAGING_URL"
 
+# The DNS render is validated in a container now (a bare host caddy cannot be
+# given the DNS-01 token), so provide a non-empty token file and a docker stub
+# that routes to the same caddy stub. The stub proves the auth rules; the
+# container itself is exercised by the real-Caddy CI matrix.
+TOKEN_FILE="$WORK/dummy_dns_token"
+printf '%s\n' 'dummy-token-for-test-only-not-a-secret' > "$TOKEN_FILE"
+HYBRID_AI_TLS_TOKEN_FILE="$TOKEN_FILE"
+
+validate_render() {  # FILE
+  (
+    docker() {
+      if [[ "${1:-}" == info ]]; then return 0; fi
+      # docker run --rm --network none --entrypoint caddy -e … \
+      #   -v HOME_FILE:/etc/caddy/Caddyfile:ro IMAGE validate --adapter caddyfile --config /etc/caddy/Caddyfile
+      # The container sees /etc/caddy/Caddyfile; the stub validates the host
+      # file that mount came from, and propagates its verdict like docker run.
+      local a prev="" host_file=""
+      for a in "$@"; do
+        case "$a" in
+          *:/etc/caddy/Caddyfile:ro) host_file="${a%:/etc/caddy/Caddyfile:ro}" ;;
+        esac
+        # The validator hands the container its runtime values with -e; apply
+        # them here so the stub sees exactly what the container would.
+        if [[ "$prev" == "-e" ]]; then
+          case "${a%%=*}" in
+            HYBRID_AI_AUTH_USER|HYBRID_AI_AUTH_HASH|ACME_EMAIL|ACME_CA|TLS_DOMAIN|LOCAL_DOMAIN|ACME_AUTO_HTTPS)
+              export "${a?}" ;;
+          esac
+        fi
+        prev="$a"
+      done
+      [[ -n "$host_file" ]] || return 1
+      caddy validate --adapter caddyfile --config "$host_file"
+    }
+    export -f docker caddy
+    tls_validate_caddyfile "$1"
+  )
+}
+
 # Empty hash (user present): must FAIL validation.
 HYBRID_AI_AUTH_USER="DUMMY_AUTH_USER_NOT_A_SECRET"
 HYBRID_AI_AUTH_HASH=""
 render "on dns auth" "$WORK/empty_hash"
 empty_hash_rc=0
-tls_validate_caddyfile "$WORK/empty_hash" >/dev/null 2>&1 || empty_hash_rc=$?
+validate_render "$WORK/empty_hash" >/dev/null 2>&1 || empty_hash_rc=$?
 if (( empty_hash_rc != 0 )); then
   pass "fail-closed: AUTH_ENABLED=on with an empty hash is rejected"
 else
@@ -358,7 +397,7 @@ HYBRID_AI_AUTH_USER=""
 HYBRID_AI_AUTH_HASH="\$2a\$14\$DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY"
 render "on dns auth" "$WORK/empty_user"
 empty_user_rc=0
-tls_validate_caddyfile "$WORK/empty_user" >/dev/null 2>&1 || empty_user_rc=$?
+validate_render "$WORK/empty_user" >/dev/null 2>&1 || empty_user_rc=$?
 if (( empty_user_rc != 0 )); then
   pass "fail-closed: AUTH_ENABLED=on with an empty user is rejected"
 else
@@ -370,7 +409,7 @@ HYBRID_AI_AUTH_USER="DUMMY_AUTH_USER_NOT_A_SECRET"
 HYBRID_AI_AUTH_HASH="\$2a\$14\$DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY"
 render "on dns auth" "$WORK/ok_auth"
 ok_rc=0
-tls_validate_caddyfile "$WORK/ok_auth" >/dev/null 2>&1 || ok_rc=$?
+validate_render "$WORK/ok_auth" >/dev/null 2>&1 || ok_rc=$?
 if (( ok_rc == 0 )); then
   pass "AUTH_ENABLED=on with both credentials set validates"
 else
