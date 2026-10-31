@@ -193,9 +193,11 @@ The mitigations are that the app is tiny and auditable, issues only GETs, holds 
 
 ### Adding a password
 
-Network restriction stops the internet. It does not stop a guest on your wifi or another device you own that gets compromised. The proxy can gate every `*.daemonhub.dev` HTTPS site (the apex, `hermes.`, `status.` and the wildcard catch-all) behind HTTP Basic auth. This is **additive** to the network allowlist: it never replaces it.
+Network restriction stops the internet. It does not stop a guest on your wifi or another device you own that gets compromised. The proxy can gate every `*.daemonhub.dev` HTTPS site (the apex, `hermes.`, `status.` and the wildcard catch-all) behind a login page. This is **additive** to the network allowlist: it never replaces it.
 
 The gate is off by default. With it off, the rendered Caddyfile is byte-identical to the one without the gate, and the `http://*.jarvis.lan` names stay open during the transition.
+
+When the gate is on, Caddy's `(auth)` snippet does a `forward_auth` to a small `auth` service. Caddy asks the service to `/verify` on every request. A valid session cookie passes; anything else gets the login page, and the service sends the browser back to where it was headed after a successful login. The service issues a signed cookie (`hybrid_ai_auth`) whose `Domain` is your `TLS_DOMAIN`, so one login covers the apex, `hermes.`, `status.` and the wildcard. The cookie lives for `HYBRID_AI_AUTH_COOKIE_MAX_AGE` seconds (default 86400, one day).
 
 1. Generate a bcrypt hash. The plaintext never enters the repository:
 
@@ -203,36 +205,46 @@ The gate is off by default. With it off, the rendered Caddyfile is byte-identica
    docker run --rm caddy:2.11-alpine caddy hash-password
    ```
 
-2. In the stack env file (`.env`, mode `0600`), set:
+2. Generate the cookie signing key once, by hand:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+3. In the stack env file (`.env`, mode `0600`), set:
 
    ```
    AUTH_ENABLED=on
    HYBRID_AI_AUTH_USER=<your-user-name>
    HYBRID_AI_AUTH_HASH=<the-bcrypt-hash-from-step-1>
+   HYBRID_AI_AUTH_COOKIE_SECRET=<the-hex-output-from-step-2>
+   HYBRID_AI_AUTH_COOKIE_MAX_AGE=86400
    ```
 
    Paste the hash **as-is**. Docker Compose interpolates `$` in env-file
-   values, so `install.sh` writes the user and the hash with every `$` doubled
-   (`$$`) when it rewrites `.env`; Compose collapses that back to one `$` for
-   the container. Do not add the `$$` yourself, and do not worry if a later
-   `install.sh` run shows the doubled form — it is idempotent.
+   values, so `install.sh` writes the user, the hash and the cookie secret with
+   every `$` doubled (`$$`) when it rewrites `.env`; Compose collapses that back
+   to one `$` for the container. Do not add the `$$` yourself, and do not worry
+   if a later `install.sh` run shows the doubled form — it is idempotent.
 
    With TLS off, `AUTH_ENABLED=on` gates nothing: the gate renders only on the
    `*.daemonhub.dev` HTTPS sites, which do not exist until TLS is enabled.
    `install.sh` prints a warning in that combination. See
    `docs/tls-acme-design.md` section 4.7.
 
-3. Apply it:
+4. Apply it:
 
    ```bash
    ./install.sh
    ```
 
-The credentials are read from the environment by the `(auth)` snippet — no credential literal is ever written into a tracked file. The username and hash are passed to the Caddy container by the proxy's `environment:` block.
+The install fail-closes before it renders anything: with TLS on and `AUTH_ENABLED=on`, an empty `HYBRID_AI_AUTH_USER`, `HYBRID_AI_AUTH_HASH` or `HYBRID_AI_AUTH_COOKIE_SECRET` stops the install with a message naming every missing variable. The auth service refuses to start without them too, as a second layer.
 
-`/health` is deliberately exempt: it is the open endpoint the external uptime monitor polls, so it answers without a prompt. Every other route on the gated sites, and the `hermes.`, `status.` and wildcard site blocks, require the password.
+The credentials reach only the `auth` service; they no longer go to the proxy container, and no credential literal is ever written into a tracked file.
 
-**Known limitation.** Basic auth has no server-side expiry. Browsers hold the credentials until they are closed, so the practical session is per browser session, not a fixed 24 hours. A `forward_auth` session service that could expire credentials was considered and deferred.
+`/health` is deliberately exempt: it is the open endpoint the external uptime monitor polls, so it answers without a prompt. Every other route on the gated sites, and the `hermes.`, `status.` and wildcard site blocks, require a login.
+
+**Sessions and rotation.** The login page's session expires after `HYBRID_AI_AUTH_COOKIE_MAX_AGE` seconds. To log everyone out at once, replace `HYBRID_AI_AUTH_COOKIE_SECRET` with a fresh `openssl rand -hex 32` and re-run `install.sh`: every cookie signed with the old key stops verifying. Changing the password or the user name does not drop existing sessions; rotate the secret when you need that.
 
 ---
 
@@ -295,6 +307,6 @@ It also means no build step: `app.py` is mounted read-only into the stock `pytho
 
 ### Backed up
 
-`status/` — including your `Caddyfile` with any `basic_auth` hash or allowlist changes — is captured in every backup under `host/status/`. `restore.sh` offers to put your customised version back if it differs from what is in git. Your proxy configuration survives a rebuild onto new hardware.
+`status/` — including your `Caddyfile` with any allowlist changes — is captured in every backup under `host/status/`. `restore.sh` offers to put your customised version back if it differs from what is in git. Your proxy configuration survives a rebuild onto new hardware.
 
 To disable the status page entirely, remove the `status` and `proxy` services from `docker-compose.yml` and re-run `./install.sh`. Nothing else depends on them.

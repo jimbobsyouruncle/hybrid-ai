@@ -381,6 +381,35 @@ check "install.sh exits 0 with an already-escaped hash" "0" "$rc"
 check "an escaped hash stays single-escaped (no \$\$\$\$)" "$DUMMY_HASH_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_HASH)"
 check "an escaped user stays single-escaped (no \$\$\$\$)" "$DUMMY_USER_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_USER)"
 
+echo
+echo "== (i4) the cookie secret is escaped and the max-age default is written =="
+# The cookie secret is escaped for Compose like the user and hash (a hex secret
+# has no `$`, but the rule is the same, and a punctuated secret must survive).
+DUMMY_SECRET_RAW="s3cret\$value"
+DUMMY_SECRET_ESCAPED="s3cret\$\$value"
+: > "$LOG"
+{
+  printf 'HYBRID_AI_AUTH_COOKIE_SECRET=%s\n' "$DUMMY_SECRET_RAW"
+} > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with a raw cookie secret" "0" "$rc"
+check "HYBRID_AI_AUTH_COOKIE_SECRET is written escaped" "$DUMMY_SECRET_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_SECRET)"
+check "the written cookie secret unescapes to the operator's bytes" "$DUMMY_SECRET_RAW" "$(tls_compose_unescape "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_SECRET)")"
+# Unset -> the default 86400 is written, so the value is visible in the file.
+check "an unset HYBRID_AI_AUTH_COOKIE_MAX_AGE is written as the 86400 default" "86400" "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_MAX_AGE)"
+# Owner-set -> preserved byte-for-byte (not clobbered by the default).
+: > "$LOG"
+{
+  printf 'HYBRID_AI_AUTH_COOKIE_SECRET=%s\n' "$DUMMY_SECRET_ESCAPED"
+  printf 'HYBRID_AI_AUTH_COOKIE_MAX_AGE=3600\n'
+} > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "an owner-set HYBRID_AI_AUTH_COOKIE_MAX_AGE is preserved" "3600" "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_MAX_AGE)"
+
 # ---------------------------------------------------------------------------
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

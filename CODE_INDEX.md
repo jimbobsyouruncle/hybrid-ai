@@ -424,6 +424,7 @@
 - tls_is_on()
 - tls_auth_is_on()
 - tls_auth_without_tls_warning()
+- tls_auth_fail_closed()
 - tls_compose_unescape()
 - tls_compose_escape()
 - tls_default_token_path()
@@ -553,9 +554,7 @@
 - pass()
 - fail()
 - render()
-- caddy()
-- validate_render()
-- docker()
+- check_fail_closed()
 
 ## scripts/test-backup-containers.sh
 - ok()

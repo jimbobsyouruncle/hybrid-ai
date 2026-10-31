@@ -42,13 +42,15 @@
 #@auth
 # The login gate for the *.{$TLS_DOMAIN} HTTPS sites: emitted only when
 # AUTH_ENABLED=on, so the default render is byte-identical to the file without
-# it. Credentials are supplied by the stack env as {$HYBRID_AI_AUTH_USER} and
-# {$HYBRID_AI_AUTH_HASH} (bcrypt; the plaintext never enters this repository).
+# it. Each gated request is handed to the auth service's `/verify`: a valid
+# session cookie answers 2xx and the request proceeds; anything else (the 302
+# to the login page) is copied back to the client unchanged. No credential
+# enters the Caddyfile: the auth service reads them from its own environment.
 # Auth is ADDITIVE to `trusted_only`: the network allowlist is unchanged, and
 # the http:// sites import neither snippet.
 (auth) {
-	basic_auth {
-		{$HYBRID_AI_AUTH_USER} {$HYBRID_AI_AUTH_HASH}
+	forward_auth auth:8080 {
+		uri /verify
 	}
 }
 #@end
@@ -202,6 +204,18 @@ https://{$TLS_DOMAIN} {
 			redir * {uri} 302
 		}
 	}
+	#@auth
+	# The login endpoint must stay reachable WITHOUT a session: it is what
+	# issues the cookie in the first place. So this handle imports
+	# trusted_only (LAN + tailnet only, like every sibling) and secure_headers,
+	# but never the auth gate. Emitted only with the auth variant, so the
+	# default render is byte-identical.
+	handle /auth* {
+		import trusted_only
+		import secure_headers
+		reverse_proxy auth:8080
+	}
+	#@on
 	handle {
 		#@auth
 		import auth
