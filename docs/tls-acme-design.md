@@ -1008,6 +1008,54 @@ still aborts untrusted addresses before the handle runs, and the gate is
 unchanged by it. The `http://*.jarvis.lan` sites and the http→https redirect
 block import neither, so both name families work during the transition.
 
+**Suppressed when TLS is off.** The `(auth)` snippet is imported only by the
+`*.daemonhub.dev` HTTPS sites. With `TLS_ENABLED` not yes those sites do not
+exist, so the snippet has nothing to import it and it is dead config. Real
+Caddy rejects it: the top-level `basic_auth` directive is parsed as a site
+address and the render fails with `parsed 'basic_auth' as a site address, but
+it is a known directive; directives must appear in a site block`. So
+`tls_variants` appends the `auth` variant only when `tls_is_on` AND
+`tls_auth_is_on`: a TLS-off render is byte-identical to the auth-off render no
+matter what `AUTH_ENABLED` says. This is suppression, not repair: there is
+nothing to gate while TLS is off. `install.sh` prints a warning (never a hard
+failure, never a change of exit status) in that combination so the operator is
+not misled into thinking the gate is live.
+
+**Compose env-file interpolation (`$`).** Docker Compose interpolates `$`
+inside env-file values, so a bcrypt hash written raw (`$2a$14$...`) loses its
+`$` fragments (`$iGdy2Gi` resolves to blank, and the deploy log shows `The
+"iGdy2Gi" variable is not set. Defaulting to a blank string.`). The proxy's
+`{$HYBRID_AI_AUTH_HASH}` placeholder then expands to a corrupted hash. The fix
+is escape-at-write, unescape-for-validation: `install.sh` STEP 8 writes
+`HYBRID_AI_AUTH_USER` and `HYBRID_AI_AUTH_HASH` with every `$` doubled (`$$`),
+and Compose collapses it back to the operator's original bytes in the
+container. The normalizer collapses to raw first and then escapes once
+(`tls_compose_escape`), so it is idempotent: a raw value is escaped once, an
+already-escaped value is byte-identical after a re-run, and a value carrying
+`$$` never becomes `$$$$`. The in-repo reader of the literal value —
+`tls_validate_caddyfile`, which passes the two variables to `caddy validate`
+via `-e` — unescapes `$$`→`$` first (`tls_compose_unescape`), so validation
+sees exactly what the container sees. Previously the validator passed the
+in-process intact value and so never reproduced a corrupted runtime hash: a
+validator/runtime divergence.
+
+**Verification matrix.** `.github/workflows/validate.yml` renders the Caddyfile
+with real Caddy for four flag combinations. The first three predate this
+defect; the fourth closes the gap that let the TLS-off/auth-on render reach a
+host deploy because CI never covered it:
+
+| Case | TLS | AUTH_ENABLED | Variants | Expected |
+|---|---|---|---|---|
+| a | off | off | `off` | accepted; auth-off bytes |
+| b | on | off | `on dns` | accepted; zero imports, zero snippets |
+| c | on | on | `on dns auth` | accepted; gate emitted |
+| d | off | on | `off` | accepted; byte-identical to case (a) |
+
+Case (d) derives its variants from the live `tls_variants`, so an unpatched
+`tls_variants` that renders `off auth` fails the "exactly `off`" and
+byte-identical assertions before Caddy is ever invoked. The offline fixture
+`scripts/test-auth-render.sh` covers the same case without Docker or Caddy.
+
 **Fail-closed.** `tls_validate_caddyfile` already receives the proxy's runtime
 env, so its env list now includes the two auth values. With `AUTH_ENABLED=on`
 and an empty user or hash, the snippet expands to `basic_auth {  }`, which

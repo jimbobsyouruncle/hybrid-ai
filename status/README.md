@@ -211,6 +211,17 @@ The gate is off by default. With it off, the rendered Caddyfile is byte-identica
    HYBRID_AI_AUTH_HASH=<the-bcrypt-hash-from-step-1>
    ```
 
+   Paste the hash **as-is**. Docker Compose interpolates `$` in env-file
+   values, so `install.sh` writes the user and the hash with every `$` doubled
+   (`$$`) when it rewrites `.env`; Compose collapses that back to one `$` for
+   the container. Do not add the `$$` yourself, and do not worry if a later
+   `install.sh` run shows the doubled form — it is idempotent.
+
+   With TLS off, `AUTH_ENABLED=on` gates nothing: the gate renders only on the
+   `*.daemonhub.dev` HTTPS sites, which do not exist until TLS is enabled.
+   `install.sh` prints a warning in that combination. See
+   `docs/tls-acme-design.md` section 4.7.
+
 3. Apply it:
 
    ```bash
