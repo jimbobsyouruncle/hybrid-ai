@@ -153,6 +153,7 @@ build_leaf five_day   "$CA1_DIR" "DNS:${HOSTNAME_TEST}"            5
 build_leaf expired    "$CA1_DIR" "DNS:${HOSTNAME_TEST}"            expired
 build_leaf wrong_san  "$CA1_DIR" "DNS:other.example"               90
 build_leaf other_ca   "$CA2_DIR" "DNS:${HOSTNAME_TEST}"            90
+build_leaf wildcard_san "$CA1_DIR" "DNS:*.${HOSTNAME_TEST}" 90
 
 # --- free port + server ----------------------------------------------------
 free_port() {
@@ -335,6 +336,40 @@ if [[ -z "$port" ]]; then
 else
   out="$(run_check "$port" 2>&1)"; rc=$?
   assert_exit "certificate from an untrusted CA" 3 "$rc"
+fi
+
+# --- case 6c: wildcard SAN covers exactly one label ---------------------
+# One *.HOSTNAME_TEST cert must serve sub.HOSTNAME_TEST, but never the apex
+# and never a two-label name. run_check() hardcodes --host, so call the REAL
+# script directly here.
+port="$(start_server "${LEAF[wildcard_san]}")"
+if [[ -z "$port" ]]; then
+  skipped "could not serve the wildcard-SAN fixture"
+else
+  out="$(bash "$CHECK" --host "sub.${HOSTNAME_TEST}" --probe-addr "${LOOPBACK}:${port}" \
+           --env-file "$ENV_FILE" --ca-file "$CA1" --warn-days 14 --crit-days 7 2>&1)"; rc=$?
+  assert_exit "wildcard SAN covers one label" 0 "$rc"
+
+  json_out="$(bash "$CHECK" --host "sub.${HOSTNAME_TEST}" --probe-addr "${LOOPBACK}:${port}" \
+           --env-file "$ENV_FILE" --ca-file "$CA1" --warn-days 14 --crit-days 7 --json 2>/dev/null)"
+  if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$json_out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["hosts"][0]["san_match"] is True' 2>/dev/null; then
+      ok "wildcard SAN reports san_match=true in --json"
+    else
+      bad "wildcard SAN did not report san_match=true in --json"
+    fi
+  else
+    skipped "wildcard SAN --json san_match assertion (python3 absent)"
+  fi
+
+  out="$(bash "$CHECK" --host "${HOSTNAME_TEST}" --probe-addr "${LOOPBACK}:${port}" \
+           --env-file "$ENV_FILE" --ca-file "$CA1" --warn-days 14 --crit-days 7 2>&1)"; rc=$?
+  assert_exit "wildcard SAN does not cover the apex" 3 "$rc"
+
+  out="$(bash "$CHECK" --host "a.b.${HOSTNAME_TEST}" --probe-addr "${LOOPBACK}:${port}" \
+           --env-file "$ENV_FILE" --ca-file "$CA1" --warn-days 14 --crit-days 7 2>&1)"; rc=$?
+  assert_exit "wildcard SAN covers one label only" 3 "$rc"
+  stop_server
 fi
 
 stop_server

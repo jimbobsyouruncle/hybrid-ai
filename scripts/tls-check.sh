@@ -134,6 +134,7 @@ san_match() {
     fi
     if [[ "$entry" == DNS:\*.* ]]; then
       local suffix="${entry#DNS:*}"
+      suffix="${suffix#\*}"
       if [[ "$host" == *"${suffix}" && "$host" != "${suffix#.}" ]]; then
         prefix="${host%"${suffix}"}"
         [[ -n "$prefix" && "$prefix" != *.* ]] && return 0
