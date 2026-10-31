@@ -481,6 +481,13 @@ jobs:
         # Caddy and no Docker.
         run: bash scripts/test-tls-caddy-validation.sh
 
+      - name: TLS check harness tests
+        # Offline/loopback: a throwaway openssl CA and `openssl s_server` on
+        # [IP_ADDRESS], no Docker, no root, no network. Runs the REAL
+        # scripts/tls-check.sh against real handshakes, including that a
+        # wildcard SAN covers exactly one label (not the apex, not two labels).
+        run: bash scripts/test-tls-check.sh
+
       - name: Auth render tests
         # Offline. Renders the managed Caddyfile template in a throwaway tree
         # with AUTH_ENABLED off and on. Proves the login gate is emitted ONLY
