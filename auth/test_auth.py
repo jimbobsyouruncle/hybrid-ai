@@ -297,16 +297,22 @@ class RateLimitTests(ServerCase):
 class StartupTests(unittest.TestCase):
     app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
 
+    def child_env(self, **overrides):
+        # Inherit the parent environment. The child needs HOME/PYTHONPATH to
+        # import bcrypt from user-site; a bare dict of auth vars is not enough.
+        env = dict(os.environ)
+        env.update(base_env(**overrides))
+        return env
+
     def test_env_exits(self):
         for name in app.REQUIRED_ENV:
             for label, value in (("absent", None), ("blank", "   ")):
                 with self.subTest(variable=name, case=label):
-                    env = base_env()
+                    env = self.child_env()
                     if value is None:
                         env.pop(name)
                     else:
                         env[name] = value
-                    env["PATH"] = os.environ.get("PATH", "")
                     result = subprocess.run(
                         [sys.executable, self.app_path],
                         env=env,
@@ -319,8 +325,7 @@ class StartupTests(unittest.TestCase):
                         self.assertNotIn(secret.encode(), result.stderr)
 
     def test_valid_env_runs(self):
-        env = base_env(PORT="0")
-        env["PATH"] = os.environ.get("PATH", "")
+        env = self.child_env(PORT="0")
         proc = subprocess.Popen(
             [sys.executable, self.app_path],
             env=env,

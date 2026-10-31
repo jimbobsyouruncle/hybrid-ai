@@ -85,6 +85,7 @@
 - class RateLimitTests(ServerCase)
   - def test_rate_limit(self)
 - class StartupTests(TestCase)
+  - def child_env(self, **overrides)
   - def test_env_exits(self)
   - def test_valid_env_runs(self)
 
