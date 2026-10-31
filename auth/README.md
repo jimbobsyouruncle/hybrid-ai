@@ -1,0 +1,64 @@
+# Forward-auth login service
+
+A small, self-contained forward-auth endpoint for Caddy (`forward_auth`).
+It is inert by default: nothing in this directory publishes a port or
+changes any existing service. Wiring it into compose and the Caddyfile is a
+separate change.
+
+Python 3 standard library plus `bcrypt`, pinned exactly to `bcrypt==4.2.1`
+in `auth/Dockerfile`. The same pin appears once on the test side, in
+`auth/requirements-test.txt`.
+
+## Endpoints
+
+| Method | Path | Behaviour |
+| --- | --- | --- |
+| GET | `/healthz` | 200, no authentication. |
+| GET | `/auth/login` | Login form. `next` is carried in a hidden input. |
+| POST | `/auth/login` | Verifies credentials, sets the cookie, 302 to `next`. |
+| GET | `/verify` | 200 on a valid cookie, otherwise 302 to the login form. |
+
+## Environment
+
+Names only. No value belongs in a tracked file.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `HYBRID_AI_AUTH_USER` | yes | The single allowed username. |
+| `HYBRID_AI_AUTH_HASH` | yes | bcrypt hash of the password. |
+| `HYBRID_AI_AUTH_COOKIE_SECRET` | yes | HMAC key for the cookie signature. |
+| `TLS_DOMAIN` | yes | Cookie `Domain` and the only allowed `next` host. |
+| `HYBRID_AI_AUTH_COOKIE_MAX_AGE` | no | Cookie lifetime in seconds, default 86400. |
+| `HYBRID_AI_AUTH_RATE_LIMIT` | no | Login attempts per source IP, default 5. |
+| `HYBRID_AI_AUTH_RATE_WINDOW` | no | Window in seconds, default 60. |
+| `PORT` | no | Default 8080. |
+| `HOST` | no | Default is the container wildcard interface. |
+
+Start-up is fail-closed: if any required variable is empty or whitespace the
+process exits non-zero and names the variable it is missing. There is no
+default credential and no development bypass.
+
+## Security notes
+
+- `next` must be an absolute `https` URL whose host is `TLS_DOMAIN` or a
+  subdomain of it. Anything else, including protocol-relative and
+  `javascript:` values, falls back to `https://$TLS_DOMAIN/`.
+- Every login failure returns the same 401 and the same body. Both the
+  username comparison and the bcrypt check always run, so timing does not
+  separate a wrong user from a wrong password.
+- The cookie is `<exp>.<HMAC-SHA256 hex of exp>` keyed by
+  `HYBRID_AI_AUTH_COOKIE_SECRET`, and is verified with a constant-time
+  comparison. Cookie values are never logged and never echoed into errors.
+- Login attempts are limited per source IP in memory.
+- The container runs as a non-root user and listens on port 8080 inside the
+  container only. The bind default is the wildcard interface inside the
+  container; publish ports only through compose, if at all.
+
+## Tests
+
+```
+python3 -m pip install -r auth/requirements-test.txt
+python3 -m unittest discover -s auth -p 'test_*.py' -v
+```
+
+Everything runs offline over loopback: no Docker and no network.

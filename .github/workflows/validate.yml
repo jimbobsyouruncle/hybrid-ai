@@ -75,6 +75,16 @@ jobs:
         # detection are security properties, not conveniences.
         run: python3 openwebui/test_refactor.py
 
+      - name: Install auth test dependency (bcrypt)
+        # The auth service checks bcrypt hashes, so its tests need the same
+        # exact pin the image ships. See auth/requirements-test.txt.
+        run: python3 -m pip install "bcrypt==4.2.1"
+
+      - name: Auth service tests
+        # Offline. Covers open-redirect rejection, the single generic login
+        # error, per-IP rate limiting and fail-closed start-up.
+        run: python3 -m unittest discover -s auth -p 'test_*.py' -v
+
       - name: Backup script fixture tests
         # backup.sh must never build SQL text or a SQLite URI from a file name
         # found in container-written data, must verify captured databases, and

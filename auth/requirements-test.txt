@@ -1,0 +1,5 @@
+# Test-only dependencies for auth/. Offline tests still need bcrypt, because
+# the service compares against a real bcrypt hash.
+#
+# Keep this pin identical to the one in auth/Dockerfile.
+bcrypt==4.2.1
