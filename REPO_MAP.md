@@ -32,6 +32,13 @@
 - .github/workflows/sandbox-image.yml
 - .github/workflows/sast-checks.yml
 - .github/workflows/validate.yml
+## auth
+
+- auth/Dockerfile
+- auth/README.md - Forward-auth login service
+- auth/app.py - Forward-auth login service for Caddy.
+- auth/requirements-test.txt
+- auth/test_auth.py - Offline tests for the forward-auth login service.
 ## backup
 
 - backup/README.md - backup/ — Encrypted Offsite Backups

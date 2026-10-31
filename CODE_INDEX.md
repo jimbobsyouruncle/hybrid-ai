@@ -35,6 +35,60 @@
 ## .github/workflows/validate.yml
 - validate
 
+## auth/Dockerfile
+- FROM python:3.12-alpine
+
+## auth/app.py
+- def _positive_int(raw, default)
+- class Config()
+  - def __init__(self, environ)
+- class RateLimiter()
+  - def __init__(self, limit, window)
+  - def allow(self, source)
+- def sign_expiry(secret, exp)
+- def verified_expiry(value, secret)
+- class TargetValidator()
+  - def __init__(self, tls_domain)
+  - def is_allowed(self, url)
+  - def sanitize(self, url)
+- class Handler(BaseHTTPRequestHandler)
+  - def log_message(self, fmt, *args)
+  - def _send(self, status, body, headers, close)
+  - def _redirect(self, location, extra_headers)
+  - def do_GET(self)
+  - def do_POST(self)
+- def build_server(config)
+- def main(argv)
+
+## auth/test_auth.py
+- def base_env(**overrides)
+- class ServerCase(TestCase)
+  - def setUp(self)
+  - def request(self, method, path, body, headers)
+  - def post(self, username, password, next_url)
+  - def verify(self, value, headers)
+  - def signed(self, exp)
+  - def assert_login(self, location, original)
+- class VerifyTests(ServerCase)
+  - def test_healthz_open(self)
+  - def test_valid_cookie(self)
+  - def test_bad_cookies(self)
+  - def test_next_rebuilt(self)
+  - def test_next_fallback(self)
+  - def test_cookie_signature(self)
+- class LoginTests(ServerCase)
+  - def test_form(self)
+  - def test_hostile_next(self)
+  - def test_success_cookie(self)
+  - def test_success_next(self)
+  - def test_generic_failure(self)
+- class RateLimitTests(ServerCase)
+  - def test_rate_limit(self)
+- class StartupTests(TestCase)
+  - def child_env(self, **overrides)
+  - def test_env_exits(self)
+  - def test_valid_env_runs(self)
+
 ## backup/backup-containers.sh
 - log()
 - die()
