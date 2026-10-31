@@ -91,6 +91,30 @@ tls_auth_is_on() {
   esac
 }
 
+# The warning install.sh prints when the gate is switched on but TLS is off. The
+# snippet has nothing to import it (there are no HTTPS sites), so nothing is
+# gated. Warning only: it never changes the installer's exit status.
+tls_auth_without_tls_warning() {
+  tls__warn "WARNING: AUTH_ENABLED is on but TLS is off — the login gate applies only to the TLS HTTPS sites; nothing is gated until TLS is enabled."
+}
+
+# Compose interpolates `$` inside env-file values, so the operator's literal `$`
+# bytes must reach the file doubled (`$$`); compose then yields the original
+# bytes in the container. These two helpers are the single place that knows the
+# rule. Escape on WRITE (install.sh STEP 8); unescape on READ (the validator,
+# which must see exactly what the container sees). Collapsing first makes
+# escaping IDEMPOTENT: a raw value is escaped once, an already-escaped value is
+# left byte-identical, and a value already carrying `$$` never becomes `$$$$`.
+tls_compose_unescape() {  # VALUE -> literal bytes
+  local v="$1"
+  printf '%s\n' "${v//\$\$/\$}"
+}
+tls_compose_escape() {  # VALUE -> env-file form
+  local v
+  v="$(tls_compose_unescape "$1")"
+  printf '%s\n' "${v//\$/\$\$}"
+}
+
 tls_default_token_path() {
   case "${ACME_DNS_PROVIDER:-cloudflare}" in
     rfc2136) printf '%s\n' "${TLS_TOKEN_DIR}/rfc2136_key_secret" ;;
@@ -413,7 +437,12 @@ tls_variants() {
   else
     variants="off"
   fi
-  if tls_auth_is_on; then
+  # The (auth) snippet is imported only by the HTTPS sites. With TLS off there
+  # are no HTTPS sites, so the snippet would be dead config that real Caddy
+  # rejects (it parses the top-level `basic_auth` directive as a site address).
+  # Suppress it: a TLS-off render is byte-identical to the auth-off render no
+  # matter what AUTH_ENABLED says.
+  if tls_is_on && tls_auth_is_on; then
     variants="${variants} auth"
   fi
   printf '%s\n' "$variants"
@@ -599,8 +628,11 @@ tls_validate_caddyfile() {  # FILE
     # The auth-gated render keeps these placeholders too. AUTH_ENABLED=on with
     # an empty user or hash expands to `basic_auth {  }`, which `caddy validate`
     # rejects: the fail-closed path the installer relies on.
-    "HYBRID_AI_AUTH_USER=${HYBRID_AI_AUTH_USER:-}"
-    "HYBRID_AI_AUTH_HASH=${HYBRID_AI_AUTH_HASH:-}"
+    # Unescape first: the stack env stores these doubled (`$$`) for compose, and
+    # the container receives the collapsed bytes. The validator must see exactly
+    # what the container sees, or it validates a value the runtime never gets.
+    "HYBRID_AI_AUTH_USER=$(tls_compose_unescape "${HYBRID_AI_AUTH_USER:-}")"
+    "HYBRID_AI_AUTH_HASH=$(tls_compose_unescape "${HYBRID_AI_AUTH_HASH:-}")"
   )
   if command -v caddy >/dev/null 2>&1; then
     # Plain shell variables that were never exported: export them for the

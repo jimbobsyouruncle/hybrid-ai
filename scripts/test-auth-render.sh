@@ -16,7 +16,13 @@
 #        auth-on render. Without this case a TLS-on render keeps the imports but
 #        drops the snippet, and real Caddy rejects it with
 #        `File to import not found: auth`,
-#     4. fail-closed: with AUTH_ENABLED=on and an empty user or hash, the
+#     4. TLS OFF, auth ON: the (auth) snippet is suppressed entirely, because
+#        the HTTPS sites that import it do not exist with TLS off. The render
+#        must be byte-identical to the auth-off render (zero basic_auth, zero
+#        (auth), zero `import auth`) AND the installer must print the
+#        auth-without-TLS warning. Real Caddy rejects the opposite render with
+#        `parsed 'basic_auth' as a site address, but it is a known directive`,
+#     5. fail-closed: with AUTH_ENABLED=on and an empty user or hash, the
 #        rendered block is empty and the validator rejects it (a stub `caddy`
 #        expands the placeholders the way the container would).
 #   It never touches the real files and needs no root, Docker or Caddy.
@@ -220,6 +226,63 @@ if cmp -s -- "$WORK/on" "$WORK/tls_authoff"; then
   fail "TLS-on/auth-off render is byte-identical to the auth-on render (the gate is not gated)"
 else
   pass "TLS-on/auth-off render differs from the auth-on render"
+fi
+
+# --- TLS OFF, auth ON: the gate is suppressed and a warning is printed ------
+# The (auth) snippet is imported only by the HTTPS sites. With TLS off there
+# are no HTTPS sites, so the snippet is dead config and real Caddy rejects it
+# (`parsed 'basic_auth' as a site address, but it is a known directive`). The
+# correct behaviour is SUPPRESS: the render is byte-identical to the auth-off
+# render no matter what AUTH_ENABLED says. Unpatched, tls_variants returned
+# "off auth" and emitted the snippet, so this case fails against the base.
+TLS_ENABLED="no"
+AUTH_ENABLED="on"
+HYBRID_AI_AUTH_USER="DUMMY_AUTH_USER_NOT_A_SECRET"
+HYBRID_AI_AUTH_HASH="\$2a\$14\$DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY"
+
+if [[ "$(tls_variants)" == "off" ]]; then
+  pass "tls_variants is exactly 'off' with TLS off and AUTH_ENABLED=on (gate suppressed)"
+else
+  fail "tls_variants is not 'off' with TLS off and AUTH_ENABLED=on (got '$(tls_variants)')"
+fi
+
+# Render from the LIVE tls_variants, not a literal: an unpatched tls_variants
+# returns "off auth" here and emits the snippet, so the byte-identical and
+# zero-snippet checks fail too, not just the variants check above.
+render "$(tls_variants)" "$WORK/tls_authon"
+
+if cmp -s -- "$WORK/off" "$WORK/tls_authon"; then
+  pass "TLS-off/auth-on render is byte-identical to the auth-off render"
+else
+  fail "TLS-off/auth-on render differs from the auth-off render"
+  diff -u "$WORK/off" "$WORK/tls_authon" >&2 || true
+fi
+
+n_basic_auth_d="$(grep -c 'basic_auth' "$WORK/tls_authon" || true)"
+if [[ "$n_basic_auth_d" == "0" ]]; then
+  pass "TLS-off/auth-on render contains zero basic_auth lines"
+else
+  fail "TLS-off/auth-on render contains ${n_basic_auth_d} basic_auth lines (expected 0)"
+fi
+n_snippet_d="$(grep -c '^(auth) {' "$WORK/tls_authon" || true)"
+if [[ "$n_snippet_d" == "0" ]]; then
+  pass "TLS-off/auth-on render defines zero (auth) snippets"
+else
+  fail "TLS-off/auth-on render defines ${n_snippet_d} (auth) snippets (expected 0)"
+fi
+n_import_d="$(grep -c 'import auth' "$WORK/tls_authon" || true)"
+if [[ "$n_import_d" == "0" ]]; then
+  pass "TLS-off/auth-on render contains zero 'import auth' lines"
+else
+  fail "TLS-off/auth-on render contains ${n_import_d} 'import auth' lines (expected 0)"
+fi
+
+# The warning string install.sh emits in this exact combination, kept verbatim.
+EXPECTED_WARNING="WARNING: AUTH_ENABLED is on but TLS is off — the login gate applies only to the TLS HTTPS sites; nothing is gated until TLS is enabled."
+if tls_auth_without_tls_warning 2>&1 | grep -qF -- "$EXPECTED_WARNING"; then
+  pass "the auth-without-TLS warning is emitted verbatim"
+else
+  fail "the auth-without-TLS warning was not emitted verbatim"
 fi
 
 # --- fail-closed: empty credentials render an invalid block -----------------

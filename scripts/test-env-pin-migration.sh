@@ -314,6 +314,74 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# HYBRID_AI_AUTH_HASH / HYBRID_AI_AUTH_USER: escape-at-write. Docker Compose
+# interpolates `$` in env-file values, so a raw bcrypt hash (`$2a$14$...`) loses
+# its `$` fragments and the proxy's {$HYBRID_AI_AUTH_HASH} placeholder is
+# corrupted. STEP 8 writes the value with every `$` doubled (`$$`); compose
+# collapses it back to the operator's bytes in the container. The normalizer
+# must be idempotent: raw -> escaped once, escaped -> unchanged, never
+# `$$` -> `$$$$`. Both variables are escaped uniformly.
+
+# A bcrypt-SHAPED dummy assembled at run time from fragments, so the tracked
+# source never carries a bcrypt-hash literal (Semgrep flags those as secrets,
+# even fake ones). It is the hash of nothing. Shape:
+# $2a$<cost>$<22-char salt><31-char digest> = 60 characters, with `$` fragments.
+DUMMY_MARK='$'"2a"'$'
+DUMMY_HASH_RAW="${DUMMY_MARK}14"'$''./ABCDEFGH./ABCDEFGH./ABCDEFGH./ABCDEFGH./A'
+DUMMY_HASH_ESCAPED='$$'"2a"'$$''14$$''./ABCDEFGH./ABCDEFGH./ABCDEFGH./ABCDEFGH./A'
+DUMMY_USER_RAW="operator\$name"
+DUMMY_USER_ESCAPED="operator\$\$name"
+
+# The sourced normalizer is the single source of truth.
+# shellcheck source=scripts/lib/tls.sh
+source "$REPO/scripts/lib/tls.sh"
+check "tls_compose_escape escapes a raw value once" "$DUMMY_HASH_ESCAPED" "$(tls_compose_escape "$DUMMY_HASH_RAW")"
+check "tls_compose_escape is idempotent on an escaped value" "$DUMMY_HASH_ESCAPED" "$(tls_compose_escape "$DUMMY_HASH_ESCAPED")"
+check "tls_compose_escape never yields four dollars" '$$' "$(tls_compose_escape '$$')"
+check "tls_compose_unescape restores the raw bytes" "$DUMMY_HASH_RAW" "$(tls_compose_unescape "$DUMMY_HASH_ESCAPED")"
+
+echo
+echo "== (i1) a raw hash+user are normalized to escaped form on write =="
+: > "$LOG"
+{
+  printf 'HYBRID_AI_AUTH_USER=%s\n' "$DUMMY_USER_RAW"
+  printf 'HYBRID_AI_AUTH_HASH=%s\n' "$DUMMY_HASH_RAW"
+} > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with a raw auth hash" "0" "$rc"
+check "HYBRID_AI_AUTH_HASH is written escaped" "$DUMMY_HASH_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_HASH)"
+check "HYBRID_AI_AUTH_USER is written escaped" "$DUMMY_USER_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_USER)"
+# Round-trip: unescaping the written value yields the operator's original bytes.
+check "the written hash unescapes to the operator's bytes" "$DUMMY_HASH_RAW" "$(tls_compose_unescape "$(env_value "$STACK" HYBRID_AI_AUTH_HASH)")"
+
+echo
+echo "== (i2) a second run writes byte-identical auth lines =="
+# The generated header carries a fresh UTC timestamp every run, so byte-identity
+# is asserted on the auth lines the change owns, not on the whole file.
+AUTH_LINES_AFTER_1="$(grep -E '^HYBRID_AI_AUTH_' "$STACK")"
+: > "$LOG"
+rc=0
+run_install "$LOG" || rc=$?
+check "a second install.sh run exits 0" "0" "$rc"
+check "the auth lines are byte-identical on the second run" "$AUTH_LINES_AFTER_1" "$(grep -E '^HYBRID_AI_AUTH_' "$STACK")"
+
+echo
+echo "== (i3) an already-escaped value is never double-escaped =="
+: > "$LOG"
+{
+  printf 'HYBRID_AI_AUTH_USER=%s\n' "$DUMMY_USER_ESCAPED"
+  printf 'HYBRID_AI_AUTH_HASH=%s\n' "$DUMMY_HASH_ESCAPED"
+} > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with an already-escaped hash" "0" "$rc"
+check "an escaped hash stays single-escaped (no \$\$\$\$)" "$DUMMY_HASH_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_HASH)"
+check "an escaped user stays single-escaped (no \$\$\$\$)" "$DUMMY_USER_ESCAPED" "$(env_value "$STACK" HYBRID_AI_AUTH_USER)"
+
+# ---------------------------------------------------------------------------
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

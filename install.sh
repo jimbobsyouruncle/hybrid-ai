@@ -641,6 +641,11 @@ tls_prompt_flow
 if tls_is_on; then
   event "tls_enabled" "domain=${TLS_DOMAIN}" "validation=${TLS_VALIDATION}" \
     "ca=$(tls_ca_label "${TLS_CA_URL}")"
+elif tls_auth_is_on; then
+  # The gate renders only on the HTTPS sites, which do not exist while TLS is
+  # off, so AUTH_ENABLED=on gates nothing until TLS is enabled. warn() is
+  # warning-only: it never changes this script's exit status.
+  tls_auth_without_tls_warning
 fi
 
 # ---------------------------------------------------------------------------
@@ -1031,8 +1036,14 @@ CADDY_IMAGE=${CADDY_IMAGE:-hybrid-ai-caddy:2.11.7-dns}
 # Caddyfile is then byte-identical to the one without the gate. Turn it on with
 # AUTH_ENABLED=on plus HYBRID_AI_AUTH_USER and a bcrypt HYBRID_AI_AUTH_HASH.
 AUTH_ENABLED=${AUTH_ENABLED:-off}
-HYBRID_AI_AUTH_USER=${HYBRID_AI_AUTH_USER:-}
-HYBRID_AI_AUTH_HASH=${HYBRID_AI_AUTH_HASH:-}
+# The auth user and hash are escaped for Docker Compose: every literal dollar
+# sign is doubled so Compose's env-file interpolation yields the operator's
+# original bytes in the container (a raw bcrypt hash would lose its fragments).
+# The normalizer is idempotent: it collapses doubled signs back to one, then
+# escapes once, so a re-run is byte-identical and an already-escaped value is
+# never quadrupled. (scripts/lib/tls.sh: tls_compose_escape.)
+HYBRID_AI_AUTH_USER=$(tls_compose_escape "${HYBRID_AI_AUTH_USER:-}")
+HYBRID_AI_AUTH_HASH=$(tls_compose_escape "${HYBRID_AI_AUTH_HASH:-}")
 
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true

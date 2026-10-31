@@ -502,6 +502,13 @@ jobs:
         #   (a) TLS off                    -> variants `off`
         #   (b) TLS on, AUTH_ENABLED=off   -> variants `on dns` (the default)
         #   (c) TLS on, AUTH_ENABLED=on    -> variants `on dns auth`
+        #   (d) TLS off, AUTH_ENABLED=on   -> variants `off`, byte-identical to
+        #       case (a). The (auth) snippet is imported only by the HTTPS
+        #       sites, so with TLS off there are no sites to import it and it is
+        #       dead config: real Caddy rejects the render with `parsed
+        #       'basic_auth' as a site address, but it is a known directive`.
+        #       Case (d) derives its variants from tls_variants, so an unpatched
+        #       tls_variants that renders `off auth` fails here.
         # A dangling `import auth` (case b before the template gated the imports
         # by the auth variant) fails here with `File to import not found: auth`.
         # Placeholder credentials only; the DNS credential is passed by PATH
@@ -550,9 +557,16 @@ jobs:
             exit 1
           fi
 
-          check_case() {  # NAME VARIANTS
+          check_case() {  # NAME VARIANTS|auto
             local name="$1" variants="$2" out="$WORK/$1.Caddyfile"
             local imports snippets
+            # "auto" derives the variants from the live tls_variants(), so the
+            # assertion tracks the production selection rather than a literal:
+            # an unpatched tls_variants that appends `auth` with TLS off makes
+            # case (d) render `off auth` and fail the byte-identical check.
+            if [[ "$variants" == auto ]]; then
+              variants="$(tls_variants)"
+            fi
             tls_prepare_render_values "$variants"
             tls_render_to_file "${HYBRID_AI_APP_DIR}/status/Caddyfile.tmpl" "$variants" "$out"
             imports="$(grep -c 'import auth' "$out" || true)"
@@ -585,6 +599,28 @@ jobs:
           HYBRID_AI_AUTH_USER="$DUMMY_AUTH_USER"
           HYBRID_AI_AUTH_HASH="$DUMMY_AUTH_HASH"
           check_case tls_on_auth_on "on dns auth"
+
+          # (d) AUTH_ENABLED truthy + TLS off. The variants must be exactly
+          # "off" (suppress, not repair), the render must be BYTE-IDENTICAL to
+          # case (a)'s auth-off render, and real Caddy must accept it. Derived
+          # from tls_variants, so an unpatched tls_variants ("off auth") fails
+          # the "exactly off" and byte-identical assertions before Caddy runs.
+          TLS_ENABLED="no"
+          AUTH_ENABLED="on"
+          HYBRID_AI_AUTH_USER="$DUMMY_AUTH_USER"
+          HYBRID_AI_AUTH_HASH="$DUMMY_AUTH_HASH"
+          case_d_variants="$(tls_variants)"
+          if [[ "$case_d_variants" != "off" ]]; then
+            echo "::error::case (d) tls_variants is '${case_d_variants}', expected exactly 'off' with TLS off"
+            exit 1
+          fi
+          check_case tls_off_auth_on auto
+          if ! cmp -s -- "$WORK/tls_off.Caddyfile" "$WORK/tls_off_auth_on.Caddyfile"; then
+            echo "::error::case (d) render is not byte-identical to case (a) auth-off render"
+            diff -u "$WORK/tls_off.Caddyfile" "$WORK/tls_off_auth_on.Caddyfile" || true
+            exit 1
+          fi
+          echo "case (d) render is byte-identical to case (a)"
 
       - name: Compose schema check
         # Dummy values just so the file can be parsed. "config --quiet"
