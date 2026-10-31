@@ -37,10 +37,10 @@ REQUIRED_ENV = (
     "TLS_DOMAIN",
 )
 
-# Any well-formed bcrypt hash works here. It exists so a wrong username still
-# costs one bcrypt check, so timing cannot separate a wrong user from a wrong
-# password.
-_DUMMY_HASH = b"$2b$12$Up2aGt8qNEuCKkt9mduzLeKb2qzXXpfAcxJQxkqFW4iR7L6rFilRq"
+# Throwaway hash, generated once at import so no credential-shaped literal is
+# committed. It exists only so a wrong username still costs one real bcrypt
+# check, matching the timing of a wrong password.
+_DUMMY_HASH = bcrypt.hashpw(os.urandom(16), bcrypt.gensalt(rounds=12))
 
 _LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="en">
