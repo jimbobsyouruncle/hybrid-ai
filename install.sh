@@ -602,6 +602,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# STEP 4b. Login-gate session cookie signing key
+# ---------------------------------------------------------------------------
+# A fresh host needs a strong per-host key before the gate can be switched on.
+# Generated when unset (like WEBUI_SECRET_KEY) so flipping AUTH_ENABLED=on
+# later needs no extra run; never printed or logged. Rotating it is the
+# documented manual act (replace the value -> every live session drops).
+if [[ -z "${HYBRID_AI_AUTH_COOKIE_SECRET:-}" ]]; then
+  HYBRID_AI_AUTH_COOKIE_SECRET="$(openssl rand -hex 32)"
+  ok "Generated new HYBRID_AI_AUTH_COOKIE_SECRET."
+else
+  ok "Reusing existing HYBRID_AI_AUTH_COOKIE_SECRET (sessions preserved)."
+fi
+
+# ---------------------------------------------------------------------------
 # STEP 5. Credential and local domain prompts
 # ---------------------------------------------------------------------------
 prompt_secret() {
@@ -1049,11 +1063,12 @@ AUTH_ENABLED=${AUTH_ENABLED:-off}
 # never quadrupled. (scripts/lib/tls.sh: tls_compose_escape.)
 HYBRID_AI_AUTH_USER=$(tls_compose_escape "${HYBRID_AI_AUTH_USER:-}")
 HYBRID_AI_AUTH_HASH=$(tls_compose_escape "${HYBRID_AI_AUTH_HASH:-}")
-# The session cookie signing key. Generate it once, by hand, into this 0600
-# file with: openssl rand -hex 32
-# The installer only threads the value the owner has set; it never invents or
-# prints one. (The command is spelled without backticks: this block is an
-# unquoted heredoc, so a backtick would run at render time.)
+# The session cookie signing key. The installer generates a strong, per-host,
+# random value when it is unset (STEP 4b, openssl rand -hex 32) and writes it
+# here; it is never printed. Rotation is an explicit replacement of the value
+# in this 0600 file -> every live session drops. (The command is spelled
+# without backticks: this block is an unquoted heredoc, so a backtick would
+# run at render time.)
 HYBRID_AI_AUTH_COOKIE_SECRET=$(tls_compose_escape "${HYBRID_AI_AUTH_COOKIE_SECRET:-}")
 # Session lifetime in seconds. The auth service defaults to 86400 (24h) when
 # unset; the installer writes that default so the value is visible in the file.

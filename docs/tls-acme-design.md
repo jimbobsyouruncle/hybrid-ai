@@ -1064,14 +1064,24 @@ nothing to gate while TLS is off. `install.sh` prints a warning (never a hard
 failure, never a change of exit status) in that combination so the operator is
 not misled into thinking the gate is live.
 
+**Auto-generated cookie secret.** `install.sh` generates
+`HYBRID_AI_AUTH_COOKIE_SECRET` with `openssl rand -hex 32` when it is empty
+(STEP 4b), so a fresh host has a strong, per-host key without a manual step. The
+value is written to the 0600 stack env and is never logged or printed. This runs
+unconditionally when the variable is unset, not only when `AUTH_ENABLED=on`, so
+flipping the gate on later needs no extra run.
+
 **Fail-closed.** The old path relied on `caddy validate` rejecting a render
 whose `basic_auth` expanded to nothing. The render no longer carries the
 credentials, so the validator can no longer see them empty; the control moved
 to the installer. `tls_auth_fail_closed` runs BEFORE any render and dies when
 `AUTH_ENABLED=on` (with TLS on) and `HYBRID_AI_AUTH_USER`,
-`HYBRID_AI_AUTH_HASH` or `HYBRID_AI_AUTH_COOKIE_SECRET` is empty. It names
-every missing variable and is never tolerant of an empty value. The auth
-service's own start-up refusal (`auth/app.py`) stays as the second layer.
+`HYBRID_AI_AUTH_HASH` or `HYBRID_AI_AUTH_COOKIE_SECRET` is empty. Because
+`install.sh` auto-generates the cookie secret when unset, that secret branch is
+normally unreachable through the installer; it stays as defence in depth for
+hand-run and partial-env cases. It names every missing variable and is never
+tolerant of an empty value. The auth service's own start-up refusal
+(`auth/app.py`) stays as the second layer.
 `tls_validate_caddyfile`'s env list no longer carries the two credential
 placeholders, because the render no longer contains them.
 
