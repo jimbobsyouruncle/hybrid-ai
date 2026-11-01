@@ -106,11 +106,29 @@ STACK="$WORK/etc/hybrid-ai/stack.env"
 chmod 644 "$LAYOUT"
 
 # --- stubs -------------------------------------------------------------------
-for d in docker git jq openssl sqlite3 rsync tailscale hostname nproc \
+for d in docker git jq sqlite3 rsync tailscale hostname nproc \
          loginctl setfacl apt-get sudo restic; do
   # shellcheck disable=SC2016  # $0 must expand inside the generated stub
   printf '#!/usr/bin/env bash\nprintf "%%s stub\\n" "$0"\nexit 0\n' > "$BIN/$d"
 done
+# openssl: `rand -hex` yields a deterministic 64-char lowercase-hex string (so
+# the auto-generated cookie secret is a real, valid value), `rand -base64`
+# yields a fixed base64-looking string of the right length (install.sh also
+# uses it for the restic password), and any other invocation prints the old
+# generic stub line.
+cat > "$BIN/openssl" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "rand" && "${2:-}" == "-hex" ]]; then
+  printf '%064d\n' 0 | tr '0-9' 'a-f'
+  exit 0
+fi
+if [[ "${1:-}" == "rand" && "${2:-}" == "-base64" ]]; then
+  printf '%s\n' 'ZGV0ZXJtaW5pc3RpYy1yZXN0aWMtcGFzc3dvcmQtc3R1Yi1vbmx5QWJjZA=='
+  exit 0
+fi
+printf '%s stub\n' "$0"
+exit 0
+EOF
 # `id` answers without a real account; chown is a no-op.
 # shellcheck disable=SC2016  # $@ must expand inside the generated stub
 printf '#!/usr/bin/env bash\nif [[ "${1:-}" == "-u" ]]; then printf "1000\\n"; exit 0; fi\nif [[ "${1:-}" == "-g" ]]; then printf "1000\\n"; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$BIN/id"
@@ -409,6 +427,61 @@ chmod 600 "$STACK"
 rc=0
 run_install "$LOG" || rc=$?
 check "an owner-set HYBRID_AI_AUTH_COOKIE_MAX_AGE is preserved" "3600" "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_MAX_AGE)"
+
+echo
+echo "== (i5) an unset cookie secret is auto-generated as 64 lowercase hex =="
+: > "$LOG"
+: > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+GEN_SECRET="$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_SECRET)"
+check "install.sh exits 0 with no cookie secret seeded" "0" "$rc"
+# Regex test, not a fixed string: the value is generated, not a constant.
+if [[ "$GEN_SECRET" =~ ^[0-9a-f]{64}$ ]]; then
+  ok "the auto-generated cookie secret is 64 lowercase hex chars"
+else
+  bad "the auto-generated cookie secret is not 64 lowercase hex chars (got ${#GEN_SECRET} chars)"
+fi
+check "the generation message is logged" "1" "$(grep -c 'Generated new HYBRID_AI_AUTH_COOKIE_SECRET' "$LOG")"
+
+echo
+echo "== (i6) an operator-set cookie secret is preserved byte-for-byte =="
+OWNER_SECRET="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+: > "$LOG"
+{
+  printf 'HYBRID_AI_AUTH_COOKIE_SECRET=%s\n' "$OWNER_SECRET"
+} > "$STACK"
+chmod 600 "$STACK"
+rc=0
+run_install "$LOG" || rc=$?
+check "install.sh exits 0 with an owner-set cookie secret" "0" "$rc"
+check "the owner-set cookie secret is preserved" "$OWNER_SECRET" "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_SECRET)"
+check "the reuse message is logged" "1" "$(grep -c 'Reusing existing HYBRID_AI_AUTH_COOKIE_SECRET' "$LOG")"
+
+echo
+echo "== (i7) a second run reuses the generated secret unchanged =="
+SECRET_AFTER_1="$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_SECRET)"
+: > "$LOG"
+rc=0
+run_install "$LOG" || rc=$?
+check "the second run exits 0" "0" "$rc"
+check "the cookie secret line is unchanged on the second run" "$SECRET_AFTER_1" "$(env_value "$STACK" HYBRID_AI_AUTH_COOKIE_SECRET)"
+check "the second run logs the reuse message" "1" "$(grep -c 'Reusing existing HYBRID_AI_AUTH_COOKIE_SECRET' "$LOG")"
+
+echo
+echo "== (i8) the generated cookie secret is never leaked to the install log =="
+# Run over an empty stack env so the secret is freshly generated, then assert no
+# 64-hex token appears anywhere in the captured log.
+: > "$LOG"
+: > "$STACK"
+chmod 600 "$STACK"
+run_install "$LOG" || true
+if grep -Eq '[0-9a-f]{64}' "$LOG"; then
+  bad "the install log contains a 64-hex token (secret leak)"
+else
+  ok "the install log contains no 64-hex token"
+fi
 
 # ---------------------------------------------------------------------------
 echo

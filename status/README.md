@@ -205,21 +205,19 @@ When the gate is on, Caddy's `(auth)` snippet does a `forward_auth` to a small `
    docker run --rm caddy:2.11-alpine caddy hash-password
    ```
 
-2. Generate the cookie signing key once, by hand:
-
-   ```bash
-   openssl rand -hex 32
-   ```
-
-3. In the stack env file (`.env`, mode `0600`), set:
+2. In the stack env file (`.env`, mode `0600`), set:
 
    ```
    AUTH_ENABLED=on
    HYBRID_AI_AUTH_USER=<your-user-name>
    HYBRID_AI_AUTH_HASH=<the-bcrypt-hash-from-step-1>
-   HYBRID_AI_AUTH_COOKIE_SECRET=<the-hex-output-from-step-2>
    HYBRID_AI_AUTH_COOKIE_MAX_AGE=86400
    ```
+
+   The cookie signing key (`HYBRID_AI_AUTH_COOKIE_SECRET`) needs no entry here:
+   `install.sh` generates a strong, per-host, random value when it is unset and
+   writes it into the 0600 stack env. Set it yourself only to pin a value, and a
+   value you set is honoured and kept.
 
    Paste the hash **as-is**. Docker Compose interpolates `$` in env-file
    values, so `install.sh` writes the user, the hash and the cookie secret with
@@ -232,13 +230,13 @@ When the gate is on, Caddy's `(auth)` snippet does a `forward_auth` to a small `
    `install.sh` prints a warning in that combination. See
    `docs/tls-acme-design.md` section 4.7.
 
-4. Apply it:
+3. Apply it:
 
    ```bash
    ./install.sh
    ```
 
-The install fail-closes before it renders anything: with TLS on and `AUTH_ENABLED=on`, an empty `HYBRID_AI_AUTH_USER`, `HYBRID_AI_AUTH_HASH` or `HYBRID_AI_AUTH_COOKIE_SECRET` stops the install with a message naming every missing variable. The auth service refuses to start without them too, as a second layer.
+The install fail-closes before it renders anything: with TLS on and `AUTH_ENABLED=on`, an empty `HYBRID_AI_AUTH_USER` or `HYBRID_AI_AUTH_HASH` stops the install with a message naming every missing variable. The cookie secret is not a fail-closed case: `install.sh` generates it automatically when it is unset. A password is never invented. The auth service refuses to start without all of them too, as a second layer.
 
 The credentials reach only the `auth` service; they no longer go to the proxy container, and no credential literal is ever written into a tracked file.
 
