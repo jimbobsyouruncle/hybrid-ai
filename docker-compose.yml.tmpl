@@ -391,12 +391,6 @@ services:
       ACME_CA: ${ACME_CA:-https://acme-staging-v02.api.letsencrypt.org/directory}
       ACME_AUTO_HTTPS: ${ACME_AUTO_HTTPS:-disable_redirects}
 #@end
-      # Login gate for the *.daemonhub.dev HTTPS sites. The `(auth)` snippet
-      # reads these at container start; AUTH_ENABLED is render-time only, so it
-      # does not reach here. Both default empty: with AUTH_ENABLED off the
-      # Caddyfile imports neither the snippet nor the placeholders.
-      HYBRID_AI_AUTH_USER: ${HYBRID_AI_AUTH_USER:-}
-      HYBRID_AI_AUTH_HASH: ${HYBRID_AI_AUTH_HASH:-}
       DO_NOT_TRACK: "true"
     security_opt:
       - no-new-privileges:true
@@ -411,6 +405,47 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+#@region auth
+#@auth
+
+  # -------------------------------------------------------------------------
+  # AUTH :: the login-page session service behind the *.daemonhub.dev gate
+  #
+  # Emitted ONLY when AUTH_ENABLED=on (the auth variant), so the default render
+  # carries no `auth:` service at all. Caddy's `(auth)` snippet forward_auths to
+  # it; a valid session cookie passes, anything else gets the login page. It has
+  # no published ports: Caddy reaches it by service name on the stack network.
+  # -------------------------------------------------------------------------
+  auth:
+    build:
+      context: ./auth
+      dockerfile: Dockerfile
+    image: ${AUTH_IMAGE:-hybrid-ai-auth:1}
+    container_name: hybrid-ai-auth
+    restart: unless-stopped
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Credentials reach THIS container only, never the proxy. `$$` is escaped
+      # at write by install.sh STEP 8, so Compose yields the operator's bytes.
+      HYBRID_AI_AUTH_USER: ${HYBRID_AI_AUTH_USER:-}
+      HYBRID_AI_AUTH_HASH: ${HYBRID_AI_AUTH_HASH:-}
+      HYBRID_AI_AUTH_COOKIE_SECRET: ${HYBRID_AI_AUTH_COOKIE_SECRET:-}
+      HYBRID_AI_AUTH_COOKIE_MAX_AGE: ${HYBRID_AI_AUTH_COOKIE_MAX_AGE:-86400}
+      TLS_DOMAIN: ${TLS_DOMAIN:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://[IP_ADDRESS]:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+#@end
 
 #@region top_secrets
 #@dns

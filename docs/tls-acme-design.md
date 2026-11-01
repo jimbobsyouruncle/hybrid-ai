@@ -979,33 +979,45 @@ How each path is closed:
 | Rendered config | `{file./run/secrets/cloudflare_dns_token}` is a placeholder; the value is read at challenge time. |
 | Logs | Caddy's JSON logs record the challenge type and names, not the token. The installer's redaction in `status/app.py` (`REDACTIONS`) already covers key-shaped strings. |
 
-### 4.7 Login gate over the HTTPS sites (`basic_auth`)
+### 4.7 Login gate over the HTTPS sites (`forward_auth`)
 
 Every `*.daemonhub.dev` HTTPS site — the apex, `hermes.`, `status.` and the
-wildcard catch-all — can be gated behind HTTP Basic auth. The feature is
+wildcard catch-all — can be gated behind a login page. The feature is
 **off by default**: with `AUTH_ENABLED` unset or anything other than `on`, the
 rendered `status/Caddyfile` is byte-identical to the file without the gate, and
-the tracked `docker-compose.yml` differs only by the two pass-through
-`environment:` lines (`HYBRID_AI_AUTH_USER` and `HYBRID_AI_AUTH_HASH`), both
-defaulting empty.
+the tracked `docker-compose.yml` is byte-identical except that the two proxy
+pass-through lines are gone (the credentials now reach only the auth service;
+see below).
 
-**Mechanism.** A new managed region, `#@region auth`, wraps a reusable
-`(auth)` snippet:
+**Mechanism.** A managed region, `#@region auth`, wraps a reusable `(auth)`
+snippet:
 
 ```
 (auth) {
-	basic_auth { {$HYBRID_AI_AUTH_USER} {$HYBRID_AI_AUTH_HASH} }
+        forward_auth auth:8080 {
+                uri /verify
+        }
 }
 ```
 
+Caddy sends every gated request to the `auth` service's `/verify`. A valid
+session cookie answers 2xx and the request proceeds; anything else answers a
+non-2xx (a 302 to the login page with a `next` parameter), which Caddy copies
+back to the client unchanged. No credential literal is in the Caddyfile.
+
 The renderer adds the `auth` variant to `tls_variants` only when
 `AUTH_ENABLED=on`, exactly as the existing `dns`/`on`/`off` variants switch
-regions. The two placeholders keep their runtime form; the proxy's compose
-`environment:` block supplies `HYBRID_AI_AUTH_USER` and `HYBRID_AI_AUTH_HASH`
-at container start. `AUTH_ENABLED` is render-time only and never reaches the
-container.
+regions. The region also wraps the `auth` compose service (see below), so a
+default (AUTH-off) render carries no `auth:` service. `AUTH_ENABLED` is
+render-time only and never reaches a container.
 
-**Placement rule.** `basic_auth` must be imported the same way as the sibling
+**The login endpoint is not gated.** The apex HTTPS site gets a `handle /auth*`
+placed before the catch-all: it imports `trusted_only` and `secure_headers`
+and `reverse_proxy`s to `auth:8080`, but it never imports `auth`. The login
+page and its POST must be reachable without a session, or there is nothing to
+log in to. Like every sibling handle, it is LAN + tailnet only.
+
+**Placement rule.** `forward_auth` is imported the same way as the sibling
 `trusted_only` snippet: **inside every `handle`** of the apex block, because
 Caddy runs a matching handle before the site-level directives, so a site-level
 import alone would be bypassed. That is why `import auth` appears inside each
@@ -1019,17 +1031,31 @@ table). It serves one word with no detail. Gating it would break monitoring,
 and it discloses nothing. Every other handle and the `hermes.`/`status.`/
 wildcard site blocks are gated.
 
-**Auth is additive.** The `basic_auth` gate layers on top of the
-`trusted_only` network allowlist. Neither weakens the other: the allowlist
-still aborts untrusted addresses before the handle runs, and the gate is
-unchanged by it. The `http://*.jarvis.lan` sites and the http→https redirect
-block import neither, so both name families work during the transition.
+**Auth is additive.** The gate layers on top of the `trusted_only` network
+allowlist. Neither weakens the other: the allowlist still aborts untrusted
+addresses before the handle runs, and the gate is unchanged by it. The
+`http://*.jarvis.lan` sites and the http→https redirect block import neither,
+so both name families work during the transition. The `/auth*` handle is
+unauthenticated but `trusted_only`, so the login endpoint is not internet
+reachable.
+
+**The auth service.** A small service (`build: ./auth`) serves `GET /healthz`
+(open), `GET` and `POST /auth/login`, and `GET /verify`. It has no published
+ports: Caddy reaches it by service name on the stack network. It runs with
+`no-new-privileges:true` and a memory limit, and its healthcheck hits
+`/healthz`. It reads `HYBRID_AI_AUTH_USER`, `HYBRID_AI_AUTH_HASH`,
+`HYBRID_AI_AUTH_COOKIE_SECRET`, `HYBRID_AI_AUTH_COOKIE_MAX_AGE` and
+`TLS_DOMAIN` from the compose `environment:` block. The cookie
+(`hybrid_ai_auth=<exp>.<hmac-sha256-hex>`) is `Domain={TLS_DOMAIN}; Path=/;
+Secure; HttpOnly; SameSite=Lax`, so one login covers the apex, `hermes.`,
+`status.` and the wildcard. Rotation is re-keying the secret: every live
+session drops.
 
 **Suppressed when TLS is off.** The `(auth)` snippet is imported only by the
 `*.daemonhub.dev` HTTPS sites. With `TLS_ENABLED` not yes those sites do not
 exist, so the snippet has nothing to import it and it is dead config. Real
-Caddy rejects it: the top-level `basic_auth` directive is parsed as a site
-address and the render fails with `parsed 'basic_auth' as a site address, but
+Caddy rejects it: the top-level `forward_auth` directive is parsed as a site
+address and the render fails with `parsed 'forward_auth' as a site address, but
 it is a known directive; directives must appear in a site block`. So
 `tls_variants` appends the `auth` variant only when `tls_is_on` AND
 `tls_auth_is_on`: a TLS-off render is byte-identical to the auth-off render no
@@ -1038,28 +1064,31 @@ nothing to gate while TLS is off. `install.sh` prints a warning (never a hard
 failure, never a change of exit status) in that combination so the operator is
 not misled into thinking the gate is live.
 
+**Fail-closed.** The old path relied on `caddy validate` rejecting a render
+whose `basic_auth` expanded to nothing. The render no longer carries the
+credentials, so the validator can no longer see them empty; the control moved
+to the installer. `tls_auth_fail_closed` runs BEFORE any render and dies when
+`AUTH_ENABLED=on` (with TLS on) and `HYBRID_AI_AUTH_USER`,
+`HYBRID_AI_AUTH_HASH` or `HYBRID_AI_AUTH_COOKIE_SECRET` is empty. It names
+every missing variable and is never tolerant of an empty value. The auth
+service's own start-up refusal (`auth/app.py`) stays as the second layer.
+`tls_validate_caddyfile`'s env list no longer carries the two credential
+placeholders, because the render no longer contains them.
+
 **Compose env-file interpolation (`$`).** Docker Compose interpolates `$`
 inside env-file values, so a bcrypt hash written raw (`$2a$14$...`) loses its
 `$` fragments (`$iGdy2Gi` resolves to blank, and the deploy log shows `The
-"iGdy2Gi" variable is not set. Defaulting to a blank string.`). The proxy's
-`{$HYBRID_AI_AUTH_HASH}` placeholder then expands to a corrupted hash. The fix
-is escape-at-write, unescape-for-validation: `install.sh` STEP 8 writes
-`HYBRID_AI_AUTH_USER` and `HYBRID_AI_AUTH_HASH` with every `$` doubled (`$$`),
-and Compose collapses it back to the operator's original bytes in the
-container. The normalizer collapses to raw first and then escapes once
-(`tls_compose_escape`), so it is idempotent: a raw value is escaped once, an
-already-escaped value is byte-identical after a re-run, and a value carrying
-`$$` never becomes `$$$$`. The in-repo reader of the literal value —
-`tls_validate_caddyfile`, which passes the two variables to `caddy validate`
-via `-e` — unescapes `$$`→`$` first (`tls_compose_unescape`), so validation
-sees exactly what the container sees. Previously the validator passed the
-in-process intact value and so never reproduced a corrupted runtime hash: a
-validator/runtime divergence.
+"iGdy2Gi" variable is not set. Defaulting to a blank string.`). The fix is
+escape-at-write: `install.sh` STEP 8 writes `HYBRID_AI_AUTH_USER`,
+`HYBRID_AI_AUTH_HASH` and `HYBRID_AI_AUTH_COOKIE_SECRET` with every `$`
+doubled (`$$`), and Compose collapses it back to the operator's original bytes
+in the auth container. The normalizer collapses to raw first and then escapes
+once (`tls_compose_escape`), so it is idempotent: a raw value is escaped once,
+an already-escaped value is byte-identical after a re-run, and a value carrying
+`$$` never becomes `$$$$`.
 
 **Verification matrix.** `.github/workflows/validate.yml` renders the Caddyfile
-with real Caddy for four flag combinations. The first three predate this
-defect; the fourth closes the gap that let the TLS-off/auth-on render reach a
-host deploy because CI never covered it:
+with real Caddy for four flag combinations:
 
 | Case | TLS | AUTH_ENABLED | Variants | Expected |
 |---|---|---|---|---|
@@ -1071,26 +1100,19 @@ host deploy because CI never covered it:
 Case (d) derives its variants from the live `tls_variants`, so an unpatched
 `tls_variants` that renders `off auth` fails the "exactly `off`" and
 byte-identical assertions before Caddy is ever invoked. The offline fixture
-`scripts/test-auth-render.sh` covers the same case without Docker or Caddy.
+`scripts/test-auth-render.sh` covers the same case without Docker or Caddy, and
+covers the installer fail-closed rejections (empty user, hash or cookie
+secret) against the relocated control.
 
-**Fail-closed.** `tls_validate_caddyfile` already receives the proxy's runtime
-env, so its env list now includes the two auth values. With `AUTH_ENABLED=on`
-and an empty user or hash, the snippet expands to `basic_auth {  }`, which
-`caddy validate` rejects — the install stops before the bad config reaches the
-stack. The validator is never made tolerant of the empty case.
-
-**Known limitation (owner-accepted, 2026-10-29).** Basic auth has no
-server-side expiry. Browsers cache the credentials until closed, so the
-practical session is per browser session, not exactly 24 hours. A `forward_auth`
-session service that could expire credentials was considered and deferred
-(Option B). The gate transmits credentials on every request, which is
-acceptable only because every gated site is HTTPS: the http→https 308 happens
-before any credential is sent, and no `http://` site is gated. The wildcard
-catch-all now answers 401 before 404, a small enumeration-posture change,
-recorded as accepted.
-
----
-
+**Known limitation (owner-accepted, 2026-10-29).** The gate now has a real
+server-side expiry: the session cookie is `Max-Age` bounded
+(`HYBRID_AI_AUTH_COOKIE_MAX_AGE`, default 86400). Unlike the former Basic auth,
+closing the browser is not required to end a session, and a secret rotation
+drops every live session at once. The gate never transmits the password on
+later requests: only the signed cookie travels, and every gated site is HTTPS
+(the http→https 308 happens before anything is sent, and no `http://` site is
+gated). The wildcard catch-all now answers the redirect to login before 404, a
+small enumeration-posture change, recorded as accepted.
 ## 5. Renewal
 
 ### 5.1 Cadence

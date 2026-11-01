@@ -503,12 +503,15 @@ jobs:
         # with AUTH_ENABLED off and on. Proves the login gate is emitted ONLY
         # when AUTH_ENABLED=on: the off render is byte-identical to the tracked
         # status/Caddyfile with zero basic_auth hits; the on render defines the
-        # (auth) snippet once with the two env placeholders and imports it into
-        # exactly the 9 gated blocks (every apex HTTPS handle except
-        # handle /health, plus the hermes./status./wildcard site level), never
-        # into a http:// jarvis.lan site or the redirect block. Also proves the
-        # fail-closed path: AUTH_ENABLED=on with an empty user or hash renders a
-        # basic_auth block the validator rejects. Needs no Docker or Caddy.
+        # (auth) snippet once as the three-line forward_auth form (no credential
+        # placeholder) and imports it into exactly the 9 gated blocks (every
+        # apex HTTPS handle except handle /health, plus the
+        # hermes./status./wildcard site level), never into a http:// jarvis.lan
+        # site or the redirect block; the /auth* handle is present but NOT
+        # gated. Also proves the fail-closed path relocated to the installer:
+        # AUTH_ENABLED=on with an empty user, hash or cookie secret is rejected
+        # by tls_auth_fail_closed, naming every missing variable. Needs no Docker
+        # or Caddy.
         run: bash scripts/test-auth-render.sh
 
       - name: Validate rendered Caddyfiles with real Caddy (TLS x auth matrix)
@@ -523,7 +526,7 @@ jobs:
         #       case (a). The (auth) snippet is imported only by the HTTPS
         #       sites, so with TLS off there are no sites to import it and it is
         #       dead config: real Caddy rejects the render with `parsed
-        #       'basic_auth' as a site address, but it is a known directive`.
+        #       'forward_auth' as a site address, but it is a known directive`.
         #       Case (d) derives its variants from tls_variants, so an unpatched
         #       tls_variants that renders `off auth` fails here.
         # A dangling `import auth` (case b before the template gated the imports

@@ -638,6 +638,11 @@ prompt_secret PI_HOST            "Raspberry Pi MagicDNS (e.g., jarvis.tailXXXX.t
 # TLS_ENABLED not yes, this block asks one question and stops.
 tls_apply_flags
 tls_prompt_flow
+# Fail closed before any render or write: the render no longer carries the
+# credentials, so `caddy validate` can no longer catch an empty value. This is
+# the control that replaces it (docs/tls-acme-design.md section 4.7). No-op
+# unless TLS is on AND AUTH_ENABLED=on.
+tls_auth_fail_closed
 if tls_is_on; then
   event "tls_enabled" "domain=${TLS_DOMAIN}" "validation=${TLS_VALIDATION}" \
     "ca=$(tls_ca_label "${TLS_CA_URL}")"
@@ -1044,6 +1049,15 @@ AUTH_ENABLED=${AUTH_ENABLED:-off}
 # never quadrupled. (scripts/lib/tls.sh: tls_compose_escape.)
 HYBRID_AI_AUTH_USER=$(tls_compose_escape "${HYBRID_AI_AUTH_USER:-}")
 HYBRID_AI_AUTH_HASH=$(tls_compose_escape "${HYBRID_AI_AUTH_HASH:-}")
+# The session cookie signing key. Generate it once, by hand, into this 0600
+# file with: openssl rand -hex 32
+# The installer only threads the value the owner has set; it never invents or
+# prints one. (The command is spelled without backticks: this block is an
+# unquoted heredoc, so a backtick would run at render time.)
+HYBRID_AI_AUTH_COOKIE_SECRET=$(tls_compose_escape "${HYBRID_AI_AUTH_COOKIE_SECRET:-}")
+# Session lifetime in seconds. The auth service defaults to 86400 (24h) when
+# unset; the installer writes that default so the value is visible in the file.
+HYBRID_AI_AUTH_COOKIE_MAX_AGE=${HYBRID_AI_AUTH_COOKIE_MAX_AGE:-86400}
 
 # --- Zero-trace ------------------------------------------------------------
 SCARF_NO_ANALYTICS=true

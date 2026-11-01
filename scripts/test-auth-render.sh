@@ -21,10 +21,10 @@
 #        must be byte-identical to the auth-off render (zero basic_auth, zero
 #        (auth), zero `import auth`) AND the installer must print the
 #        auth-without-TLS warning. Real Caddy rejects the opposite render with
-#        `parsed 'basic_auth' as a site address, but it is a known directive`,
-#     5. fail-closed: with AUTH_ENABLED=on and an empty user or hash, the
-#        rendered block is empty and the validator rejects it (a stub `caddy`
-#        expands the placeholders the way the container would).
+#        `parsed 'forward_auth' as a site address, but it is a known directive`,
+#     5. fail-closed: with AUTH_ENABLED=on and an empty user, hash or cookie
+#        secret, the installer's tls_auth_fail_closed check rejects the install
+#        before any render, naming every missing variable.
 #   It never touches the real files and needs no root, Docker or Caddy.
 #
 # HOW TO RUN IT:
@@ -114,28 +114,42 @@ fi
 
 render "on dns auth" "$WORK/on"
 
-# The (auth) snippet: defined once, with the two env placeholders and no
-# literal credential.
+# The (auth) snippet: defined once, a three-line forward_auth to the auth
+# service. Credentials never enter the Caddyfile any more.
 n_basic_auth="$(grep -c 'basic_auth' "$WORK/on" || true)"
-if [[ "$n_basic_auth" == "1" ]]; then
-  pass "auth-on render defines basic_auth exactly once (the (auth) snippet)"
+if [[ "$n_basic_auth" == "0" ]]; then
+  pass "auth-on render contains zero basic_auth tokens (the gate is forward_auth)"
 else
-  fail "auth-on render has ${n_basic_auth} basic_auth lines (expected 1)"
+  fail "auth-on render has ${n_basic_auth} basic_auth lines (expected 0)"
 fi
-# The snippet must be the MULTI-LINE form: Caddy requires a block's `{` to be
-# the last token on its line, so `basic_auth { user hash }` does not adapt.
-auth_body_line="$(printf '\t\t'){\$HYBRID_AI_AUTH_USER} {\$HYBRID_AI_AUTH_HASH}"
-if grep -qE '^[[:space:]]*basic_auth \{[[:space:]]*$' "$WORK/on" \
-   && grep -qxF -- "$auth_body_line" "$WORK/on"; then
-  pass "the (auth) snippet uses the multi-line form with the two env placeholders"
-else
-  fail "the (auth) snippet is not the expected multi-line placeholder form"
-fi
+# The snippet must be the THREE-LINE form: Caddy requires a block's `{` to be
+# the last token on its line, so `forward_auth auth:8080 { uri /verify }` does
+# not adapt. The body doubles as a proof that no credential placeholder remains.
+auth_snippet="$(printf '(auth) {\n\tforward_auth auth:8080 {\n\t\turi /verify\n\t}\n}')"
 if awk '/^\(auth\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$WORK/on" \
-     | grep -qE 'basic_auth \{.*[^[:space:]]'; then
-  fail "the (auth) snippet puts tokens after '{' on the same line (Caddy rejects this)"
+     | diff -q -- - <(printf '%s\n' "$auth_snippet") >/dev/null; then
+  pass "the (auth) snippet is the three-line forward_auth form"
 else
-  pass "the (auth) snippet puts no token after '{' on the same line"
+  fail "the (auth) snippet is not the expected three-line forward_auth form"
+  awk '/^\(auth\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$WORK/on" >&2
+fi
+if grep -q 'HYBRID_AI_AUTH_USER\|HYBRID_AI_AUTH_HASH' "$WORK/on"; then
+  fail "an auth credential placeholder survived into the Caddyfile render"
+else
+  pass "no auth credential placeholder appears in the Caddyfile render"
+fi
+# The login endpoint must be reachable WITHOUT the gate; it is a plain handle.
+if awk '/^[[:space:]]*handle \/auth\* \{/{f=1} f{print} f&&/^[[:space:]]*\}$/{exit}' "$WORK/on" \
+     | grep -qE 'import auth|forward_auth'; then
+  fail "the /auth* handle is gated (the login endpoint must be reachable)"
+else
+  pass "the /auth* handle is NOT gated (login endpoint reachable)"
+fi
+if awk '/^[[:space:]]*handle \/auth\* \{/{f=1} f{print} f&&/^[[:space:]]*\}$/{exit}' "$WORK/on" \
+     | grep -q '^[[:space:]]*import trusted_only'; then
+  pass "the /auth* handle imports trusted_only (LAN + tailnet only)"
+else
+  fail "the /auth* handle does not import trusted_only"
 fi
 
 # `import auth` is the gate; it must appear once per gated site or handle.
@@ -285,137 +299,100 @@ else
   fail "the auth-without-TLS warning was not emitted verbatim"
 fi
 
-# --- fail-closed: empty credentials render an invalid block -----------------
-# A stub `caddy` that applies the same two rules the real caddyfile adapter
-# applies, so the fail-closed cases exercise the shape production renders:
-#   1. GRAMMAR: a block's `{` must be the last token on its line. Anything
-#      after it is "Unexpected next token after '{' on same line" (the error
-#      the inline `basic_auth { user hash }` form produced on the host).
-#   2. ARGUMENTS: it expands the two auth placeholders from the exported
-#      environment the way the container would, then requires exactly two
-#      arguments. Real Caddy says "username and password cannot be empty or
-#      missing" when either is blank.
-# It never makes the validator tolerant: a failure is always a failure.
-# Limitation: this is an approximation of the adapter. The true proof is a real
-# `caddy validate` (and, post-merge, the host run).
-caddy() {
-  # The validator calls: caddy validate --adapter caddyfile --config FILE.
-  local file="${5:-}" body bad_line
-  bad_line="$(awk '
-    {
-      sub(/#.*/, "")
-      # A standalone `{` token (a block opener) followed by more tokens on the
-      # same line. `{$VAR}` and `{file./run/secrets/...}` are placeholders, not
-      # block openers, so they need whitespace after the brace to match.
-      if (match($0, /(^|[ \t])\{[ \t]+[^ \t]/)) { print NR; exit }
-    }' "$file")"
-  if [[ -n "$bad_line" ]]; then
-    printf "caddy: adapting config using caddyfile: Unexpected next token after '{' on same line, at %s:%s\n" \
-      "$file" "$bad_line" >&2
-    return 1
-  fi
-  body="$(awk '
-    /^[ \t]*basic_auth[ \t]*\{[ \t]*$/ { f = 1; next }
-    f && /^[ \t]*\}[ \t]*$/ { f = 0; next }
-    f { print }
-  ' "$file")"
-  body="${body//\{\$HYBRID_AI_AUTH_USER\}/${HYBRID_AI_AUTH_USER:-}}"
-  body="${body//\{\$HYBRID_AI_AUTH_HASH\}/${HYBRID_AI_AUTH_HASH:-}}"
-  # basic_auth needs exactly two arguments: a user name and a hash.
-  local -a argv=()
-  read -r -a argv <<< "${body:-}"
-  if (( ${#argv[@]} != 2 )); then
-    printf 'caddy: adapting config using caddyfile: basic_auth: username and password cannot be empty or missing (%d arguments)\n' \
-      "${#argv[@]}" >&2
-    return 1
-  fi
-  return 0
-}
-export -f caddy
+# --- the env allowlist covers the two new names ------------------------------
+# tls_load_env_file_values feeds the renderer the auth values it must see. It is
+# an allowlist, so a name it does not list is silently dropped. The cookie
+# secret and the max-age must both be read back from a stack env file. This case
+# FAILS against the unpatched base, whose allowlist named only USER and HASH.
+ALLOWLIST_FILE="$WORK/allowlist.env"
+cat > "$ALLOWLIST_FILE" <<'ENVEOF'
+HYBRID_AI_AUTH_COOKIE_SECRET=dummy-cookie-secret-not-a-secret
+HYBRID_AI_AUTH_COOKIE_MAX_AGE=12345
+ENVEOF
+unset HYBRID_AI_AUTH_COOKIE_SECRET HYBRID_AI_AUTH_COOKIE_MAX_AGE
+tls_load_env_file_values "$ALLOWLIST_FILE"
+if [[ "${HYBRID_AI_AUTH_COOKIE_SECRET:-}" == "dummy-cookie-secret-not-a-secret" ]]; then
+  pass "tls_load_env_file_values reads HYBRID_AI_AUTH_COOKIE_SECRET"
+else
+  fail "tls_load_env_file_values dropped HYBRID_AI_AUTH_COOKIE_SECRET (got '${HYBRID_AI_AUTH_COOKIE_SECRET:-}')"
+fi
+if [[ "${HYBRID_AI_AUTH_COOKIE_MAX_AGE:-}" == "12345" ]]; then
+  pass "tls_load_env_file_values reads HYBRID_AI_AUTH_COOKIE_MAX_AGE"
+else
+  fail "tls_load_env_file_values dropped HYBRID_AI_AUTH_COOKIE_MAX_AGE (got '${HYBRID_AI_AUTH_COOKIE_MAX_AGE:-}')"
+fi
 
-AUTH_ENABLED="on"
+# --- fail-closed: relocated to the installer --------------------------------
+# The gate no longer carries the credentials, so `caddy validate` can no longer
+# see them empty. The control moved to the installer: tls_auth_fail_closed runs
+# BEFORE any render and dies when AUTH_ENABLED=on (with TLS on) and the user,
+# hash or cookie secret is empty. It is never tolerant of an empty value. The
+# three reject directions below all FAIL against the unpatched base, which had
+# no such check at all (the base relied on `caddy validate`, and this render
+# carries no placeholder for it to reject).
 TLS_ENABLED="yes"
-TLS_DOMAIN="daemonhub.dev"
-ACME_EMAIL="[EMAIL]"
-TLS_VALIDATION="dns"
-ACME_DNS_PROVIDER="cloudflare"
-ACME_CA="$TLS_CA_STAGING_URL"
+AUTH_ENABLED="on"
 
-# The DNS render is validated in a container now (a bare host caddy cannot be
-# given the DNS-01 token), so provide a non-empty token file and a docker stub
-# that routes to the same caddy stub. The stub proves the auth rules; the
-# container itself is exercised by the real-Caddy CI matrix.
-TOKEN_FILE="$WORK/dummy_dns_token"
-printf '%s\n' 'dummy-token-for-test-only-not-a-secret' > "$TOKEN_FILE"
-HYBRID_AI_TLS_TOKEN_FILE="$TOKEN_FILE"
-
-validate_render() {  # FILE
-  (
-    docker() {
-      if [[ "${1:-}" == info ]]; then return 0; fi
-      # docker run --rm --network none --entrypoint caddy -e … \
-      #   -v HOME_FILE:/etc/caddy/Caddyfile:ro IMAGE validate --adapter caddyfile --config /etc/caddy/Caddyfile
-      # The container sees /etc/caddy/Caddyfile; the stub validates the host
-      # file that mount came from, and propagates its verdict like docker run.
-      local a prev="" host_file=""
-      for a in "$@"; do
-        case "$a" in
-          *:/etc/caddy/Caddyfile:ro) host_file="${a%:/etc/caddy/Caddyfile:ro}" ;;
-        esac
-        # The validator hands the container its runtime values with -e; apply
-        # them here so the stub sees exactly what the container would.
-        if [[ "$prev" == "-e" ]]; then
-          case "${a%%=*}" in
-            HYBRID_AI_AUTH_USER|HYBRID_AI_AUTH_HASH|ACME_EMAIL|ACME_CA|TLS_DOMAIN|LOCAL_DOMAIN|ACME_AUTO_HTTPS)
-              export "${a?}" ;;
-          esac
-        fi
-        prev="$a"
-      done
-      [[ -n "$host_file" ]] || return 1
-      caddy validate --adapter caddyfile --config "$host_file"
-    }
-    export -f docker caddy
-    tls_validate_caddyfile "$1"
-  )
+check_fail_closed() {  # NAME MSG_OUT
+  local name="$1" msg="$2"
+  if grep -q "$name" <<<"$msg"; then
+    pass "fail-closed: empty ${name} is rejected and named in the message"
+  else
+    fail "fail-closed: empty ${name} reject message did not name it (got: ${msg})"
+  fi
 }
 
-# Empty hash (user present): must FAIL validation.
+# Empty hash (user and secret present): must be REJECTED.
 HYBRID_AI_AUTH_USER="DUMMY_AUTH_USER_NOT_A_SECRET"
 HYBRID_AI_AUTH_HASH=""
-render "on dns auth" "$WORK/empty_hash"
-empty_hash_rc=0
-validate_render "$WORK/empty_hash" >/dev/null 2>&1 || empty_hash_rc=$?
-if (( empty_hash_rc != 0 )); then
-  pass "fail-closed: AUTH_ENABLED=on with an empty hash is rejected"
+HYBRID_AI_AUTH_COOKIE_SECRET="dummy-cookie-secret-not-a-secret"
+msg=""
+if ! msg="$(tls_auth_fail_closed 2>&1)"; then
+  check_fail_closed HYBRID_AI_AUTH_HASH "$msg"
 else
   fail "fail-closed: AUTH_ENABLED=on with an empty hash was ACCEPTED"
 fi
 
-# Empty user (hash present): must FAIL validation.
+# Empty user (hash and secret present): must be REJECTED.
 HYBRID_AI_AUTH_USER=""
 HYBRID_AI_AUTH_HASH="\$2a\$14\$DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY"
-render "on dns auth" "$WORK/empty_user"
-empty_user_rc=0
-validate_render "$WORK/empty_user" >/dev/null 2>&1 || empty_user_rc=$?
-if (( empty_user_rc != 0 )); then
-  pass "fail-closed: AUTH_ENABLED=on with an empty user is rejected"
+HYBRID_AI_AUTH_COOKIE_SECRET="dummy-cookie-secret-not-a-secret"
+msg=""
+if ! msg="$(tls_auth_fail_closed 2>&1)"; then
+  check_fail_closed HYBRID_AI_AUTH_USER "$msg"
 else
   fail "fail-closed: AUTH_ENABLED=on with an empty user was ACCEPTED"
 fi
 
-# Both present: must PASS validation.
+# Empty cookie secret (both credentials present): must be REJECTED.
 HYBRID_AI_AUTH_USER="DUMMY_AUTH_USER_NOT_A_SECRET"
 HYBRID_AI_AUTH_HASH="\$2a\$14\$DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY"
-render "on dns auth" "$WORK/ok_auth"
-ok_rc=0
-validate_render "$WORK/ok_auth" >/dev/null 2>&1 || ok_rc=$?
-if (( ok_rc == 0 )); then
-  pass "AUTH_ENABLED=on with both credentials set validates"
+HYBRID_AI_AUTH_COOKIE_SECRET=""
+msg=""
+if ! msg="$(tls_auth_fail_closed 2>&1)"; then
+  check_fail_closed HYBRID_AI_AUTH_COOKIE_SECRET "$msg"
 else
-  fail "AUTH_ENABLED=on with both credentials set was rejected (rc ${ok_rc})"
+  fail "fail-closed: AUTH_ENABLED=on with an empty cookie secret was ACCEPTED"
 fi
-unset -f caddy
+
+# All present: must PASS (return 0, no message).
+HYBRID_AI_AUTH_USER="DUMMY_AUTH_USER_NOT_A_SECRET"
+HYBRID_AI_AUTH_HASH="\$2a\$14\$DUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY"
+HYBRID_AI_AUTH_COOKIE_SECRET="dummy-cookie-secret-not-a-secret"
+if tls_auth_fail_closed >/dev/null 2>&1; then
+  pass "AUTH_ENABLED=on with user, hash and cookie secret set passes the fail-closed check"
+else
+  fail "AUTH_ENABLED=on with all three set was rejected by the fail-closed check"
+fi
+
+# The check is scoped to the auth variant: with TLS off there is no gate, so it
+# must not fire (the installer warns instead).
+TLS_ENABLED="no"
+if tls_auth_fail_closed >/dev/null 2>&1; then
+  pass "fail-closed check does not fire with TLS off (no gate to protect)"
+else
+  fail "fail-closed check fired with TLS off (it must only guard the auth variant)"
+fi
 
 if (( FAILED )); then
   printf '\nsome checks failed\n' >&2

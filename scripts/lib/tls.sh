@@ -98,6 +98,22 @@ tls_auth_without_tls_warning() {
   tls__warn "WARNING: AUTH_ENABLED is on but TLS is off — the login gate applies only to the TLS HTTPS sites; nothing is gated until TLS is enabled."
 }
 
+# Fail closed BEFORE any render. The render no longer carries the credentials, so
+# `caddy validate` can no longer catch an empty value; this is the control that
+# replaces it. Never tolerant of an empty credential or secret: with the auth
+# variant live, a missing value would gate nothing (or gate with a forgeable
+# cookie), so the install must stop and name every missing variable.
+tls_auth_fail_closed() {
+  tls_is_on && tls_auth_is_on || return 0
+  local missing=()
+  [[ -n "${HYBRID_AI_AUTH_USER:-}" ]] || missing+=(HYBRID_AI_AUTH_USER)
+  [[ -n "${HYBRID_AI_AUTH_HASH:-}" ]] || missing+=(HYBRID_AI_AUTH_HASH)
+  [[ -n "${HYBRID_AI_AUTH_COOKIE_SECRET:-}" ]] || missing+=(HYBRID_AI_AUTH_COOKIE_SECRET)
+  if (( ${#missing[@]} > 0 )); then
+    tls__die "AUTH_ENABLED=on with TLS on requires HYBRID_AI_AUTH_USER, HYBRID_AI_AUTH_HASH and HYBRID_AI_AUTH_COOKIE_SECRET; missing: ${missing[*]}"
+  fi
+}
+
 # Compose interpolates `$` inside env-file values, so the operator's literal `$`
 # bytes must reach the file doubled (`$$`); compose then yields the original
 # bytes in the container. These two helpers are the single place that knows the
@@ -439,7 +455,7 @@ tls_variants() {
   fi
   # The (auth) snippet is imported only by the HTTPS sites. With TLS off there
   # are no HTTPS sites, so the snippet would be dead config that real Caddy
-  # rejects (it parses the top-level `basic_auth` directive as a site address).
+  # rejects (it parses the top-level `forward_auth` directive as a site address).
   # Suppress it: a TLS-off render is byte-identical to the auth-off render no
   # matter what AUTH_ENABLED says.
   if tls_is_on && tls_auth_is_on; then
@@ -648,14 +664,11 @@ tls_validate_caddyfile() {  # FILE
     "ACME_CA=${TLS_CA_URL:-${ACME_CA:-}}"
     "ACME_AUTO_HTTPS=${ACME_AUTO_HTTPS:-disable_redirects}"
     "LOCAL_DOMAIN=${LOCAL_DOMAIN:-}"
-    # The auth-gated render keeps these placeholders too. AUTH_ENABLED=on with
-    # an empty user or hash expands to `basic_auth {  }`, which `caddy validate`
-    # rejects: the fail-closed path the installer relies on.
-    # Unescape first: the stack env stores these doubled (`$$`) for compose, and
-    # the container receives the collapsed bytes. The validator must see exactly
-    # what the container sees, or it validates a value the runtime never gets.
-    "HYBRID_AI_AUTH_USER=$(tls_compose_unescape "${HYBRID_AI_AUTH_USER:-}")"
-    "HYBRID_AI_AUTH_HASH=$(tls_compose_unescape "${HYBRID_AI_AUTH_HASH:-}")"
+    # The auth-gated render no longer carries the credentials: the (auth)
+    # snippet is `forward_auth auth:8080` and the auth service reads its own
+    # environment. So there is nothing here to validate empty; the fail-closed
+    # control moved to the installer (install.sh -> tls_auth_fail_closed, which
+    # rejects an empty user, hash or cookie secret before any render).
   )
   # A DNS-01 render must be validated in a container: `caddy validate`
   # provisions the TLS app and the solver reads its credential from a file, and
@@ -901,7 +914,8 @@ tls_load_env_file_values() {  # FILE
       TLS_ENABLED|TLS_DOMAIN|ACME_EMAIL|ACME_CA|TLS_VALIDATION|ACME_DNS_PROVIDER|\
       HYBRID_AI_TLS_TOKEN_FILE|TLS_HOSTS|ACME_AUTO_HTTPS|CADDY_IMAGE|LOCAL_DOMAIN|\
       RFC2136_KEY_NAME|RFC2136_SERVER|AUTH_ENABLED|HYBRID_AI_AUTH_USER|\
-      HYBRID_AI_AUTH_HASH) ;;
+      HYBRID_AI_AUTH_HASH|HYBRID_AI_AUTH_COOKIE_SECRET|\
+      HYBRID_AI_AUTH_COOKIE_MAX_AGE) ;;
       *) continue ;;
     esac
     [[ -n "${!key:-}" ]] && continue
