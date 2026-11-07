@@ -847,12 +847,23 @@ mkdir -p "${STAGING_DIR}/databases" "${STAGING_DIR}/files" "${STAGING_DIR}/env" 
          "${STAGING_DIR}/host" "${STAGING_DIR}/hermes" "${STAGING_DIR}/openhands"
 chmod 700 "$STAGING_DIR"
 
-if pause_webui; then
+# A dry run measures; it never stops the fleet. Guard the pause call site so no
+# docker pause/inspect happens there, and still record a sane CONSISTENCY. In
+# external mode the root helper did the pausing, so read its list (no docker
+# command) to report a truthful value; locally nothing was paused.
+if [[ "$MODE" == "dryrun" ]]; then
+  if (( EXTERNAL_CONTROL )); then
+    read_paused_containers
+    if (( ${#PAUSED_CONTAINERS[@]} > 0 )); then CONSISTENCY="paused"; else CONSISTENCY="online"; fi
+  else
+    CONSISTENCY="online"
+  fi
+elif pause_webui; then
   CONSISTENCY="paused"
-  [[ "$MODE" == "dryrun" ]] || ok "Paused for point-in-time capture: ${PAUSED_CONTAINERS[*]}"
+  ok "Paused for point-in-time capture: ${PAUSED_CONTAINERS[*]}"
 else
   CONSISTENCY="online"
-  [[ "$MODE" == "dryrun" ]] || warn "Could not pause containers; capturing live (see BACKUP_NO_PAUSE)."
+  warn "Could not pause containers; capturing live (see BACKUP_NO_PAUSE)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1134,10 @@ fi
 
 if [[ -d "${OPENHANDS_STATE_DIR}" ]]; then
   rc=0
+  # v1_conversations/ is an orphaned legacy tree (~6.2 GiB) that nothing reads;
+  # .keys, openhands.db and settings.json are live state and stay staged.
   rsync -a --exclude='cache/' --exclude='tmp/' --exclude='logs/' \
+    --exclude='v1_conversations/' \
     "${OPENHANDS_STATE_DIR}/" "${STAGING_DIR}/openhands/" 2>/dev/null || rc=$?
   rsync_classify "$rc" "OpenHands state" "openhands"
 fi
@@ -1417,7 +1431,9 @@ dry_run_report() {
   STAGED_MB="${STAGED_MB:-?}"
   log "Dry run -- nothing will be uploaded."
   printf '\n  Staged %s MB:\n\n' "$STAGED_MB"
-  find "$STAGING_DIR" -maxdepth 3 -mindepth 1 -printf '    %y %P\n' 2>/dev/null | head -40
+  # head -40 closes the pipe early; under pipefail that is SIGPIPE (141) and
+  # would abort the report. Absorb it, as elsewhere in this file.
+  find "$STAGING_DIR" -maxdepth 3 -mindepth 1 -printf '    %y %P\n' 2>/dev/null | head -40 || true
   printf '\n  Repository: %s\n\n' "${RESTIC_REPOSITORY}"
   exit 0
 }

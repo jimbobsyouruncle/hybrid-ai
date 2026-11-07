@@ -61,6 +61,7 @@ Open WebUI stores essentially all of its state in SQLite, not in config files. T
 | Docker images | Pinned by version in `docker-compose.yml` | `install.sh` pulls them |
 | systemd units, linger | Generated deterministically | `install.sh` reinstalls them |
 | Cached embeddings model | Re-downloaded on first use | Nothing |
+| OpenHands `v1_conversations/` | An orphaned legacy tree (about 6.2 GiB) that nothing reads; capturing it dominated every snapshot for no restore value. It is excluded from the OpenHands capture (`cache/`, `tmp/` and `logs/` are excluded too) | Nothing. Live OpenHands state — `.keys/`, `openhands.db`, `settings.json` — **is** captured |
 
 **Net effect:** a bare new Pi needs the prerequisites installed, the repo cloned, your backup credentials recreated, and one `restore.sh` run. Then `sudo tailscale up` and `./install.sh`. Everything else returns on its own.
 
@@ -95,6 +96,8 @@ Chroma keeps document metadata in `chroma.sqlite3` but keeps the actual vector i
 Snapshotting the SQLite half at 03:15:00 and copying the binary half at 03:15:04 means that if a document was embedded in between, **the two halves disagree**. You would restore a knowledge base whose metadata references vectors that are not in the index.
 
 So the backup briefly **pauses** the Open WebUI container for the capture. `docker pause` freezes the process with `SIGSTOP` — no shutdown, no restart, no dropped connections, typically 2–10 seconds. Everything is then captured from a single frozen point in time. The container is unpaused before the slow upload begins, and also from the EXIT trap, so a crash mid-run cannot leave it frozen.
+
+A `--dry-run` never pauses: it measures the capture and reports, and pauses nothing.
 
 Set `BACKUP_NO_PAUSE=1` to skip this. Zero downtime, but only safe if you are certain nothing is being embedded during the backup window.
 
@@ -289,7 +292,7 @@ success. The reader was blind, not the backup.
 
 ```bash
 ./backup/backup.sh                    # run a backup now
-./backup/backup.sh --dry-run          # show what would be uploaded
+./backup/backup.sh --dry-run          # stage, report, upload nothing, pause nothing
 ./backup/backup.sh --check            # verify integrity (slow, reads data)
 ./backup/restore.sh --list            # list snapshots
 ./backup/restore.sh --test            # rehearse a restore — DO THIS QUARTERLY

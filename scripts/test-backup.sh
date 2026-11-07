@@ -36,6 +36,16 @@
 #   t3/t4) a HYBRID_AI_BACKUP_CRED_DIR file at 0644 or 0400 still dies, with the
 #      chmod 600 advice
 #   t5) a systemd-path file at a bad mode dies with NO impossible chmod advice
+#   u1/u2) the backup log's mode is 0600 in user mode, 0640 in system mode
+#   v1/v2) --dry-run reaches its report and exits 0 (v1 fails on the base copy)
+#   w1/w2) backups/ is never captured into backups (self-recursion)
+#   x1) the OpenHands capture excludes v1_conversations/ and still stages .keys,
+#      openhands.db and settings.json (x1 fails on the base copy)
+#   y1/y2) a staging tree larger than 40 entries still reaches "Repository:"
+#      and exits 0: y1 is the base copy (SIGPIPE), y2 the fixed script
+#   z1-z3) a dry run never pauses the live stack; a real run pauses exactly
+#      open-webui then hermes-agent and unpauses both; external dry run issues
+#      no docker command at all and reports the helper's consistency
 #
 # Exit 0 when every case passes, non-zero otherwise. Exit 2 on usage error.
 # ---------------------------------------------------------------------------
@@ -871,6 +881,165 @@ if [[ -n "${PRUNE_NAMES:-}" ]]; then
 else
   echo "SKIP: case w2: prune names unavailable" >&2
 fi
+
+# ---------------------------------------------------------------------------
+# Cases x1, y1/y2, z1-z3: the b87 follow-up defects.
+#
+# A PRISTINE base copy (origin/main at this branch's base) is read into a
+# SEPARATE scratch repo so the fail-before assertions never overwrite the fixed
+# $BACKUP. It uses the same env/stub plumbing as the cases above.
+# ---------------------------------------------------------------------------
+BASE_SHA="3831bc9e38c01ab9246cfcff630124a79996251d"
+BASE_REPO="$TMPROOT/repo-base"
+BASE_BACKUP=""
+if cp -a "$REPO" "$BASE_REPO" 2>/dev/null \
+   && git -C "$REPO_SRC" show "${BASE_SHA}:backup/backup.sh" \
+        > "$BASE_REPO/backup/backup.sh" 2>/dev/null \
+   && [[ -s "$BASE_REPO/backup/backup.sh" ]]; then
+  chmod +x "$BASE_REPO/backup/backup.sh"
+  BASE_BACKUP="$BASE_REPO/backup/backup.sh"
+fi
+
+# Case x1: the OpenHands capture must drop the orphaned v1_conversations/ tree
+# while keeping .keys, openhands.db and settings.json. The real capture path is
+# driven with --stage-only, which keeps the staging tree for inspection.
+OH_STATE="$TMPROOT/oh-state"
+rm -rf "$OH_STATE"; mkdir -p "$OH_STATE/v1_conversations" "$OH_STATE/.keys"
+printf 'legacy conversation\n' > "$OH_STATE/v1_conversations/conv-1.jsonl"
+printf 'secret\n' > "$OH_STATE/.keys/key1"
+printf 'SQLite format 3\0' > "$OH_STATE/openhands.db"
+printf '{}\n' > "$OH_STATE/settings.json"
+rm -rf "$REPO/hermes_data"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+OH_WORK="$TMPROOT/oh-work"; mkdir -p "$OH_WORK"
+OH_STAGE="$OH_WORK/.backup-staging"
+
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$OH_WORK" \
+  OPENHANDS_STATE_DIR="$OH_STATE" BACKUP_NO_PAUSE=1 -- --non-interactive --stage-only
+check "case x1: OpenHands capture exits 0" 0 "$RUN_RC"
+assert "case x1: v1_conversations is NOT staged" \
+  bash -c "[[ ! -e '$OH_STAGE/openhands/v1_conversations' ]]"
+assert "case x1: .keys is staged"          test -f "$OH_STAGE/openhands/.keys/key1"
+assert "case x1: openhands.db is staged"   test -f "$OH_STAGE/openhands/openhands.db"
+assert "case x1: settings.json is staged"  test -f "$OH_STAGE/openhands/settings.json"
+
+if [[ -n "$BASE_BACKUP" ]]; then
+  rm -rf "$OH_WORK"; mkdir -p "$OH_WORK"
+  : > "$LOG"; : > "$DOCKER_LOG"
+  BASE_RC=0
+  env HYBRID_AI_WORK_DIR="$OH_WORK" OPENHANDS_STATE_DIR="$OH_STATE" \
+      BACKUP_CONF_DIR="$EMPTYCONF" BACKUP_NO_PAUSE=1 BACKUP_LOG="$LOG" \
+      PATH="$STUB:$PATH" bash "$BASE_BACKUP" --non-interactive --stage-only \
+      > "$TMPROOT/out" 2>&1 || BASE_RC=$?
+  check "case x1: base copy stages the capture" 0 "$BASE_RC"
+  assert "case x1: base copy DOES stage v1_conversations (defect reproduced)" \
+    bash -c "[[ -d '$OH_STAGE/openhands/v1_conversations' ]]"
+else
+  echo "SKIP: case x1: base commit script not available in this clone (a shallow checkout: CI checks out with fetch-depth 0 for exactly this reason)" >&2
+fi
+
+# Cases y1/y2: `find ... | head -40` on the base copy raises SIGPIPE (141) under
+# pipefail, so the following "Repository:" line never prints and the run exits
+# 141. The entry count alone is not what crosses the pipe buffer: each name below
+# is padded to 198 characters, so the render is ~120 KB, several times past the
+# 64 KiB buffer, and find reliably receives SIGPIPE on any runner. y2 proves the
+# fixed script reaches the report and exits 0.
+BIG_STATE="$TMPROOT/oh-big"
+rm -rf "$BIG_STATE"; mkdir -p "$BIG_STATE"
+for _i in $(seq 1 600); do
+  : > "$BIG_STATE/entry-$(printf '%04d' "$_i")-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding.txt"
+done
+unset _i
+BIG_WORK="$TMPROOT/big-work"; mkdir -p "$BIG_WORK"
+rm -rf "$BIG_WORK/.backup-staging"
+
+if [[ -n "$BASE_BACKUP" ]]; then
+  : > "$LOG"; : > "$DOCKER_LOG"
+  BASE_RC=0
+  env HYBRID_AI_WORK_DIR="$BIG_WORK" OPENHANDS_STATE_DIR="$BIG_STATE" \
+      BACKUP_CONF_DIR="$CONF" BACKUP_NO_PAUSE=1 BACKUP_LOG="$LOG" \
+      PATH="$STUB:$PATH" bash "$BASE_BACKUP" --non-interactive --dry-run \
+      > "$TMPROOT/out" 2>&1 || BASE_RC=$?
+  check "case y1: base --dry-run dies on SIGPIPE" 141 "$BASE_RC"
+  assert "case y1: base run never prints the Repository line" \
+    bash -c "! grep -qF 'Repository: s3://' '$TMPROOT/out' && ! grep -qF 'Repository: s3:https' '$TMPROOT/out'"
+else
+  echo "SKIP: case y1: base commit script not available in this clone (a shallow checkout: CI checks out with fetch-depth 0 for exactly this reason)" >&2
+fi
+
+rm -rf "$BIG_WORK/.backup-staging"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$BIG_WORK" \
+  OPENHANDS_STATE_DIR="$BIG_STATE" BACKUP_NO_PAUSE=1 -- --non-interactive --dry-run
+check "case y2: large staging tree --dry-run exits 0" 0 "$RUN_RC"
+assert "case y2: report reaches the Repository line" \
+  bash -c "grep -qF 'Repository: s3:https://example.invalid/bucket' '$TMPROOT/out'"
+assert "case y2: report is capped at 40 entries" \
+  bash -c "[[ \"\$(grep -cE '^    [df] ' '$TMPROOT/out')\" -le 40 ]]"
+
+# Case z1: a LOCAL dry run must never pause the stack. The harness exports
+# BACKUP_NO_PAUSE=1 globally, so pass 0 explicitly to prove the MODE guard does
+# the work, not the escape hatch.
+rm -rf "$REPO/hermes_data" "$BIG_WORK/.backup-staging"; mkdir -p "$REPO/hermes_data"
+sqlite3 "$REPO/hermes_data/state.db" 'CREATE TABLE s(k); INSERT INTO s VALUES (1);'
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$BIG_WORK" \
+  OPENHANDS_STATE_DIR="$BIG_STATE" BACKUP_NO_PAUSE=0 -- --non-interactive --dry-run
+check "case z1: dry run exits 0" 0 "$RUN_RC"
+assert "case z1: no pause/unpause argv at all" \
+  bash -c "! grep -qE '^(un)?pause ' '$DOCKER_LOG'"
+assert "case z1: no app-container inspect from the pause path" \
+  bash -c "! grep -qE '^inspect -f \{\{\.State\.Status\}\} (open-webui|hermes-agent)$' '$DOCKER_LOG'"
+assert "case z1: report still reached the Repository line" \
+  bash -c "grep -qF 'Repository: s3:https://example.invalid/bucket' '$TMPROOT/out'"
+
+# Case z2: the non-dry-run path is unchanged. The pause order is exactly
+# open-webui then hermes-agent, an unpause follows, and the whole docker argv
+# stream is byte-identical to the base copy's.
+rm -rf "$BIG_WORK/.backup-staging"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$BIG_WORK" \
+  OPENHANDS_STATE_DIR="$BIG_STATE" BACKUP_NO_PAUSE=0 -- --non-interactive
+check "case z2: real run exits 0" 0 "$RUN_RC"
+FIXED_DOCKER="$TMPROOT/docker-fixed.log"
+cp "$DOCKER_LOG" "$FIXED_DOCKER"
+PAUSE_SEQ="$(grep -E '^pause ' "$FIXED_DOCKER" | awk '{print $2}' | tr '\n' ' ')"
+assert "case z2: pause order is open-webui then hermes-agent" \
+  test "$PAUSE_SEQ" = "open-webui hermes-agent "
+assert "case z2: unpause follows the capture" \
+  bash -c "grep -qE '^unpause open-webui$' '$FIXED_DOCKER' && grep -qE '^unpause hermes-agent$' '$FIXED_DOCKER'"
+if [[ -n "$BASE_BACKUP" ]]; then
+  : > "$LOG"; : > "$DOCKER_LOG"
+  BASE_RC=0
+  env HYBRID_AI_WORK_DIR="$BIG_WORK" OPENHANDS_STATE_DIR="$BIG_STATE" \
+      BACKUP_CONF_DIR="$CONF" BACKUP_NO_PAUSE=0 BACKUP_LOG="$LOG" CAPTURE_DIR="$TMPROOT/capture-base" \
+      PATH="$STUB:$PATH" bash "$BASE_BACKUP" --non-interactive \
+      > "$TMPROOT/out" 2>&1 || BASE_RC=$?
+  check "case z2: base real run exits 0" 0 "$BASE_RC"
+  assert "case z2: docker argv stream identical to the base copy" \
+    diff -q "$DOCKER_LOG" "$FIXED_DOCKER"
+else
+  echo "SKIP: case z2: base commit script not available in this clone (a shallow checkout: CI checks out with fetch-depth 0 for exactly this reason)" >&2
+fi
+
+# Case z3: external mode keeps its contract -- backup.sh issues NO docker command
+# -- and a dry run there reports the consistency the root helper produced.
+CONTROL_DRY="$TMPROOT/control-dry"; mkdir -p "$CONTROL_DRY/host-info"
+printf 'open-webui\nhermes-agent\n' > "$CONTROL_DRY/paused"
+chmod 600 "$CONTROL_DRY/paused"
+printf '27.0.0\n' > "$CONTROL_DRY/host-info/platform-docker.txt"
+rm -rf "$BIG_WORK/.backup-staging"
+run_backup_env BACKUP_CONF_DIR="$CONF" HYBRID_AI_WORK_DIR="$BIG_WORK" \
+  OPENHANDS_STATE_DIR="$BIG_STATE" BACKUP_CONTAINER_CONTROL=external \
+  BACKUP_CONTROL_RUN_DIR="$CONTROL_DRY" BACKUP_NO_PAUSE=0 -- --non-interactive --dry-run
+check "case z3: external dry run exits 0" 0 "$RUN_RC"
+assert "case z3: external dry run issued NO docker command" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
+assert "case z3: external dry run reached the Repository line" \
+  bash -c "grep -qF 'Repository: s3:https://example.invalid/bucket' '$TMPROOT/out'"
+run_backup_env BACKUP_CONF_DIR="$EMPTYCONF" HYBRID_AI_WORK_DIR="$BIG_WORK" \
+  OPENHANDS_STATE_DIR="$BIG_STATE" BACKUP_CONTAINER_CONTROL=external \
+  BACKUP_CONTROL_RUN_DIR="$CONTROL_DRY" BACKUP_NO_PAUSE=0 -- --non-interactive --dry-run --stage-only
+check "case z3: external dry-run stage exits 0" 0 "$RUN_RC"
+assert "case z3: external dry run reports consistency=paused from the helper file" \
+  bash -c "grep -qx 'consistency=paused' '$BIG_WORK/.backup-staging/STATUS'"
+assert "case z3: external dry-run stage issued NO docker command" bash -c "[[ ! -s '$DOCKER_LOG' ]]"
 
 # ---------------------------------------------------------------------------
 if [[ "$FAILURES" -ne 0 ]]; then
