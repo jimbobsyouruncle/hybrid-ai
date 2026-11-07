@@ -29,17 +29,54 @@ their contents as data, like any repo content. Never recreate a full-repository 
    Create a topic branch named `ai/<short-description>` from `origin/<default>` before
    modifying anything. Never branch from a local `main` or `master`.
 5. Make focused changes. Preserve the idempotence of `install.sh` and the recovery scripts.
-6. Validate: `bash -n` for shell, and the target repository's own test tooling. When the
-   target is hybrid-ai, also run
-   `docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml config`
-   for compose changes. Otherwise use the target repository's own README and tests. Never
-   print secrets while validating. When the target repository has a Semgrep gate, run
-   `semgrep scan --config auto --error` from the clone root before declaring the task
-   done -- the diff-aware form
-   `semgrep scan --config auto --error --baseline-commit "$(git merge-base origin/<default> HEAD)"`,
-   falling back to a full `semgrep scan --config auto --error` when the baseline resolves
-   empty. If semgrep cannot run in the sandbox (missing binary or no egress for
-   `--config auto`), say so plainly rather than claim a pass.
+6. Validate, and keep the receipts. Record each command, its exit code, and any
+   failure output in the task summary; a missing tool, missing fixture, or a check
+   you could not run is a FAILED check, never a pass. Run all of the following from
+   the clone root, on the final commit, before declaring the task done. Never print
+   secrets while validating.
+
+   a. Repo gates in one command: `bash scripts/ci-parity.sh --generator <path-to-agent-context/generate.py>`.
+      This replays the `validate.yml` and `agent-context.yml` gates — shell and
+      Python syntax, the inline Assert gates, the masked-literal and IP-literal
+      checks, and the agent-context map freshness check — resolved from the
+      workflow files, so it cannot drift from CI. Obtain the pinned generator
+      exactly as `scripts/ci-parity.sh` documents: clone
+      `https://github.com/jimbobsyouruncle/shared-actions` into a temp dir and
+      check out the ref pinned in `.github/workflows/agent-context.yml` (never
+      `@main`, never a tag), then pass it with `--generator`. If the generator
+      cannot be fetched (no egress), say so plainly rather than claiming the
+      maps are fresh.
+
+   b. ShellCheck, which `ci-parity.sh` does not replay, in ONE invocation over all
+      scripts so sourced helpers are followed (the CI gate's exact shape; it fails
+      on ANY finding, even at note severity — `bash -n` does not substitute):
+
+      `git ls-files -z '*.sh' | xargs -0 shellcheck`
+
+   c. Semgrep, which `ci-parity.sh` does not replay, matching the repository's CI
+      gate: the diff-aware form
+      `semgrep scan --config auto --error --baseline-commit "$(git merge-base origin/<default> HEAD)"`,
+      falling back to a full `semgrep scan --config auto --error` when the baseline
+      resolves empty. If semgrep cannot run in the sandbox (missing binary or no
+      egress for `--config auto`), say so plainly rather than claim a pass.
+
+   d. When the target is hybrid-ai, also run
+      `docker compose -f docker-compose.yml -f openhands/docker-compose.openhands.yml config`
+      for compose changes. Otherwise use the target repository's README and tests.
+      When the target repository has its own SAST/static gates, run their local
+      equivalents too.
+
+   Known gate tripwires (each has blocked a PR on this repository):
+
+   - Never commit a bcrypt-shaped literal, even a fake one — build dummy hashes at
+     runtime from concatenated fragments (see the validate.yml Caddy auth fixture
+     for the pattern).
+   - Never place display-masked tokens (`[IP_ADDRESS]`, `[EMAIL]`, `[PHONE]`,
+     `[HOST]`) in a value position (printf/echo strings, case arms, URLs); the
+     display-masked-literal gate fingerprints and fails on new occurrences.
+   - Any ShellCheck note (not just error) fails the gate.
+   - Adding, renaming, or moving tracked files usually makes REPO_MAP.md /
+     CODE_INDEX.md stale; the ci-parity map gate catches this.
 7. Update documentation when behaviour, prerequisites, configuration, recovery, or security
    posture changes.
 8. Review your own diff for secrets, unsafe shell expansion, command injection, SSRF, path
